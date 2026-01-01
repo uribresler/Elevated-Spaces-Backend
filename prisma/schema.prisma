@@ -1,0 +1,241 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// =========================
+// User, Roles, Auth
+// =========================
+model user {
+  id                   String                @id @default(uuid()) @map("id")
+  email                String                @unique @map("email")
+  password_hash        String                @map("password_hash")
+  name                 String?               @map("name")
+  role                 role                  @default(USER) @map("role")
+  created_at           DateTime              @default(now()) @map("created_at")
+  updated_at           DateTime              @updatedAt @map("updated_at")
+  photographer_profile photographer_profile?
+  images               image[]
+  payments             payment[]
+  credits              credit[]
+  bookings             booking[]             @relation("UserBookings")
+  analytics_events     analytics_event[]
+  guest_tracking       guest_tracking[]
+  stripe_customer_id   String?               @map("stripe_customer_id")
+  deleted_at           DateTime?             @map("deleted_at")
+
+  @@map("user")
+}
+
+enum role {
+  USER
+  PHOTOGRAPHER
+  ADMIN
+
+  @@map("role")
+}
+
+// =========================
+// Photographer Profile
+// =========================
+model photographer_profile {
+  id                          String    @id @default(uuid()) @map("id")
+  user                        user      @relation(fields: [user_id], references: [id])
+  user_id                     String    @unique @map("user_id")
+  bio                         String?   @map("bio")
+  documents_url               String?   @map("documents_url")
+  approved                    Boolean   @default(false) @map("approved")
+  availability                String?   @map("availability")
+  stripe_connected_account_id String?   @map("stripe_connected_account_id")
+  created_at                  DateTime  @default(now()) @map("created_at")
+  updated_at                  DateTime  @updatedAt @map("updated_at")
+  bookings                    booking[] @relation("PhotographerBookings")
+
+  @@map("photographer_profile")
+}
+
+// =========================
+// Guest Tracking (Demo)
+// =========================
+model guest_tracking {
+  id            String   @id @default(uuid()) @map("id")
+  ip            String   @map("ip")
+  fingerprint   String   @map("fingerprint")
+  uploads_count Int      @default(0) @map("uploads_count")
+  blocked       Boolean  @default(false) @map("blocked")
+  last_used_at  DateTime @default(now()) @map("last_used_at")
+  images        image[]
+  user          user?    @relation(fields: [userId], references: [id])
+  userId        String?
+
+  @@map("guest_tracking")
+}
+
+// =========================
+// Images (AI Staging)
+// =========================
+model image {
+  id                      String            @id @default(uuid()) @map("id")
+  user                    user?             @relation(fields: [user_id], references: [id])
+  user_id                 String?           @map("user_id")
+  guest_tracking          guest_tracking?   @relation(fields: [guest_id], references: [id])
+  guest_id                String?           @map("guest_id")
+  original_image_url      String            @map("original_image_url")
+  staged_image_url        String?           @map("staged_image_url")
+  watermarked_preview_url String?           @map("watermarked_preview_url")
+  status                  image_status      @default(PROCESSING) @map("status")
+  is_demo                 Boolean           @default(false) @map("is_demo")
+  mls_label_enabled       Boolean           @default(false) @map("mls_label_enabled")
+  room_type               String?           @map("room_type")
+  staging_style           String?           @map("staging_style")
+  prompt                  String?           @map("prompt")
+  credits_used            Int               @default(0) @map("credits_used")
+  revisions               Int               @default(0) @map("revisions")
+  max_revisions           Int               @default(3) @map("max_revisions")
+  created_at              DateTime          @default(now()) @map("created_at")
+  updated_at              DateTime          @updatedAt @map("updated_at")
+  analytics_events        analytics_event[]
+  source                  String?           @default("demo") @map("source")
+
+  @@map("image")
+}
+
+enum image_status {
+  PROCESSING
+  COMPLETED
+  FAILED
+
+  @@map("image_status")
+}
+
+// =========================
+// Credits & Packages
+// =========================
+model credit {
+  id         String          @id @default(uuid()) @map("id")
+  user       user            @relation(fields: [user_id], references: [id])
+  user_id    String          @map("user_id")
+  total      Int             @map("total")
+  used       Int             @default(0) @map("used")
+  available  Int             @default(0) @map("available")
+  package    credit_package? @relation(fields: [package_id], references: [id])
+  package_id String?         @map("package_id")
+  created_at DateTime        @default(now()) @map("created_at")
+  updated_at DateTime        @updatedAt @map("updated_at")
+
+  @@map("credit")
+}
+
+model credit_package {
+  id               String   @id @default(uuid()) @map("id")
+  name             String   @map("name")
+  credits          Int      @map("credits")
+  price            Float    @map("price")
+  currency         String   @default("usd") @map("currency")
+  active           Boolean  @default(true) @map("active")
+  created_at       DateTime @default(now()) @map("created_at")
+  updated_at       DateTime @updatedAt @map("updated_at")
+  credit_purchases credit[]
+
+  @@map("credit_package")
+}
+
+// =========================
+// Payments & Transactions
+// =========================
+model payment {
+  id                String         @id @default(uuid()) @map("id")
+  user              user           @relation(fields: [user_id], references: [id])
+  user_id           String         @map("user_id")
+  amount            Float          @map("amount")
+  currency          String         @default("usd") @map("currency")
+  status            payment_status @default(PENDING) @map("status")
+  stripe_session_id String?        @map("stripe_session_id")
+  created_at        DateTime       @default(now()) @map("created_at")
+  booking           booking?
+
+  @@map("payment")
+}
+
+enum payment_status {
+  PENDING
+  PAID
+  FAILED
+
+  @@map("payment_status")
+}
+
+// =========================
+// Bookings (Marketplace)
+// =========================
+model booking {
+  id               String               @id @default(uuid()) @map("id")
+  user             user                 @relation("UserBookings", fields: [user_id], references: [id])
+  user_id          String               @map("user_id")
+  photographer     photographer_profile @relation("PhotographerBookings", fields: [photographer_id], references: [id])
+  photographer_id  String               @map("photographer_id")
+  date             DateTime             @map("date")
+  status           booking_status       @default(PENDING) @map("status")
+  payment          payment?             @relation(fields: [payment_id], references: [id])
+  payment_id       String?              @unique @map("payment_id")
+  payment_status   payment_status       @default(PENDING) @map("payment_status")
+  transaction_id   String?              @map("transaction_id")
+  created_at       DateTime             @default(now()) @map("created_at")
+  updated_at       DateTime             @updatedAt @map("updated_at")
+  analytics_events analytics_event[]
+
+  @@map("booking")
+}
+
+enum booking_status {
+  PENDING
+  CONFIRMED
+  CANCELLED
+
+  @@map("booking_status")
+}
+
+// =========================
+// Analytics Events
+// =========================
+model analytics_event {
+  id          String   @id @default(uuid()) @map("id")
+  user        user?    @relation(fields: [user_id], references: [id])
+  user_id     String?  @map("user_id")
+  image       image?   @relation(fields: [image_id], references: [id])
+  image_id    String?  @map("image_id")
+  booking     booking? @relation(fields: [booking_id], references: [id])
+  booking_id  String?  @map("booking_id")
+  event_type  String   @map("event_type")
+  ip          String?  @map("ip")
+  device_type String?  @map("device_type")
+  location    String?  @map("location")
+  language    String?  @map("language")
+  source      String?  @map("source")
+  timestamp   DateTime @default(now()) @map("timestamp")
+
+  @@map("analytics_event")
+}
+
+// =========================
+// Admin Content (Legal, About, etc.)
+// =========================
+model admin_content {
+  id         String   @id @default(uuid()) @map("id")
+  page       String   @unique @map("page")
+  content    String   @map("content")
+  updated_at DateTime @updatedAt @map("updated_at")
+  created_at DateTime @default(now()) @map("created_at")
+
+  @@map("admin_content")
+}
