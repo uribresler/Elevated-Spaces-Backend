@@ -1,13 +1,14 @@
-
-import app from './src/app';
-import prisma from './src/dbConnection';
-import { supabaseStorage } from './src/services/supabaseStorage.service';
+import dotenv from 'dotenv'
+import app from './app';
+import prisma from './dbConnection';
+import { supabaseStorage } from './services/supabaseStorage.service';
+dotenv.config();
 
 const PORT = process.env.PORT || 3003;
 
 app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
-  
+
   // Initialize Supabase bucket
   try {
     await supabaseStorage.initBucket();
@@ -15,7 +16,7 @@ app.listen(PORT, async () => {
   } catch (err) {
     console.error('Failed to initialize Supabase Storage:', err);
   }
-  
+
   // Test DB connection
   prisma.$connect()
     .then(() => console.log('Connected to PostgreSQL database'))

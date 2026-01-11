@@ -1,0 +1,21 @@
+"use strict";
+// Staging prompts for each style
+// Default prompt and specialized prompts for each style
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.STAGING_STYLE_PROMPTS = exports.DEFAULT_STAGING_PROMPT = void 0;
+const DEFAULT_STAGING_PROMPT = (roomType, stagingStyle) => `Virtually stage this ${roomType} in ${stagingStyle} style. Add furniture, lighting, and decor. The ceiling light, layout, architecture, and all fixed features must remain exactly the same as the original image. Make it look inviting and professional for a real estate listing.`;
+exports.DEFAULT_STAGING_PROMPT = DEFAULT_STAGING_PROMPT;
+exports.STAGING_STYLE_PROMPTS = {
+    modern: (roomType) => `Virtually stage this ${roomType} in modern style. Use clean lines, neutral colors, and minimal clutter. The ceiling light, layout, architecture, and all fixed features must remain exactly the same as the original image. Add contemporary furniture and subtle decor for a sleek, inviting look.`,
+    contemporary: (roomType) => `Virtually stage this ${roomType} in contemporary style. Use current trends, open spaces, and a mix of textures. The ceiling light, layout, architecture, and all fixed features must remain exactly the same as the original image. Add stylish furniture and modern art.`,
+    minimalist: (roomType) => `Virtually stage this ${roomType} in minimalist style. Use simple, functional furniture, neutral palette, and minimal decor. The ceiling light, layout, architecture, and all fixed features must remain exactly the same as the original image. Emphasize open space and calmness.`,
+    scandinavian: (roomType) => `Virtually stage this ${roomType} in Scandinavian style. Use light woods, white walls, cozy textiles, and functional furniture. The ceiling light, layout, architecture, and all fixed features must remain exactly the same as the original image. Add warmth and simplicity.`,
+    industrial: (roomType) => `Virtually stage this ${roomType} in industrial style. Use exposed materials, metal fixtures, and urban decor. The ceiling light, layout, architecture, and all fixed features must remain exactly the same as the original image. Add loft-inspired furniture and accents.`,
+    traditional: (roomType) => `Virtually stage this ${roomType} in traditional style. Use classic furniture, rich colors, and elegant decor. The ceiling light, layout, architecture, and all fixed features must remain exactly the same as the original image. Add timeless appeal and comfort.`,
+    transitional: (roomType) => `Virtually stage this ${roomType} in transitional style. Blend traditional and modern elements. The ceiling light, layout, architecture, and all fixed features must remain exactly the same as the original image. Use a balanced mix of classic and contemporary furniture.`,
+    farmhouse: (roomType) => `Virtually stage this ${roomType} in farmhouse style. Use rustic wood, cozy fabrics, and vintage accents. The ceiling light, layout, architecture, and all fixed features must remain exactly the same as the original image. Add warmth and charm.`,
+    coastal: (roomType) => `Virtually stage this ${roomType} in coastal style. Use light colors, natural textures, and breezy decor. The ceiling light, layout, architecture, and all fixed features must remain exactly the same as the original image. Add a relaxed, beach-inspired feel.`,
+    bohemian: (roomType) => `Virtually stage this ${roomType} in bohemian style. Use eclectic furniture, vibrant colors, and layered textiles. The ceiling light, layout, architecture, and all fixed features must remain exactly the same as the original image. Add artistic and free-spirited decor.`,
+    "mid-century": (roomType) => `Virtually stage this ${roomType} in mid-century style. Use retro furniture, bold patterns, and warm woods. The ceiling light, layout, architecture, and all fixed features must remain exactly the same as the original image. Add vintage flair and simplicity.`,
+    luxury: (roomType) => `Virtually stage this ${roomType} in luxury style. Use high-end furniture, elegant finishes, and sophisticated decor. The ceiling light, layout, architecture, and all fixed features must remain exactly the same as the original image. Add opulence and comfort.`,
+};
