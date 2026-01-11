@@ -6,11 +6,12 @@
   "directories": {
     "doc": "docs"
   },
-"scripts": {
-  "build": "prisma generate && tsc",
-  "start": "node dist/server.js",
-  "dev": "nodemon --watch src --ext ts,js,json --exec ts-node src/server.ts"
-},
+  "scripts": {
+    "build": "prisma generate && tsc",
+    "postinstall": "prisma generate",
+    "start": "node dist/server.js",
+    "dev": "nodemon --watch src --ext ts,js,json --exec ts-node src/server.ts",
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/uribresler/elevate-spaces.git"
