@@ -76,7 +76,7 @@ export async function oauthCallback(req: Request, res: Response) {
     params.append("avatarUrl", authResult.user.avatarUrl);
   }
 
-  return res.redirect(`${FRONTEND_URL}/auth/callback?${params.toString()}`);
+  return res.redirect(`${FRONTEND_URL}/?${params.toString()}`);
 }
 
 
