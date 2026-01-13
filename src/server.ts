@@ -6,6 +6,14 @@ dotenv.config();
 
 const PORT = process.env.PORT || 3003;
 
+// 🔥 ROOT ROUTE (Render-safe)
+app.get("/", (_req, res) => {
+  res.status(200).json({
+    success: true,
+    message: "Elevated Spaces Backend is running 🚀",
+  });
+});
+
 app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
 
