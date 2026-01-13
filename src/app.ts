@@ -20,11 +20,17 @@ app.use(express.json());
 // Initialize Passport
 app.use(passport.initialize());
 
+// Root health (MUST be before api routes)
+app.get("/", (_req, res) => {
+    res.status(200).json({
+        success: true,
+        message: "Elevated Spaces Backend is running 🚀",
+        status: "healthy",
+    });
+});
+
 // Serve uploaded images as static files
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
-app.get("/", (_req, res) => {
-    res.redirect("/api/health");
-});
 app.use('/api', healthRoute);
 app.use('/api/auth', authRoute);
 app.use('/api/images', imageRoute);
