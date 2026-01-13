@@ -2,6 +2,7 @@ import prisma from "../dbConnection";
 import jwt from "jsonwebtoken";
 import { OAuthUserProfile, OAuthProvider, providerIdFields, providerEnumValues } from "../config/oauth.config";
 import { logger } from "../utils/logger";
+import { role } from "@prisma/client";
 
 const JWT_SECRET = process.env.JWT_SECRET || "changeme";
 
@@ -20,7 +21,7 @@ class OAuthService {
       id: string;
       email: string;
       name: string | null;
-      role: string;
+      role: role;
       avatarUrl: string | null;
       authProvider: string;
     };

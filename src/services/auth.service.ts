@@ -2,11 +2,8 @@ import prisma from "../dbConnection";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 
-const JWT_SECRET = process.env.JWT_SECRET || "changeme";
+const JWT_SECRET = process.env.JWT_SECRET!
 
-/**
- * Email/Password Signup Service
- */
 export async function signupService({
   email,
   password,
@@ -34,9 +31,6 @@ export async function signupService({
   };
 }
 
-/**
- * Email/Password Login Service
- */
 export async function loginService({ email, password }: { email: string; password: string }) {
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user) {
@@ -69,9 +63,7 @@ export async function loginService({ email, password }: { email: string; passwor
   const token = jwt.sign({ userId: user.id, role: user.role }, JWT_SECRET, { expiresIn: "7d" });
   return {
     token,
-    user: { id: user.id, email: user.email, name: user.name, role: user.role },
+    user,
     success: true,
   };
 }
-
-// Note: OAuth authentication is now handled by oauth.service.ts

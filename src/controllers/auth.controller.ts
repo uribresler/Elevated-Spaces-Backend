@@ -4,6 +4,8 @@ import { loginSchema, signupSchema } from "../utils/authSchemas";
 import { loginService, signupService } from "../services/auth.service";
 import { oauthService } from "../services/oauth.service";
 import { logger } from "../utils/logger";
+import { OAuthResult } from "../types/auth";
+import jwt from 'jsonwebtoken'
 
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
@@ -52,60 +54,32 @@ export async function login(req: Request, res: Response) {
   }
 }
 
-// OAUTH - Unified callback for all providers
-interface OAuthResult {
-  token: string;
-  user: {
-    id: string;
-    email: string;
-    name: string | null;
-    role: string;
-    avatarUrl: string | null;
-    authProvider: string;
-  };
-  success: boolean;
-  isNewUser: boolean;
-}
-
-/**
- * Unified OAuth callback handler for all providers
- * Works with Google, Facebook, and Apple
- */
 export async function oauthCallback(req: Request, res: Response) {
-  try {
-    const authResult = req.user as OAuthResult | undefined;
+  const user = req.user as Express.User & { _oauth?: OAuthResult };
+  const authResult = user._oauth;
 
-    if (!authResult || !authResult.token) {
-      logger("OAuth callback: No auth result received");
-      return res.redirect(`${FRONTEND_URL}/auth/callback?error=auth_failed`);
-    }
-
-    // Build redirect URL with user data
-    const params = new URLSearchParams({
-      token: authResult.token,
-      userId: authResult.user.id,
-      email: authResult.user.email,
-      name: authResult.user.name || "",
-      provider: authResult.user.authProvider.toLowerCase(),
-      isNewUser: authResult.isNewUser ? "true" : "false",
-    });
-
-    // Include avatar if available
-    if (authResult.user.avatarUrl) {
-      params.append("avatarUrl", authResult.user.avatarUrl);
-    }
-
-    logger(`OAuth success: provider=${authResult.user.authProvider}, userId=${authResult.user.id}`);
-    return res.redirect(`${FRONTEND_URL}/auth/callback?${params.toString()}`);
-  } catch (error) {
-    logger(`OAuth callback error: ${error}`);
-    return res.redirect(`${FRONTEND_URL}/auth/callback?error=server_error`);
+  if (!authResult) {
+    return res.redirect(`${FRONTEND_URL}/auth/callback?error=auth_failed`);
   }
+
+  // Now you have everything: token, isNewUser, avatarUrl, etc.
+  const params = new URLSearchParams({
+    token: authResult.token,
+    userId: authResult.user.id,
+    email: authResult.user.email,
+    name: authResult.user.name || "",
+    provider: authResult.user.authProvider.toLowerCase(),
+    isNewUser: authResult.isNewUser ? "true" : "false",
+  });
+
+  if (authResult.user.avatarUrl) {
+    params.append("avatarUrl", authResult.user.avatarUrl);
+  }
+
+  return res.redirect(`${FRONTEND_URL}/auth/callback?${params.toString()}`);
 }
 
-/**
- * Unified OAuth failure handler
- */
+
 export async function oauthFailure(req: Request, res: Response) {
   const provider = req.query.provider || "unknown";
   logger(`OAuth failure: provider=${provider}`);
@@ -127,10 +101,6 @@ export async function oauthFailure(req: Request, res: Response) {
   return res.redirect(`${FRONTEND_URL}/auth/callback?error=auth_failed&provider=${provider}`);
 }
 
-/**
- * Get available OAuth providers
- * Frontend can use this to show/hide social login buttons
- */
 export async function getAvailableProviders(req: Request, res: Response) {
   const providers = oauthService.getProvidersStatus();
   return res.json({

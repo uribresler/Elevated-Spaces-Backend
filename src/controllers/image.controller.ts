@@ -11,6 +11,10 @@ import {
   VALID_STAGING_STYLES,
   parseStorageError,
 } from "../utils/imageErrors";
+import { imageQueue } from "../queues/image.queue";
+import prisma from "../dbConnection";
+import { image_status } from "@prisma/client";
+import { AuthUser } from "../types/auth";
 
 /**
  * Get recent uploads from Supabase Storage
@@ -50,9 +54,6 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
   let stagedImagePath: string | null = null;
 
   try {
-    // ============================================
-    // VALIDATION: Check if file was uploaded
-    // ============================================
     if (!req.file) {
       res.status(400).json({
         success: false,
@@ -149,7 +150,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
       logger("AI processing complete. Uploading to storage...");
     } catch (aiError) {
       logger(`AI staging failed: ${aiError instanceof Error ? aiError.message : aiError}`);
-      
+
       if (aiError instanceof ImageProcessingError) {
         res.status(aiError.statusCode).json(aiError.toJSON());
       } else {
@@ -265,9 +266,6 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
   }
 }
 
-/**
- * Analyze an image to get room details and suggestions
- */
 export async function analyzeImage(req: Request, res: Response): Promise<void> {
   try {
     if (!req.file) {
@@ -325,4 +323,64 @@ export async function analyzeImage(req: Request, res: Response): Promise<void> {
       },
     });
   }
+}
+
+export async function generateMultipleImages(
+  req: Request,
+  res: Response
+): Promise<void> {
+  if (!req.files || !Array.isArray(req.files)) {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: ImageErrorCode.NO_FILE_PROVIDED,
+        message: ErrorMessages[ImageErrorCode.NO_FILE_PROVIDED],
+      },
+    });
+    return;
+  }
+
+  if (!req.user) {
+    res.status(401).json({ success: false, message: "Unauthorized" });
+    return;
+  }
+
+const userId = req.user.id;
+  const { roomType, stagingStyle, prompt } = req.body;
+
+  const files = req.files as Express.Multer.File[];
+
+  // 1️⃣ Create DB records
+  const images = await prisma.$transaction(
+    files.map((file) =>
+      prisma.image.create({
+        data: {
+          user_id: userId,
+          original_image_url: file.path,
+          status: image_status.PROCESSING,
+        },
+      })
+    )
+  );
+
+  // 2️⃣ Push jobs to queue
+  images.forEach((image) => {
+    imageQueue.add({
+      imageId: image.id,
+      originalPath: image.original_image_url,
+      roomType,
+      stagingStyle,
+      customPrompt: prompt,
+    });
+  });
+
+  // 3️⃣ Respond immediately
+  res.status(202).json({
+    success: true,
+    message: "Images uploaded successfully. Staging started.",
+    data: {
+      total: images.length,
+      imageIds: images.map((img) => img.id),
+    },
+  });
 }

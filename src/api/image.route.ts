@@ -1,6 +1,7 @@
 import { Router } from "express";
-import { generateImage, getRecentUploads, analyzeImage } from "../controllers/image.controller";
-import { uploadImage } from "../middlewares/uploadImage";
+import { generateImage, getRecentUploads, analyzeImage, generateMultipleImages } from "../controllers/image.controller";
+import { uploadImage, uploadImages } from "../middlewares/uploadImage";
+import { requireAuth } from "../middlewares/auth";
 
 const router = Router();
 
@@ -12,5 +13,7 @@ router.post("/generate", uploadImage, generateImage);
 
 // Analyze an image to get room type and suggestions
 router.post("/analyze", uploadImage, analyzeImage);
+
+router.post("/multiple-generate", requireAuth ,uploadImages(30), generateMultipleImages);
 
 export default router;
