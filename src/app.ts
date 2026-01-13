@@ -22,7 +22,9 @@ app.use(passport.initialize());
 
 // Serve uploaded images as static files
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
-
+app.get("/", (_req, res) => {
+    res.redirect("/api/health");
+});
 app.use('/api', healthRoute);
 app.use('/api/auth', authRoute);
 app.use('/api/images', imageRoute);
