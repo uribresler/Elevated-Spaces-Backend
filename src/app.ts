@@ -1,26 +1,59 @@
-// Phase: 1 (AI Virtual Staging MVP)
-// This file is part of the Phase 1 deliverables.
-
 import express from "express";
 import * as path from "path";
 import passport from "./config/passport";
-import healthRoute from './api/health.route';
-import authRoute from './api/auth.route';
-import imageRoute from './api/image.route';
-
-import { errorHandler } from './middlewares/errorHandler';
-import { zodErrorHandler } from './middlewares/zodErrorHandler';
-import cors from 'cors'
+import healthRoute from "./api/health.route";
+import authRoute from "./api/auth.route";
+import imageRoute from "./api/image.route";
+import { errorHandler } from "./middlewares/errorHandler";
+import { zodErrorHandler } from "./middlewares/zodErrorHandler";
+import cors from "cors";
 
 const app = express();
 
-app.use(cors({ origin: "*"}));
+/* =======================
+   CORS CONFIG (FIXED)
+======================= */
+
+const allowedOrigins = [
+    "http://localhost:3000",
+    "https://elevate-spaces.vercel.app",
+];
+
+app.use(
+    cors({
+        origin: (origin, callback) => {
+            // allow server-to-server & Postman
+            if (!origin) return callback(null, true);
+
+            if (allowedOrigins.includes(origin)) {
+                return callback(null, true);
+            }
+
+            return callback(new Error("Not allowed by CORS"));
+        },
+        credentials: true,
+        methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allowedHeaders: ["Content-Type", "Authorization"],
+    })
+);
+
+// 🔥 REQUIRED FOR PREFLIGHT
+app.options("*", cors());
+
+/* =======================
+   MIDDLEWARES
+======================= */
+
 app.use(express.json());
 
 // Initialize Passport
 app.use(passport.initialize());
 
-// Root health (MUST be before api routes)
+/* =======================
+   ROUTES
+======================= */
+
+// Root health
 app.get("/", (_req, res) => {
     res.status(200).json({
         success: true,
@@ -29,17 +62,18 @@ app.get("/", (_req, res) => {
     });
 });
 
-// Serve uploaded images as static files
-app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
-app.use('/api', healthRoute);
-app.use('/api/auth', authRoute);
-app.use('/api/images', imageRoute);
+// Static uploads
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
-// Zod error handler middleware (after routes, before generic error handler)
+app.use("/api", healthRoute);
+app.use("/api/auth", authRoute);
+app.use("/api/images", imageRoute);
+
+/* =======================
+   ERROR HANDLERS
+======================= */
+
 app.use(zodErrorHandler);
-
-
-// Error handler middleware (should be last)
 app.use(errorHandler);
 
 export default app;
