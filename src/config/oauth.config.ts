@@ -36,7 +36,7 @@ export function getOAuthConfig(provider: OAuthProvider): OAuthConfig | null {
         clientID,
         clientSecret,
         // callbackURL: process.env.GOOGLE_CALLBACK_URL || `${baseUrl}/api/auth/google/callback`,
-        callbackURL: `${baseUrl}/api/auth/google/callback`,
+        callbackURL: `${baseUrl}/auth/google/callback`,
         scope: ['profile', 'email'],
       };
     },
@@ -48,7 +48,7 @@ export function getOAuthConfig(provider: OAuthProvider): OAuthConfig | null {
       return {
         clientID,
         clientSecret,
-        callbackURL: process.env.FACEBOOK_CALLBACK_URL || `${baseUrl}/api/auth/facebook/callback`,
+        callbackURL: process.env.FACEBOOK_CALLBACK_URL || `${baseUrl}/auth/facebook/callback`,
         scope: ['email', 'public_profile'],
       };
     },
