@@ -25,7 +25,7 @@ export interface OAuthConfig {
  * Returns null if credentials are not configured
  */
 export function getOAuthConfig(provider: OAuthProvider): OAuthConfig | null {
-  const baseUrl = process.env.BASE_URL || 'https://elevate-spaces.vercel.app';
+  const baseUrl = 'https://elevate-spaces.vercel.app';
 
   const configs: Record<OAuthProvider, () => OAuthConfig | null> = {
     google: () => {
