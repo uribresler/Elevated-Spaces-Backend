@@ -38,7 +38,8 @@ app.use(
 );
 
 // 🔥 REQUIRED FOR PREFLIGHT
-app.options("*", cors());
+// app.options("*", cors());
+app.use(cors())
 
 /* =======================
    MIDDLEWARES
