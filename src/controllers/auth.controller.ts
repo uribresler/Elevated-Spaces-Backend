@@ -7,7 +7,7 @@ import { logger } from "../utils/logger";
 import { OAuthResult } from "../types/auth";
 import jwt from 'jsonwebtoken'
 
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://elevate-spaces.vercel.app";
+const FRONTEND_URL = process.env.FRONTEND_URL || "https://elevate-spaces.vercel.app/auth/google/callback";
 
 // EMAIL/PASSWORD AUTH
 export async function signup(req: Request, res: Response) {
