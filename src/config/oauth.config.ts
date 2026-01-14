@@ -35,7 +35,8 @@ export function getOAuthConfig(provider: OAuthProvider): OAuthConfig | null {
       return {
         clientID,
         clientSecret,
-        callbackURL: process.env.GOOGLE_CALLBACK_URL || `${baseUrl}/api/auth/google/callback`,
+        // callbackURL: process.env.GOOGLE_CALLBACK_URL || `${baseUrl}/api/auth/google/callback`,
+        callbackURL: `${baseUrl}/api/auth/google/callback`,
         scope: ['profile', 'email'],
       };
     },
