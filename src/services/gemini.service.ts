@@ -1,4 +1,4 @@
-import { GoogleGenAI, ThinkingLevel } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import * as fs from "fs";
 import * as path from "path";
 import { logger } from "../utils/logger";
@@ -121,7 +121,6 @@ class GeminiService {
         config: {
           responseModalities: ["IMAGE"],
           temperature: 1.0,
-          thinkingConfig: ThinkingLevel.MINIMAL
         },
       });
 
