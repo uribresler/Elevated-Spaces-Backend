@@ -14,10 +14,17 @@ const app = express();
    CORS CONFIG (FIXED)
 ======================= */
 
-const allowedOrigins = [
-    "http://localhost:3000",
-    "https://elevate-spaces.vercel.app",
-];
+// CORS allowed origins - prioritize env var, include localhost for development
+// CORS_ORIGINS should be a comma-separated list: "http://localhost:3000,https://your-frontend.com"
+const corsOriginsEnv = process.env.CORS_ORIGINS;
+const allowedOrigins = corsOriginsEnv 
+    ? corsOriginsEnv.split(',').map(origin => origin.trim())
+    : ["http://localhost:3000"]; // Default to localhost only if not set
+
+// Always include localhost for development
+if (!allowedOrigins.includes("http://localhost:3000")) {
+    allowedOrigins.push("http://localhost:3000");
+}
 
 app.use(
     cors({

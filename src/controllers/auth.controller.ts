@@ -7,7 +7,13 @@ import { logger } from "../utils/logger";
 import { OAuthResult } from "../types/auth";
 import jwt from 'jsonwebtoken'
 
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://elevate-spaces.vercel.app/auth/google/callback";
+// FRONTEND_URL - prioritize env var (REQUIRED in production), default to localhost for development
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+
+// Warn if FRONTEND_URL is not set in production
+if (process.env.NODE_ENV === 'production' && !process.env.FRONTEND_URL) {
+  console.warn('⚠️  WARNING: FRONTEND_URL environment variable is not set in production!');
+}
 
 // EMAIL/PASSWORD AUTH
 export async function signup(req: Request, res: Response) {
@@ -55,28 +61,47 @@ export async function login(req: Request, res: Response) {
 }
 
 export async function oauthCallback(req: Request, res: Response) {
-  const user = req.user as Express.User & { _oauth?: OAuthResult };
-  const authResult = user._oauth;
+  try {
+    if (!req.user) {
+      logger("OAuth callback: req.user is missing");
+      return res.redirect(`${FRONTEND_URL}/auth/callback?error=auth_failed`);
+    }
 
-  if (!authResult) {
-    return res.redirect(`${FRONTEND_URL}/auth/callback?error=auth_failed`);
+    const user = req.user as Express.User & { _oauth?: OAuthResult };
+    const authResult = (user as any)._oauth;
+
+    if (!authResult) {
+      logger(`OAuth callback: _oauth property missing. User object: ${JSON.stringify(user)}`);
+      return res.redirect(`${FRONTEND_URL}/auth/callback?error=auth_failed`);
+    }
+
+    if (!authResult.token || !authResult.user) {
+      logger(`OAuth callback: Invalid auth result structure: ${JSON.stringify(authResult)}`);
+      return res.redirect(`${FRONTEND_URL}/auth/callback?error=auth_failed`);
+    }
+
+    logger(`OAuth callback success: userId=${authResult.user.id}, email=${authResult.user.email}, isNewUser=${authResult.isNewUser}`);
+
+    // Now you have everything: token, isNewUser, avatarUrl, etc.
+    const params = new URLSearchParams({
+      token: authResult.token,
+      userId: authResult.user.id,
+      email: authResult.user.email,
+      name: authResult.user.name || "",
+      provider: authResult.user.authProvider.toLowerCase(),
+      isNewUser: authResult.isNewUser ? "true" : "false",
+    });
+
+    if (authResult.user.avatarUrl) {
+      params.append("avatarUrl", authResult.user.avatarUrl);
+    }
+
+    // Redirect to frontend callback page with token and user data
+    return res.redirect(`${FRONTEND_URL}/auth/google/callback?${params.toString()}`);
+  } catch (error) {
+    logger(`OAuth callback error: ${error instanceof Error ? error.message : String(error)}`);
+    return res.redirect(`${FRONTEND_URL}/auth/callback?error=server_error`);
   }
-
-  // Now you have everything: token, isNewUser, avatarUrl, etc.
-  const params = new URLSearchParams({
-    token: authResult.token,
-    userId: authResult.user.id,
-    email: authResult.user.email,
-    name: authResult.user.name || "",
-    provider: authResult.user.authProvider.toLowerCase(),
-    isNewUser: authResult.isNewUser ? "true" : "false",
-  });
-
-  if (authResult.user.avatarUrl) {
-    params.append("avatarUrl", authResult.user.avatarUrl);
-  }
-
-  return res.redirect(`${FRONTEND_URL}/?${params.toString()}`);
 }
 
 

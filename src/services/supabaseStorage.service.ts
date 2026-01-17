@@ -80,7 +80,8 @@ class SupabaseStorageService {
       await this.ensureBucketExists();
 
       const fileName = path.basename(localFilePath);
-      const fileBuffer = fs.readFileSync(localFilePath);
+      // Use async file read for better performance
+      const fileBuffer = await fs.promises.readFile(localFilePath);
       const mimeType = this.getMimeType(localFilePath);
 
       const storagePath = `original/${fileName}`;
@@ -124,23 +125,23 @@ class SupabaseStorageService {
   }
 
   /**
-   * Upload staged image to Supabase Storage
+   * Upload staged image to Supabase Storage from Buffer (optimized - no disk I/O)
    * @throws ImageProcessingError if upload fails
    */
-  async uploadStaged(localFilePath: string): Promise<string> {
+  async uploadStagedFromBuffer(
+    imageBuffer: Buffer,
+    fileName: string,
+    mimeType: string = "image/png"
+  ): Promise<string> {
     try {
       // Ensure bucket exists before uploading
       await this.ensureBucketExists();
-
-      const fileName = path.basename(localFilePath);
-      const fileBuffer = fs.readFileSync(localFilePath);
-      const mimeType = this.getMimeType(localFilePath);
 
       const storagePath = `staged/${fileName}`;
 
       const { data, error } = await this.client.storage
         .from(this.bucketName)
-        .upload(storagePath, fileBuffer, {
+        .upload(storagePath, imageBuffer, {
           contentType: mimeType,
           upsert: true,
         });
@@ -177,6 +178,32 @@ class SupabaseStorageService {
   }
 
   /**
+   * Upload staged image to Supabase Storage from file path (legacy method)
+   * @throws ImageProcessingError if upload fails
+   */
+  async uploadStaged(localFilePath: string): Promise<string> {
+    try {
+      // Use async file read
+      const fileBuffer = await fs.promises.readFile(localFilePath);
+      const fileName = path.basename(localFilePath);
+      const mimeType = this.getMimeType(localFilePath);
+      
+      return await this.uploadStagedFromBuffer(fileBuffer, fileName, mimeType);
+    } catch (error) {
+      logger(`Error uploading staged image: ${error}`);
+      if (error instanceof ImageProcessingError) {
+        throw error;
+      }
+      throw new ImageProcessingError(
+        ImageErrorCode.STORAGE_UPLOAD_FAILED,
+        ErrorMessages[ImageErrorCode.STORAGE_UPLOAD_FAILED],
+        500,
+        error instanceof Error ? error.message : undefined
+      );
+    }
+  }
+
+  /**
    * Upload both original and staged images after successful processing
    * Throws ImageProcessingError if either upload fails
    */
@@ -188,6 +215,37 @@ class SupabaseStorageService {
       const [originalUrl, stagedUrl] = await Promise.all([
         this.uploadOriginal(originalLocalPath),
         this.uploadStaged(stagedLocalPath),
+      ]);
+
+      return { originalUrl, stagedUrl };
+    } catch (error) {
+      logger(`Error uploading image pair: ${error}`);
+      if (error instanceof ImageProcessingError) {
+        throw error;
+      }
+      throw new ImageProcessingError(
+        ImageErrorCode.STORAGE_UPLOAD_FAILED,
+        ErrorMessages[ImageErrorCode.STORAGE_UPLOAD_FAILED],
+        500,
+        error instanceof Error ? error.message : undefined
+      );
+    }
+  }
+
+  /**
+   * Upload image pair with staged image from Buffer (optimized - no disk write for staged)
+   * Throws ImageProcessingError if either upload fails
+   */
+  async uploadImagePairWithBuffer(
+    originalLocalPath: string,
+    stagedImageBuffer: Buffer,
+    stagedFileName: string,
+    stagedMimeType: string = "image/png"
+  ): Promise<{ originalUrl: string; stagedUrl: string }> {
+    try {
+      const [originalUrl, stagedUrl] = await Promise.all([
+        this.uploadOriginal(originalLocalPath),
+        this.uploadStagedFromBuffer(stagedImageBuffer, stagedFileName, stagedMimeType),
       ]);
 
       return { originalUrl, stagedUrl };

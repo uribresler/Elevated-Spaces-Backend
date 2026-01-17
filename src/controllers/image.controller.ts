@@ -51,7 +51,6 @@ export async function getRecentUploads(req: Request, res: Response): Promise<voi
 
 export async function generateImage(req: Request, res: Response): Promise<void> {
   let inputImagePath: string | null = null;
-  let stagedImagePath: string | null = null;
 
   try {
     if (!req.file) {
@@ -138,16 +137,20 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     // ============================================
     // AI PROCESSING: Stage the image
     // (Retry logic with fallback models handled by geminiService)
+    // Optimized: Returns Buffer directly, no disk write
     // ============================================
+    let stagedImageBuffer: Buffer | null = null;
     try {
+      const startTime = Date.now();
       logger("Starting AI staging...");
-      stagedImagePath = await geminiService.stageImage(
+      stagedImageBuffer = await geminiService.stageImage(
         inputImagePath,
         roomType.toLowerCase(),
         stagingStyle.toLowerCase(),
         prompt
       );
-      logger("AI processing complete. Uploading to storage...");
+      const processingTime = Date.now() - startTime;
+      logger(`AI processing complete in ${processingTime}ms. Uploading to storage...`);
     } catch (aiError) {
       logger(`AI staging failed: ${aiError instanceof Error ? aiError.message : aiError}`);
 
@@ -167,7 +170,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     }
 
     // Verify staged image was created
-    if (!stagedImagePath || !fs.existsSync(stagedImagePath)) {
+    if (!stagedImageBuffer || stagedImageBuffer.length === 0) {
       res.status(500).json({
         success: false,
         error: {
@@ -179,18 +182,28 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     }
 
     // ============================================
-    // STORAGE: Upload to Supabase
+    // STORAGE: Upload to Supabase (OPTIMIZED)
+    // Upload staged image directly from Buffer without writing to disk
     // ============================================
     let originalUrl: string | null = null;
     let stagedUrl: string | null = null;
 
     try {
-      const result = await supabaseStorage.uploadImagePair(
+      const stagedFileName = `staged-${Date.now()}.png`;
+      const uploadStartTime = Date.now();
+      
+      // Upload both images in parallel, staged image from buffer (no disk I/O)
+      const result = await supabaseStorage.uploadImagePairWithBuffer(
         inputImagePath,
-        stagedImagePath
+        stagedImageBuffer,
+        stagedFileName,
+        "image/png"
       );
       originalUrl = result.originalUrl;
       stagedUrl = result.stagedUrl;
+      
+      const uploadTime = Date.now() - uploadStartTime;
+      logger(`Storage uploads completed in ${uploadTime}ms`);
     } catch (storageError) {
       const parsedError = parseStorageError(storageError);
       res.status(parsedError.statusCode).json(parsedError.toJSON());
@@ -215,8 +228,8 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     // ============================================
     // CLEANUP: Remove local files if requested
     // ============================================
-    if (!keepLocalFiles && inputImagePath && stagedImagePath) {
-      supabaseStorage.cleanupLocalFiles(inputImagePath, stagedImagePath);
+    if (!keepLocalFiles && inputImagePath) {
+      supabaseStorage.cleanupLocalFiles(inputImagePath);
     }
 
     // ============================================

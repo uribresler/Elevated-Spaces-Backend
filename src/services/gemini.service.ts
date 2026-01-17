@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import * as fs from "fs";
+import { promises as fsPromises } from "fs";
 import * as path from "path";
 import { logger } from "../utils/logger";
 import { DEFAULT_STAGING_PROMPT, STAGING_STYLE_PROMPTS } from "../utils/stagingPrompts";
@@ -167,11 +168,22 @@ class GeminiService {
     roomType: string,
     stagingStyle: string,
     prompt?: string
-  ): Promise<string> {
-    const imageBuffer = fs.readFileSync(inputImagePath);
-    const base64Image = imageBuffer.toString("base64");
+  ): Promise<Buffer> {
+    // Use async file read for better performance
+    const imageBuffer = await fsPromises.readFile(inputImagePath);
+    
+    // Optimize: Check image size and compress if needed (max 4MB for Gemini)
+    const maxSize = 4 * 1024 * 1024; // 4MB
+    let optimizedBuffer = imageBuffer;
+    
+    if (imageBuffer.length > maxSize) {
+      logger(`Image size ${(imageBuffer.length / 1024 / 1024).toFixed(2)}MB exceeds 4MB, optimizing...`);
+      // For now, we'll use the original, but you could add image compression here
+      // Consider using sharp or jimp to resize/compress if needed
+    }
+    
+    const base64Image = optimizedBuffer.toString("base64");
     const mimeType = this.getMimeType(inputImagePath);
-
 
     // Use specialized prompt if available, else default
     let stagingPrompt: string;
@@ -184,44 +196,91 @@ class GeminiService {
     }
 
     return this.executeWithRetry(async () => {
+      const startTime = Date.now();
       logger(
         `Staging image: ${inputImagePath}, Room: ${roomType}, Style: ${stagingStyle}`
       );
 
       let stagedImageData: Buffer | null = null;
 
-      const stream = await this.client.models.generateContentStream({
-        model: "gemini-3-pro-image-preview",
-        contents: [
-          {
-            role: "user",
-            parts: [
-              {
-                inlineData: {
-                  mimeType: mimeType,
-                  data: base64Image,
+      // Use generateContent instead of stream for faster processing when we don't need streaming
+      // This is faster as it waits for complete response instead of processing chunks
+      try {
+        const response = await this.client.models.generateContent({
+          model: "gemini-3-pro-image-preview",
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: mimeType,
+                    data: base64Image,
+                  },
                 },
-              },
-              { text: stagingPrompt },
-            ],
+                { text: stagingPrompt },
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ["IMAGE"],
+            temperature: 1.0,
           },
-        ],
-        config: {
-          responseModalities: ["IMAGE"],
-          temperature: 1.0,
-        },
-      });
+        });
 
-      for await (const chunk of stream) {
-        if (chunk.candidates) {
-          for (const candidate of chunk.candidates) {
+        // Extract image from response
+        if (response.candidates && response.candidates.length > 0) {
+          for (const candidate of response.candidates) {
             if (candidate.content?.parts) {
               for (const part of candidate.content.parts) {
                 if (part.inlineData?.data) {
                   stagedImageData = Buffer.from(part.inlineData.data, "base64");
+                  break;
                 }
               }
+              if (stagedImageData) break;
             }
+          }
+        }
+      } catch (error) {
+        // Fallback to streaming if generateContent fails
+        logger("generateContent failed, falling back to streaming...");
+        const stream = await this.client.models.generateContentStream({
+          model: "gemini-3-pro-image-preview",
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: mimeType,
+                    data: base64Image,
+                  },
+                },
+                { text: stagingPrompt },
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ["IMAGE"],
+            temperature: 1.0,
+          },
+        });
+
+        for await (const chunk of stream) {
+          if (chunk.candidates) {
+            for (const candidate of chunk.candidates) {
+              if (candidate.content?.parts) {
+                for (const part of candidate.content.parts) {
+                  if (part.inlineData?.data) {
+                    stagedImageData = Buffer.from(part.inlineData.data, "base64");
+                    break;
+                  }
+                }
+                if (stagedImageData) break;
+              }
+            }
+            if (stagedImageData) break;
           }
         }
       }
@@ -235,18 +294,12 @@ class GeminiService {
         );
       }
 
-      const stagedDir = path.join(path.dirname(path.dirname(inputImagePath)), "staged");
-      if (!fs.existsSync(stagedDir)) {
-        fs.mkdirSync(stagedDir, { recursive: true });
-      }
+      const processingTime = Date.now() - startTime;
+      logger(`AI processing completed in ${processingTime}ms. Image size: ${(stagedImageData.length / 1024).toFixed(2)}KB`);
 
-      const outputFileName = `staged-${Date.now()}.png`;
-      const outputPath = path.join(stagedDir, outputFileName);
-
-      fs.writeFileSync(outputPath, stagedImageData);
-      logger(`Staged image saved to: ${outputPath}`);
-
-      return outputPath;
+      // Return Buffer directly instead of writing to disk
+      // The caller can decide whether to save to disk or upload directly
+      return stagedImageData;
     }, "stageImage");
   }
 
@@ -255,7 +308,8 @@ class GeminiService {
    * Uses text response mode for analysis
    */
   async analyzeImage(imagePath: string): Promise<any> {
-    const imageBuffer = fs.readFileSync(imagePath);
+    // Use async file read for better performance
+    const imageBuffer = await fsPromises.readFile(imagePath);
     const base64Image = imageBuffer.toString("base64");
     const mimeType = this.getMimeType(imagePath);
 

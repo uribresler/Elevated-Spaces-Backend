@@ -25,7 +25,15 @@ export interface OAuthConfig {
  * Returns null if credentials are not configured
  */
 export function getOAuthConfig(provider: OAuthProvider): OAuthConfig | null {
-  const baseUrl = 'https://elevate-spaces.vercel.app';
+  // BASE_URL should be the backend URL (where the API is hosted)
+  // Priority: 1. process.env.BASE_URL (REQUIRED in production), 2. localhost default for development
+  const backendPort = process.env.PORT || '3003';
+  const baseUrl = process.env.BASE_URL || `http://localhost:${backendPort}`;
+  
+  // Warn if BASE_URL is not set in production
+  if (process.env.NODE_ENV === 'production' && !process.env.BASE_URL) {
+    console.warn('⚠️  WARNING: BASE_URL environment variable is not set in production!');
+  }
 
   const configs: Record<OAuthProvider, () => OAuthConfig | null> = {
     google: () => {
@@ -35,8 +43,7 @@ export function getOAuthConfig(provider: OAuthProvider): OAuthConfig | null {
       return {
         clientID,
         clientSecret,
-        // callbackURL: process.env.GOOGLE_CALLBACK_URL || `${baseUrl}/api/auth/google/callback`,
-        callbackURL: `${baseUrl}/auth/google/callback`,
+        callbackURL: process.env.GOOGLE_CALLBACK_URL || `${baseUrl}/api/auth/google/callback`,
         scope: ['profile', 'email'],
       };
     },

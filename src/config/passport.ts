@@ -19,13 +19,17 @@ if (googleConfig) {
       },
       async (accessToken, refreshToken, profile, done) => {
         try {
+          logger(`Google OAuth strategy: Received profile for email=${profile.emails?.[0]?.value}, id=${profile.id}`);
+          
           const result = await oauthService.authenticateOAuthUser({
             provider: "google",
             providerId: profile.id,
-            email: profile.emails?.[0]?.value || "",
+            email: profile.emails?.[0]?.value || profile.id + "@example.com",
             name: profile.displayName || "",
             avatarUrl: profile.photos?.[0]?.value || null,
           });
+
+          logger(`Google OAuth strategy: User authenticated successfully. userId=${result.user.id}, isNewUser=${result.isNewUser}`);
 
           // Minimal Express User
           const user = {
@@ -38,8 +42,14 @@ if (googleConfig) {
           // This way req.user stays type-safe
           (user as any)._oauth = result; // temporary storage
 
+          logger(`Google OAuth strategy: User object created with _oauth property attached`);
+
           return done(null, user);
         } catch (error) {
+          logger(`Google OAuth strategy error: ${error instanceof Error ? error.message : String(error)}`);
+          if (error instanceof Error) {
+            logger(`Google OAuth strategy error stack: ${error.stack}`);
+          }
           return done(error as Error);
         }
       }
