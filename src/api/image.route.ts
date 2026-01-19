@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { generateImage, getRecentUploads, analyzeImage, generateMultipleImages } from "../controllers/image.controller";
+import { generateImage, getRecentUploads, analyzeImage, generateMultipleImages, restageImage } from "../controllers/image.controller";
 import { uploadImage, uploadImages } from "../middlewares/uploadImage";
 import { requireAuth } from "../middlewares/auth";
 
@@ -10,6 +10,8 @@ router.get("/recent", getRecentUploads);
 
 // Generate/stage an image using AI
 router.post("/generate", uploadImage, generateImage);
+// Restage a previously staged image (variation/edit)
+router.post("/restage", uploadImage, restageImage);
 
 // Analyze an image to get room type and suggestions
 router.post("/analyze", uploadImage, analyzeImage);

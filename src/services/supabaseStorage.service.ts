@@ -9,6 +9,27 @@ import {
 } from "../utils/imageErrors";
 
 class SupabaseStorageService {
+      /**
+       * Get public URL for a staged image by filename
+       */
+      getPublicStagedUrl(fileName: string): string | null {
+        const { data } = this.client.storage
+          .from(this.bucketName)
+          .getPublicUrl(`staged/${fileName}`);
+        return data?.publicUrl || null;
+      }
+    /**
+     * Upload staged image buffer for restage endpoint
+     * Returns stagedUrl for the uploaded image
+     */
+    async uploadStagedImageBuffer(
+      imageBuffer: Buffer,
+      fileName: string,
+      mimeType: string = "image/png"
+    ): Promise<{ stagedUrl: string }> {
+      const stagedUrl = await this.uploadStagedFromBuffer(imageBuffer, fileName, mimeType);
+      return { stagedUrl };
+    }
   private client: SupabaseClient;
   private bucketName: string = "elevate-spaces-images";
   private bucketInitialized: boolean = false;
