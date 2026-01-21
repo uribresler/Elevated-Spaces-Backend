@@ -17,7 +17,7 @@ const app = express();
 // CORS allowed origins - prioritize env var, include localhost for development
 // CORS_ORIGINS should be a comma-separated list: "http://localhost:3000,https://your-frontend.com"
 const corsOriginsEnv = process.env.CORS_ORIGINS;
-const allowedOrigins = corsOriginsEnv 
+const allowedOrigins = corsOriginsEnv
     ? corsOriginsEnv.split(',').map(origin => origin.trim())
     : ["http://localhost:3000"]; // Default to localhost only if not set
 
@@ -40,7 +40,7 @@ app.use(
         },
         credentials: true,
         methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allowedHeaders: ["Content-Type", "Authorization"],
+        allowedHeaders: ["Content-Type", "Authorization", "X-Fingerprint"],
     })
 );
 

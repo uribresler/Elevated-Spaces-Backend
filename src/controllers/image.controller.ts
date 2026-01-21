@@ -38,114 +38,55 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
     let guestTracking = null;
     let demoCount = 0;
     let demoLimitReached = false;
-    let blocked = false;
     const now = new Date();
-    let userId = null;
-    if (req.user && req.user.id) {
-      userId = req.user.id;
-      // TODO: Integrate subscription check here in future milestone
-      // For now, treat all users as demo unless they have a subscription (not implemented yet)
-      // Find or create guest_tracking for user
-      guestTracking = await prisma.guest_tracking.findFirst({
-        where: { userId },
-      });
-      if (!guestTracking) {
-        guestTracking = await prisma.guest_tracking.create({
-          data: {
-            userId,
-            fingerprint: "",
-            ip: req.ip || '',
-            uploads_count: 0,
-            blocked: false,
-            last_used_at: now,
-          },
-        });
-      }
-    } else {
-      // Guest logic (by session/cookie/ip)
-      const sessionId = req.cookies?.session_id || req.headers['x-fingerprint'] || req.ip;
-      const ipStr = req.ip || '';
-      guestTracking = await prisma.guest_tracking.findFirst({
-        where: {
-          OR: [
-            { fingerprint: sessionId },
-            { ip: ipStr },
-          ],
+    // Always use device fingerprint for demo tracking (from header/cookie or fallback to session)
+    const deviceFingerprint = req.headers['x-fingerprint'] || req.cookies?.device_id || req.cookies?.session_id || req.ip;
+    // For both guests and unpaid users, use device-based tracking
+    guestTracking = await prisma.guest_tracking.findFirst({
+      where: { fingerprint: deviceFingerprint },
+    });
+    if (!guestTracking) {
+      guestTracking = await prisma.guest_tracking.create({
+        data: {
+          fingerprint: deviceFingerprint,
+          ip: req.ip || '',
+          uploads_count: 0,
+          blocked: false,
+          last_used_at: now,
         },
       });
-      if (!guestTracking) {
-        guestTracking = await prisma.guest_tracking.create({
-          data: {
-            fingerprint: sessionId,
-            ip: ipStr,
-            uploads_count: 0,
-            blocked: false,
-            last_used_at: now,
-          },
-        });
-      }
-    }
-    // Check if blocked
-    if (guestTracking.blocked) {
-      blocked = true;
     }
     // Check if 30 days have passed since last_used_at
     const lastUsed = new Date(guestTracking.last_used_at);
     const daysSinceLast = Math.floor((now.getTime() - lastUsed.getTime()) / (1000 * 60 * 60 * 24));
     let uploads_count = guestTracking.uploads_count;
     if (daysSinceLast >= 30) {
-      // Count previous resets for this guest (event_type: 'demo_limit_reset')
-      const resetEvents = await prisma.analytics_event.count({
-        where: {
+      // Log a reset event
+      await prisma.analytics_event.create({
+        data: {
           event_type: 'demo_limit_reset',
-          ip: guestTracking.ip,
+          ip: req.ip || '',
+          source: 'demo',
+          timestamp: now,
         },
       });
-      // If 2+ resets, block this guest
-      if (resetEvents >= 2) {
-        await prisma.guest_tracking.update({
-          where: { id: guestTracking.id },
-          data: { blocked: true },
-        });
-        blocked = true;
-      } else {
-        // Log a reset event
-        await prisma.analytics_event.create({
-          data: {
-            event_type: 'demo_limit_reset',
-            ip: guestTracking.ip,
-            source: 'demo',
-            timestamp: now,
-          },
-        });
-        // Reset uploads_count and update last_used_at
-        uploads_count = 0;
-        await prisma.guest_tracking.update({
-          where: { id: guestTracking.id },
-          data: { uploads_count: 0, last_used_at: now },
-        });
-      }
+      // Reset uploads_count and update last_used_at
+      uploads_count = 0;
+      await prisma.guest_tracking.update({
+        where: { id: guestTracking.id },
+        data: { uploads_count: 0, last_used_at: now },
+      });
     }
     demoCount = uploads_count;
     if (demoCount >= 10) {
       demoLimitReached = true;
-    }
-    if (blocked) {
-      res.status(403).json({
-        success: false,
-        error: {
-          code: 'DEMO_BLOCKED',
-          message: 'Demo access blocked due to abuse. Please contact support or sign up.',
-        },
-      });
-      return;
     }
     if (demoLimitReached) {
       res.status(429).json({
         success: false,
         error: {
           code: 'DEMO_LIMIT_REACHED',
-          message: 'Demo limit reached. Please sign up or purchase credits to continue.',
+          message: 'Demo limit reached for this device. Please sign up or purchase credits to continue. The limit resets every 30 days.',
         },
       });
       return;
