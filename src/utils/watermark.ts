@@ -8,24 +8,27 @@ import sharp from "sharp";
  */
 export async function addWatermark(
   inputBuffer: Buffer,
-  watermarkText: string = "DEMO PREVIEW"
+  watermarkText: string = "ElevateSpaces"
 ): Promise<Buffer> {
   const image = sharp(inputBuffer);
   const { width, height } = await image.metadata();
-  const fontSize = Math.round((width || 800) / 18);
-
-  // Create SVG overlay for watermark
+  const fontSize = Math.round((width || 800) / 10);
+  // Centered, grayish, semi-transparent, no color accent
   const svg = `
     <svg width="${width}" height="${height}">
-      <text x="${(width || 800) - fontSize * 0.5}" y="${(height || 600) - fontSize * 0.5}"
-        font-size="${fontSize}" font-family="Arial, Helvetica, sans-serif"
-        fill="white" fill-opacity="0.7" stroke="black" stroke-width="2" text-anchor="end"
-        alignment-baseline="bottom">
-        ${watermarkText}
+      <text x="50%" y="50%"
+        font-size="${fontSize}"
+        font-family="Arial, Helvetica, sans-serif"
+        fill="#6B7280" fill-opacity="0.4"
+        text-anchor="middle"
+        alignment-baseline="middle"
+        dominant-baseline="middle"
+        style="font-weight:bold; letter-spacing:2px;">
+        ElevateSpaces
       </text>
     </svg>
   `;
   return image.composite([
-    { input: Buffer.from(svg), gravity: "southeast" }
+    { input: Buffer.from(svg), gravity: "center" }
   ]).toBuffer();
 }
