@@ -180,6 +180,7 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
       return;
     }
     // AI PROCESSING: Stage the image (variation)
+    // (Single image for now, but future-proof for parallel if needed)
     let stagedImageBuffer: Buffer | null = null;
     try {
       stagedImageBuffer = await geminiService.stageImage(
@@ -609,11 +610,17 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
       return;
     }
 
-    for (let i = 0; i < NUM_VARIATIONS; i++) {
+    // Parallelize image generation for speed
+    if (!inputImagePath) {
+      res.write(`event: error\ndata: ${JSON.stringify({ message: 'No input image path' })}\n\n`);
+      res.end();
+      return;
+    }
+    const imagePromises = Array.from({ length: NUM_VARIATIONS }).map(async (_, i) => {
       try {
         const variationPrompt = prompt ? `${prompt} [variation ${i+1}]` : undefined;
         let unwatermarked = await geminiService.stageImage(
-          inputImagePath,
+          inputImagePath as string,
           roomType.toLowerCase(),
           stagingStyle.toLowerCase(),
           variationPrompt
@@ -642,7 +649,8 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
       } catch (err) {
         res.write(`event: error\ndata: ${JSON.stringify({ message: 'Failed to generate or upload image', error: String(err) })}\n\n`);
       }
-    }
+    });
+    await Promise.all(imagePromises);
     // Signal completion
     res.write('event: done\ndata: {}\n\n');
     res.end();
