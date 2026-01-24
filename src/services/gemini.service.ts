@@ -102,67 +102,8 @@ class GeminiService {
     throw lastError instanceof ImageProcessingError ? lastError : parseGeminiError(lastError);
   }
 
-  /**
-   * Generate image from text prompt using gemini-3-pro-image-preview
-   */
-  async generateImage(prompt: string, outputPath: string): Promise<string> {
-    return this.executeWithRetry(async () => {
-      logger(`Generating image with prompt: ${prompt}`);
 
-      let imageData: Buffer | null = null;
-
-      const stream = await this.client.models.generateContentStream({
-        model: "gemini-3-pro-image-preview",
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: prompt }],
-          },
-        ],
-        config: {
-          responseModalities: ["IMAGE"],
-          temperature: 1.0,
-        },
-      });
-
-      for await (const chunk of stream) {
-        if (chunk.candidates) {
-          for (const candidate of chunk.candidates) {
-            if (candidate.content?.parts) {
-              for (const part of candidate.content.parts) {
-                if (part.inlineData?.data) {
-                  imageData = Buffer.from(part.inlineData.data, "base64");
-                }
-              }
-            }
-          }
-        }
-      }
-
-      if (!imageData) {
-        throw new ImageProcessingError(
-          ImageErrorCode.AI_NO_IMAGE_GENERATED,
-          ErrorMessages[ImageErrorCode.AI_NO_IMAGE_GENERATED],
-          500
-        );
-      }
-
-      const dir = path.dirname(outputPath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-
-      fs.writeFileSync(outputPath, imageData);
-      logger(`Image generated successfully at: ${outputPath}`);
-
-      return outputPath;
-    }, "generateImage");
-  }
-
-  /**
-   * Stage/enhance a real estate image with AI
-   * Uses gemini-3-pro-image-preview for actual image generation
-   */
+  // Proper class method: stageImage
   async stageImage(
     inputImagePath: string,
     roomType: string,
@@ -171,28 +112,25 @@ class GeminiService {
   ): Promise<Buffer> {
     // Use async file read for better performance
     const imageBuffer = await fsPromises.readFile(inputImagePath);
-    
     // Optimize: Check image size and compress if needed (max 4MB for Gemini)
     const maxSize = 4 * 1024 * 1024; // 4MB
     let optimizedBuffer = imageBuffer;
-    
     if (imageBuffer.length > maxSize) {
       logger(`Image size ${(imageBuffer.length / 1024 / 1024).toFixed(2)}MB exceeds 4MB, optimizing...`);
       // For now, we'll use the original, but you could add image compression here
       // Consider using sharp or jimp to resize/compress if needed
     }
-    
     const base64Image = optimizedBuffer.toString("base64");
     const mimeType = this.getMimeType(inputImagePath);
 
-    // Use specialized prompt if available, else default
+    // Compose a more detailed prompt for Gemini
     let stagingPrompt: string;
     if (prompt) {
-      stagingPrompt = prompt;
+      stagingPrompt = `${prompt}\n\nIMPORTANT: Do not change the layout, wall color, wall structure, ceiling, LED lights position, window/door positions, or any fixed architectural features. Only add or modify furniture, decor, and accessories. The room's structure and permanent features must remain exactly as in the original image.`;
     } else if (STAGING_STYLE_PROMPTS[stagingStyle?.toLowerCase()]) {
-      stagingPrompt = STAGING_STYLE_PROMPTS[stagingStyle.toLowerCase()](roomType);
+      stagingPrompt = `${STAGING_STYLE_PROMPTS[stagingStyle.toLowerCase()](roomType)}\n\nIMPORTANT: Do not change the layout, wall color, wall structure, ceiling, LED lights position, window/door positions, or any fixed architectural features. Only add or modify furniture, decor, and accessories. The room's structure and permanent features must remain exactly as in the original image.`;
     } else {
-      stagingPrompt = DEFAULT_STAGING_PROMPT(roomType, stagingStyle);
+      stagingPrompt = `${DEFAULT_STAGING_PROMPT(roomType, stagingStyle)}\n\nIMPORTANT: Do not change the layout, wall color, wall structure, ceiling, LED lights position, window/door positions, or any fixed architectural features. Only add or modify furniture, decor, and accessories. The room's structure and permanent features must remain exactly as in the original image.`;
     }
 
     return this.executeWithRetry(async () => {
@@ -203,8 +141,6 @@ class GeminiService {
 
       let stagedImageData: Buffer | null = null;
 
-      // Use generateContent instead of stream for faster processing when we don't need streaming
-      // This is faster as it waits for complete response instead of processing chunks
       try {
         const response = await this.client.models.generateContent({
           model: "gemini-3-pro-image-preview",
@@ -224,7 +160,7 @@ class GeminiService {
           ],
           config: {
             responseModalities: ["IMAGE"],
-            temperature: 1.0,
+            temperature: 0.7,
           },
         });
 
@@ -238,70 +174,27 @@ class GeminiService {
                   break;
                 }
               }
-              if (stagedImageData) break;
             }
           }
         }
-      } catch (error) {
-        // Fallback to streaming if generateContent fails
-        logger("generateContent failed, falling back to streaming...");
-        const stream = await this.client.models.generateContentStream({
-          model: "gemini-3-pro-image-preview",
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  inlineData: {
-                    mimeType: mimeType,
-                    data: base64Image,
-                  },
-                },
-                { text: stagingPrompt },
-              ],
-            },
-          ],
-          config: {
-            responseModalities: ["IMAGE"],
-            temperature: 1.0,
-          },
-        });
-
-        for await (const chunk of stream) {
-          if (chunk.candidates) {
-            for (const candidate of chunk.candidates) {
-              if (candidate.content?.parts) {
-                for (const part of candidate.content.parts) {
-                  if (part.inlineData?.data) {
-                    stagedImageData = Buffer.from(part.inlineData.data, "base64");
-                    break;
-                  }
-                }
-                if (stagedImageData) break;
-              }
-            }
-            if (stagedImageData) break;
-          }
-        }
+      } catch (err) {
+        logger(`Gemini image generation error: ${err}`);
+        throw err;
       }
 
       if (!stagedImageData) {
         throw new ImageProcessingError(
           ImageErrorCode.AI_NO_IMAGE_GENERATED,
           ErrorMessages[ImageErrorCode.AI_NO_IMAGE_GENERATED],
-          500,
-          "The AI could not generate a staged version of this image. Try with a clearer photo."
+          500
         );
       }
 
-      const processingTime = Date.now() - startTime;
-      logger(`AI processing completed in ${processingTime}ms. Image size: ${(stagedImageData.length / 1024).toFixed(2)}KB`);
-
-      // Return Buffer directly instead of writing to disk
-      // The caller can decide whether to save to disk or upload directly
+      logger(`Staged image generated successfully for: ${inputImagePath}`);
       return stagedImageData;
     }, "stageImage");
   }
+
 
   /**
    * Analyze image to understand room characteristics

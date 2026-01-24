@@ -594,7 +594,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     // ============================================
     // MULTI-VARIATION AI GENERATION
     // SSE streaming response
-    const NUM_VARIATIONS = 2;
+    const NUM_VARIATIONS = 5;
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
