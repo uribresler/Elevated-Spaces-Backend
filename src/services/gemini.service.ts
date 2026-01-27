@@ -127,14 +127,14 @@ class GeminiService {
     // Compose a more detailed prompt for Gemini
     let stagingPrompt: string;
     if (removeFurniture) {
-      // Remove furniture prompt
+      // Remove furniture prompt (dedicated, no staging style or user prompt)
       stagingPrompt = `Remove all movable furniture and decor from the room, leaving only the fixed architectural features (walls, windows, doors, ceiling, floor, lighting, etc). Do not change the layout, wall color, wall structure, ceiling, LED lights position, window/door positions, or any fixed architectural features. The room's structure and permanent features must remain exactly as in the original image.`;
     } else if (prompt) {
-      stagingPrompt = `${prompt}\n\nIMPORTANT: Do not change the layout, wall color, wall structure, ceiling, LED lights position, window/door positions, or any fixed architectural features. Only add or modify furniture, decor, and accessories. The room's structure and permanent features must remain exactly as in the original image.`;
+      stagingPrompt = prompt;
     } else if (STAGING_STYLE_PROMPTS[stagingStyle?.toLowerCase()]) {
-      stagingPrompt = `${STAGING_STYLE_PROMPTS[stagingStyle.toLowerCase()](roomType)}\n\nIMPORTANT: Do not change the layout, wall color, wall structure, ceiling, LED lights position, window/door positions, or any fixed architectural features. Only add or modify furniture, decor, and accessories. The room's structure and permanent features must remain exactly as in the original image.`;
+      stagingPrompt = STAGING_STYLE_PROMPTS[stagingStyle.toLowerCase()](roomType);
     } else {
-      stagingPrompt = `${DEFAULT_STAGING_PROMPT(roomType, stagingStyle)}\n\nIMPORTANT: Do not change the layout, wall color, wall structure, ceiling, LED lights position, window/door positions, or any fixed architectural features. Only add or modify furniture, decor, and accessories. The room's structure and permanent features must remain exactly as in the original image.`;
+      stagingPrompt = DEFAULT_STAGING_PROMPT(roomType, stagingStyle);
     }
 
     return this.executeWithRetry(async () => {
