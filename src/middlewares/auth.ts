@@ -1,3 +1,10 @@
+
+import { Request, Response, NextFunction } from "express";
+import jwt from "jsonwebtoken";
+import { AuthUser } from "../types/auth";
+import { role } from "@prisma/client";
+
+
 // Optional authentication middleware: sets req.user if token is present and valid, otherwise allows guest
 export function optionalAuth(
     req: Request,
@@ -17,16 +24,15 @@ export function optionalAuth(
                 email: payload.email,
                 role: payload.role as role,
             };
-        } catch {
-            // Invalid token: treat as guest (do not set req.user)
+            console.log("[optionalAuth] Token verified, user attached:", req.user);
+        } catch (e) {
+            console.log("[optionalAuth] Invalid token, treating as guest.", e);
         }
+    } else {
+        console.log("[optionalAuth] No Authorization header, treating as guest.");
     }
     next();
 }
-import { Request, Response, NextFunction } from "express";
-import jwt from "jsonwebtoken";
-import { AuthUser } from "../types/auth";
-import { role } from "@prisma/client";
 
 export function requireAuth(
     req: Request,

@@ -346,12 +346,10 @@ export async function getRecentUploads(req: Request, res: Response): Promise<voi
 export async function generateImage(req: Request, res: Response): Promise<void> {
    
 const isAdmin = req.user && req.user.role === 'ADMIN';
+console.log("Is Admin:", isAdmin);
 
   let inputImagePath: string | null = null;
-  // DEMO LIMIT & ABUSE TRACKING (DB-backed)
-  // Force all images to be demo (watermarked) for now
   const isDemo = true;
-  // Use session cookie, fingerprint, or IP for guest identification
   const sessionId = req.cookies?.session_id || req.headers['x-fingerprint'] || req.ip;
   let guestTracking = null;
   let demoCount = 0;
