@@ -118,16 +118,16 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
     if (demoCount >= 10) {
       demoLimitReached = true;
     }
-    if (demoLimitReached) {
-      res.status(429).json({
-        success: false,
-        error: {
-          code: 'DEMO_LIMIT_REACHED',
-          message: 'Demo limit reached for this device. Please sign up or purchase credits to continue. The limit resets every 30 days.',
-        },
-      });
-      return;
-    }
+    // if (demoLimitReached) {
+    //   res.status(429).json({
+    //     success: false,
+    //     error: {
+    //       code: 'DEMO_LIMIT_REACHED',
+    //       message: 'Demo limit reached for this device. Please sign up or purchase credits to continue. The limit resets every 30 days.',
+    //     },
+    //   });
+    //   return;
+    // }
     if (!stagedId) {
       res.status(400).json({
         success: false,
@@ -461,16 +461,16 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     });
     return;
   }
-  if (demoLimitReached) {
-    res.status(429).json({
-      success: false,
-      error: {
-        code: 'DEMO_LIMIT_REACHED',
-        message: 'Demo limit reached. Please sign up or purchase credits to continue.',
-      },
-    });
-    return;
-  }
+  // if (demoLimitReached) {
+  //   res.status(429).json({
+  //     success: false,
+  //     error: {
+  //       code: 'DEMO_LIMIT_REACHED',
+  //       message: 'Demo limit reached. Please sign up or purchase credits to continue.',
+  //     },
+  //   });
+  //   return;
+  // }
 
   try {
     if (!req.file) {
