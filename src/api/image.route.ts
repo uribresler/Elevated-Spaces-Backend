@@ -9,7 +9,7 @@ const router = Router();
 router.get("/recent", getRecentUploads);
 
 // Generate/stage an image using AI
-router.post("/generate", uploadImage, generateImage);
+router.post("/generate", requireAuth, uploadImage, generateImage);
 // Restage a previously staged image (variation/edit)
 router.post("/restage", uploadImage, restageImage);
 
