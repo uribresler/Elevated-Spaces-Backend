@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { generateImage, getRecentUploads, analyzeImage, generateMultipleImages, restageImage } from "../controllers/image.controller";
 import { uploadImage, uploadImages } from "../middlewares/uploadImage";
-import { requireAuth } from "../middlewares/auth";
+import { requireAuth, optionalAuth } from "../middlewares/auth";
 
 const router = Router();
 
@@ -9,7 +9,7 @@ const router = Router();
 router.get("/recent", getRecentUploads);
 
 // Generate/stage an image using AI
-router.post("/generate", requireAuth, uploadImage, generateImage);
+router.post("/generate", optionalAuth, uploadImage, generateImage);
 // Restage a previously staged image (variation/edit)
 router.post("/restage", uploadImage, restageImage);
 

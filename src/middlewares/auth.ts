@@ -1,3 +1,28 @@
+// Optional authentication middleware: sets req.user if token is present and valid, otherwise allows guest
+export function optionalAuth(
+    req: Request,
+    res: Response,
+    next: NextFunction
+) {
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith("Bearer ")) {
+        const token = authHeader.split(" ")[1];
+        try {
+            const payload = jwt.verify(
+                token,
+                process.env.JWT_SECRET!
+            ) as AuthUser;
+            req.user = {
+                id: payload.id,
+                email: payload.email,
+                role: payload.role as role,
+            };
+        } catch {
+            // Invalid token: treat as guest (do not set req.user)
+        }
+    }
+    next();
+}
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { AuthUser } from "../types/auth";
@@ -9,7 +34,7 @@ export function requireAuth(
     next: NextFunction
 ) {
     const authHeader = req.headers.authorization;
-
+    console.log("Auth Header:", authHeader);
     if (!authHeader?.startsWith("Bearer ")) {
         return res.status(401).json({
             success: false,
