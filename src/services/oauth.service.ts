@@ -65,7 +65,7 @@ class OAuthService {
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: user.id, role: user.role },
+      { id: user.id, role: user.role },
       JWT_SECRET,
       { expiresIn: "7d" }
     );
