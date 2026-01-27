@@ -35,7 +35,7 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
     // Proceed with no demo/block/plan checks
     // ...existing code, but skip all demoLimitReached, block, and plan logic
     // Only require stagedId and process as normal
-    const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false } = req.body;
+    const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false, removeFurniture = false } = req.body;
     if (!stagedId) {
       res.status(400).json({
         success: false,
@@ -68,7 +68,7 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
     // To avoid code duplication, fall through to the rest of the function after the demo logic, skipping only the demo checks above
   }
   try {
-    const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false } = req.body;
+    const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false, removeFurniture = false } = req.body;
     // DEMO LIMIT & ABUSE TRACKING (DB-backed)
     // Apply demo logic to guests and logged-in users without a subscription (subscription logic to be added later)
     let isDemo = true;
@@ -187,7 +187,8 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
         tempPath,
         roomType.toLowerCase(),
         stagingStyle.toLowerCase(),
-        prompt
+        prompt,
+        removeFurniture
       );
     } catch (aiError) {
       if (aiError instanceof ImageProcessingError) {
@@ -547,6 +548,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
       roomType = "living-room",
       stagingStyle = "modern",
       keepLocalFiles = false,
+      removeFurniture = false,
     } = req.body;
 
     // Validate room type
@@ -612,7 +614,8 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
           inputImagePath as string,
           roomType.toLowerCase(),
           stagingStyle.toLowerCase(),
-          variationPrompt
+          variationPrompt,
+          removeFurniture
         );
         let watermarked = unwatermarked;
         if (isDemo && watermarked) {

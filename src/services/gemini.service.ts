@@ -108,7 +108,8 @@ class GeminiService {
     inputImagePath: string,
     roomType: string,
     stagingStyle: string,
-    prompt?: string
+    prompt?: string,
+    removeFurniture?: boolean
   ): Promise<Buffer> {
     // Use async file read for better performance
     const imageBuffer = await fsPromises.readFile(inputImagePath);
@@ -125,7 +126,10 @@ class GeminiService {
 
     // Compose a more detailed prompt for Gemini
     let stagingPrompt: string;
-    if (prompt) {
+    if (removeFurniture) {
+      // Remove furniture prompt
+      stagingPrompt = `Remove all movable furniture and decor from the room, leaving only the fixed architectural features (walls, windows, doors, ceiling, floor, lighting, etc). Do not change the layout, wall color, wall structure, ceiling, LED lights position, window/door positions, or any fixed architectural features. The room's structure and permanent features must remain exactly as in the original image.`;
+    } else if (prompt) {
       stagingPrompt = `${prompt}\n\nIMPORTANT: Do not change the layout, wall color, wall structure, ceiling, LED lights position, window/door positions, or any fixed architectural features. Only add or modify furniture, decor, and accessories. The room's structure and permanent features must remain exactly as in the original image.`;
     } else if (STAGING_STYLE_PROMPTS[stagingStyle?.toLowerCase()]) {
       stagingPrompt = `${STAGING_STYLE_PROMPTS[stagingStyle.toLowerCase()](roomType)}\n\nIMPORTANT: Do not change the layout, wall color, wall structure, ceiling, LED lights position, window/door positions, or any fixed architectural features. Only add or modify furniture, decor, and accessories. The room's structure and permanent features must remain exactly as in the original image.`;
