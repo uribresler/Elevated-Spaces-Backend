@@ -83,6 +83,8 @@ export async function oauthCallback(req: Request, res: Response) {
     logger(`OAuth callback success: userId=${authResult.user.id}, email=${authResult.user.email}, isNewUser=${authResult.isNewUser}`);
 
     // Now you have everything: token, isNewUser, avatarUrl, etc.
+    // Always fetch the latest user from DB to get the latest role
+    const latestUser = await oauthService.getUserById(authResult.user.id);
     const params = new URLSearchParams({
       token: authResult.token,
       userId: authResult.user.id,
@@ -90,6 +92,7 @@ export async function oauthCallback(req: Request, res: Response) {
       name: authResult.user.name || "",
       provider: authResult.user.authProvider.toLowerCase(),
       isNewUser: authResult.isNewUser ? "true" : "false",
+      role: latestUser?.role || authResult.user.role || "USER",
     });
 
     if (authResult.user.avatarUrl) {

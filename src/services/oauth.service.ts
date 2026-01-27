@@ -11,6 +11,12 @@ const JWT_SECRET = process.env.JWT_SECRET || "changeme";
  * Follows DRY principle - single function handles Google, Facebook, Apple
  */
 class OAuthService {
+    /**
+     * Public: Get user by ID (for latest role, etc.)
+     */
+    async getUserById(userId: string) {
+      return prisma.user.findUnique({ where: { id: userId } });
+    }
   /**
    * Authenticate or register a user via OAuth
    * Handles all providers uniformly

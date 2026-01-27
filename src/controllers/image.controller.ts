@@ -30,43 +30,43 @@ declare global {
  * Accepts a staged image file and prompt, returns a new staged image
  */
 export async function restageImage(req: Request, res: Response): Promise<void> {
-      // ADMIN BYPASS: If user is ADMIN, skip all restrictions
-      if (req.user && req.user.role === 'ADMIN') {
-        // Proceed with no demo/block/plan checks
-        // ...existing code, but skip all demoLimitReached, block, and plan logic
-        // Only require stagedId and process as normal
-        const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false } = req.body;
-        if (!stagedId) {
-          res.status(400).json({
-            success: false,
-            error: {
-              code: ImageErrorCode.NO_FILE_PROVIDED,
-              message: "Missing staged image ID for restaging.",
-            },
-          });
-          return;
-        }
-        // Download unwatermarked staged image from Supabase
-        const stagedUrl = await supabaseStorage.getPublicStagedUrl(stagedId);
-        if (!stagedUrl) {
-          res.status(400).json({
-            success: false,
-            error: {
-              code: ImageErrorCode.FILE_READ_ERROR,
-              message: "Could not find staged image in Supabase.",
-            },
-          });
-          return;
-        }
-        // Download image to temp file (cross-platform)
-        const tempPath = path.join(os.tmpdir(), stagedId);
-        const response = await fetch(stagedUrl);
-        const arrayBuffer = await response.arrayBuffer();
-        await fs.promises.writeFile(tempPath, Buffer.from(arrayBuffer));
-        // ...continue with rest of restageImage logic (AI, watermark, upload, respond)
-        // (Copy/paste the rest of the function body after the demo logic, or refactor for DRY if needed)
-        // To avoid code duplication, fall through to the rest of the function after the demo logic, skipping only the demo checks above
-      }
+  // ADMIN BYPASS: If user is ADMIN, skip all restrictions
+  if (req.user && req.user.role === 'ADMIN') {
+    // Proceed with no demo/block/plan checks
+    // ...existing code, but skip all demoLimitReached, block, and plan logic
+    // Only require stagedId and process as normal
+    const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false } = req.body;
+    if (!stagedId) {
+      res.status(400).json({
+        success: false,
+        error: {
+          code: ImageErrorCode.NO_FILE_PROVIDED,
+          message: "Missing staged image ID for restaging.",
+        },
+      });
+      return;
+    }
+    // Download unwatermarked staged image from Supabase
+    const stagedUrl = await supabaseStorage.getPublicStagedUrl(stagedId);
+    if (!stagedUrl) {
+      res.status(400).json({
+        success: false,
+        error: {
+          code: ImageErrorCode.FILE_READ_ERROR,
+          message: "Could not find staged image in Supabase.",
+        },
+      });
+      return;
+    }
+    // Download image to temp file (cross-platform)
+    const tempPath = path.join(os.tmpdir(), stagedId);
+    const response = await fetch(stagedUrl);
+    const arrayBuffer = await response.arrayBuffer();
+    await fs.promises.writeFile(tempPath, Buffer.from(arrayBuffer));
+    // ...continue with rest of restageImage logic (AI, watermark, upload, respond)
+    // (Copy/paste the rest of the function body after the demo logic, or refactor for DRY if needed)
+    // To avoid code duplication, fall through to the rest of the function after the demo logic, skipping only the demo checks above
+  }
   try {
     const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false } = req.body;
     // DEMO LIMIT & ABUSE TRACKING (DB-backed)
@@ -344,10 +344,23 @@ export async function getRecentUploads(req: Request, res: Response): Promise<voi
 }
 
 export async function generateImage(req: Request, res: Response): Promise<void> {
-   
-const isAdmin = req.user && req.user.role === 'ADMIN';
-console.log("Is Admin:", isAdmin);
 
+  const isAdmin = req.user && req.user.role === 'ADMIN';
+
+  const verifyAdmin = await prisma.user.findUnique({
+    where: { id: req.user?.id },
+  });
+  if (verifyAdmin?.role !== 'ADMIN') {
+    res.status(403).json({
+      success: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'You do not have permission to perform this action.',
+      },
+    });
+    return;
+  }
+  
   let inputImagePath: string | null = null;
   const isDemo = true;
   const sessionId = req.cookies?.session_id || req.headers['x-fingerprint'] || req.ip;
@@ -594,7 +607,7 @@ console.log("Is Admin:", isAdmin);
     }
     const imagePromises = Array.from({ length: NUM_VARIATIONS }).map(async (_, i) => {
       try {
-        const variationPrompt = prompt ? `${prompt} [variation ${i+1}]` : undefined;
+        const variationPrompt = prompt ? `${prompt} [variation ${i + 1}]` : undefined;
         let unwatermarked = await geminiService.stageImage(
           inputImagePath as string,
           roomType.toLowerCase(),
