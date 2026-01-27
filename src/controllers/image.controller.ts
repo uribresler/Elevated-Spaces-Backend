@@ -344,31 +344,9 @@ export async function getRecentUploads(req: Request, res: Response): Promise<voi
 }
 
 export async function generateImage(req: Request, res: Response): Promise<void> {
-    // ADMIN BYPASS: If user is ADMIN, skip all restrictions
-    if (req.user && req.user.role === 'ADMIN') {
-      // Proceed with no demo/block/plan checks
-      // ...existing code, but skip all demoLimitReached, block, and plan logic
-      // Only require file and process as normal
-      try {
-        if (!req.file) {
-          res.status(400).json({
-            success: false,
-            error: {
-              code: ImageErrorCode.NO_FILE_PROVIDED,
-              message: ErrorMessages[ImageErrorCode.NO_FILE_PROVIDED],
-            },
-          });
-          return;
-        }
-        // ...continue with rest of generateImage logic (AI, watermark, upload, respond)
-        // (Copy/paste the rest of the function body after the demo logic, or refactor for DRY if needed)
-        // To avoid code duplication, fall through to the rest of the function after the demo logic, skipping only the demo checks above
-      } catch (error) {
-        logger(`Error in generateImage (ADMIN): ${error}`);
-        res.status(500).json({ success: false, error: { message: "Failed to generate image (ADMIN)." } });
-        return;
-      }
-    }
+   
+const isAdmin = req.user && req.user.role === 'ADMIN';
+
   let inputImagePath: string | null = null;
   // DEMO LIMIT & ABUSE TRACKING (DB-backed)
   // Force all images to be demo (watermarked) for now
@@ -451,7 +429,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
       demoLimitReached = true;
     }
   }
-  if (blocked) {
+  if (blocked && !isAdmin) {
     res.status(403).json({
       success: false,
       error: {
@@ -461,7 +439,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     });
     return;
   }
-  if (demoLimitReached) {
+  if (demoLimitReached && !isAdmin) {
     res.status(429).json({
       success: false,
       error: {
