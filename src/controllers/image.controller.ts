@@ -345,21 +345,22 @@ export async function getRecentUploads(req: Request, res: Response): Promise<voi
 }
 
 export async function generateImage(req: Request, res: Response): Promise<void> {
-
-  const isAdmin = req.user && req.user.role === 'ADMIN';
-
-  const verifyAdmin = await prisma.user.findUnique({
-    where: { id: req.user?.id },
-  });
-  if (verifyAdmin?.role !== 'ADMIN') {
-    res.status(403).json({
-      success: false,
-      error: {
-        code: 'FORBIDDEN',
-        message: 'You do not have permission to perform this action.',
-      },
+  let isAdmin = false;
+  if (req.user && req.user.id) {
+    const verifyAdmin = await prisma.user.findUnique({
+      where: { id: req.user.id },
     });
-    return;
+    isAdmin = verifyAdmin?.role === 'ADMIN';
+    if (!isAdmin) {
+      res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'You do not have permission to perform this action.',
+        },
+      });
+      return;
+    }
   }
   
   let inputImagePath: string | null = null;
