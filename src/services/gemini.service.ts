@@ -126,11 +126,22 @@ class GeminiService {
 
     // Compose a more detailed prompt for Gemini
     let stagingPrompt: string;
-    if (removeFurniture) {
-      // Remove furniture prompt (dedicated, no staging style or user prompt)
-      stagingPrompt = `Remove all movable furniture and decor from the room, leaving only the fixed architectural features (walls, windows, doors, ceiling, floor, lighting, etc). Do not change the layout, wall color, wall structure, ceiling, LED lights position, window/door positions, or any fixed architectural features. The room's structure and permanent features must remain exactly as in the original image.`;
-    } else if (prompt) {
-      stagingPrompt = prompt;
+    // if (removeFurniture) {
+    //   // Remove furniture prompt (dedicated, no staging style or user prompt)
+    //   stagingPrompt = `Remove all movable furniture and decor from the room, leaving only the fixed architectural features (walls, windows, doors, ceiling, floor, lighting, etc). Do not change the layout, wall color, wall structure, ceiling, LED lights position, window/door positions, or any fixed architectural features. The room's structure and permanent features must remain exactly as in the original image.`;
+    // } else 
+    if (prompt) {
+      // Strongly reinforce "do not remove" at start and end unless user prompt explicitly requests removal
+      const doNotRemove =
+        "ABSOLUTELY DO NOT REMOVE, HIDE, OR ALTER ANY EXISTING PAINTINGS, WALL ART, OR DECORATIVE ITEMS. THIS IS CRITICAL. ONLY ADD OR IMPROVE, NEVER REMOVE. DO NOT REMOVE ANYTHING FROM THE ORIGINAL IMAGE UNLESS I EXPLICITLY SAY SO.";
+      // If the prompt contains 'remove' or 'delete' or 'empty' (case-insensitive), do not add the doNotRemove guard
+      const lowerPrompt = prompt.toLowerCase();
+      const userRequestsRemoval = /remove|delete|empty|clear|no decor|no painting|no wall art/.test(lowerPrompt);
+      if (userRequestsRemoval) {
+        stagingPrompt = prompt;
+      } else {
+        stagingPrompt = `${doNotRemove}\n${prompt}\n${doNotRemove}`;
+      }
     } else if (STAGING_STYLE_PROMPTS[stagingStyle?.toLowerCase()]) {
       stagingPrompt = STAGING_STYLE_PROMPTS[stagingStyle.toLowerCase()](roomType);
     } else {

@@ -35,7 +35,8 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
     // Proceed with no demo/block/plan checks
     // ...existing code, but skip all demoLimitReached, block, and plan logic
     // Only require stagedId and process as normal
-    const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false, removeFurniture = false } = req.body;
+    // const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false, removeFurniture = false } = req.body;
+    const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false } = req.body;
     if (!stagedId) {
       res.status(400).json({
         success: false,
@@ -183,12 +184,18 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
     // (Single image for now, but future-proof for parallel if needed)
     let stagedImageBuffer: Buffer | null = null;
     try {
+      // stagedImageBuffer = await geminiService.stageImage(
+      //   tempPath,
+      //   roomType.toLowerCase(),
+      //   stagingStyle.toLowerCase(),
+      //   prompt,
+      //   removeFurniture
+      // );
       stagedImageBuffer = await geminiService.stageImage(
         tempPath,
         roomType.toLowerCase(),
         stagingStyle.toLowerCase(),
-        prompt,
-        removeFurniture
+        prompt
       );
     } catch (aiError) {
       if (aiError instanceof ImageProcessingError) {
@@ -544,12 +551,18 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
       return;
     }
 
+    // const {
+    //   prompt,
+    //   roomType = "living-room",
+    //   stagingStyle = "modern",
+    //   keepLocalFiles = false,
+    //   removeFurniture = false,
+    // } = req.body;
     const {
       prompt,
       roomType = "living-room",
       stagingStyle = "modern",
-      keepLocalFiles = false,
-      removeFurniture = false,
+      keepLocalFiles = false
     } = req.body;
 
     // Validate room type
@@ -611,12 +624,18 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     const imagePromises = Array.from({ length: NUM_VARIATIONS }).map(async (_, i) => {
       try {
         const variationPrompt = prompt ? `${prompt} [variation ${i + 1}]` : undefined;
+        // let unwatermarked = await geminiService.stageImage(
+        //   inputImagePath as string,
+        //   roomType.toLowerCase(),
+        //   stagingStyle.toLowerCase(),
+        //   variationPrompt,
+        //   removeFurniture
+        // );
         let unwatermarked = await geminiService.stageImage(
           inputImagePath as string,
           roomType.toLowerCase(),
           stagingStyle.toLowerCase(),
-          variationPrompt,
-          removeFurniture
+          variationPrompt
         );
         let watermarked = unwatermarked;
         if (isDemo && watermarked) {
