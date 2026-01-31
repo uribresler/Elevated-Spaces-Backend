@@ -357,7 +357,12 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     const verifyAdmin = await prisma.user.findUnique({
       where: { id: req.user.id },
     });
-    isAdmin = verifyAdmin?.role === 'ADMIN';
+    const matchRole = await prisma.user_roles.findFirst({
+      where: {
+        user_id: verifyAdmin?.id
+      },
+      include: { role: true }
+    })
     if (!isAdmin) {
       res.status(403).json({
         success: false,
@@ -369,7 +374,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
       return;
     }
   }
-  
+
   let inputImagePath: string | null = null;
   const isDemo = true;
   const sessionId = req.cookies?.session_id || req.headers['x-fingerprint'] || req.ip;

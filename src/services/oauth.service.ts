@@ -2,7 +2,6 @@ import prisma from "../dbConnection";
 import jwt from "jsonwebtoken";
 import { OAuthUserProfile, OAuthProvider, providerIdFields, providerEnumValues } from "../config/oauth.config";
 import { logger } from "../utils/logger";
-import { role } from "@prisma/client";
 
 const JWT_SECRET = process.env.JWT_SECRET || "changeme";
 
@@ -11,12 +10,21 @@ const JWT_SECRET = process.env.JWT_SECRET || "changeme";
  * Follows DRY principle - single function handles Google, Facebook, Apple
  */
 class OAuthService {
-    /**
-     * Public: Get user by ID (for latest role, etc.)
-     */
-    async getUserById(userId: string) {
-      return prisma.user.findUnique({ where: { id: userId } });
-    }
+  /**
+   * Public: Get user by ID (for latest role, etc.)
+   */
+  async getUserById(userId: string) {
+    return prisma.user.findUnique({ where: { id: userId } });
+  }
+
+  async assignRoleToUser(userId: string, roleId: string) {
+    return prisma.user_roles.create({
+      data: {
+        user_id: userId,
+        role_id: roleId
+      }
+    })
+  }
   /**
    * Authenticate or register a user via OAuth
    * Handles all providers uniformly
@@ -27,7 +35,7 @@ class OAuthService {
       id: string;
       email: string;
       name: string | null;
-      role: role;
+      role: string[];
       avatarUrl: string | null;
       authProvider: string;
     };
@@ -63,9 +71,17 @@ class OAuthService {
       user = await this.updateUserProfile(user.id, name, avatarUrl);
     }
 
+    const roles = await prisma.user_roles.findMany({
+      where: { user_id: user.id },
+      include: { role: true },
+    });
+
+    const roleNames = roles.map(r => r.role.name);
+
+
     // Generate JWT token
     const token = jwt.sign(
-      { id: user.id, role: user.role },
+      { id: user.id, role: roleNames },
       JWT_SECRET,
       { expiresIn: "7d" }
     );
@@ -76,7 +92,7 @@ class OAuthService {
         id: user.id,
         email: user.email,
         name: user.name,
-        role: user.role,
+        role: roleNames,
         avatarUrl: user.avatar_url,
         authProvider: user.auth_provider,
       },
@@ -134,14 +150,25 @@ class OAuthService {
       name: name || null,
       avatar_url: avatarUrl,
       auth_provider: providerEnumValues[provider] as any,
-      role: "USER",
     };
 
-    // Set the provider-specific ID
     createData[providerIdFields[provider]] = providerId;
 
-    return prisma.user.create({ data: createData });
+    const user = await prisma.user.create({ data: createData });
+
+    const defaultRole = await prisma.roles.findUnique({ where: { name: "USER" } });
+    if (defaultRole) {
+      await prisma.user_roles.create({
+        data: {
+          user_id: user.id,
+          role_id: defaultRole.id,
+        },
+      });
+    }
+
+    return user;
   }
+
 
   /**
    * Update user profile with latest info from OAuth provider

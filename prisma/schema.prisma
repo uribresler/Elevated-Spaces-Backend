@@ -1,9 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -12,58 +6,34 @@ datasource db {
   provider = "postgresql"
 }
 
-// =========================
-// User, Roles, Auth
-// =========================
 model user {
   id                   String                @id @default(uuid()) @map("id")
   email                String                @unique @map("email")
   password_hash        String?               @map("password_hash")
   name                 String?               @map("name")
-  avatar_url           String?               @map("avatar_url")
-  google_id            String?               @unique @map("google_id")
-  facebook_id          String?               @unique @map("facebook_id")
-  apple_id             String?               @unique @map("apple_id")
-  auth_provider        auth_provider         @default(LOCAL) @map("auth_provider")
-  role                 role                  @default(USER) @map("role")
   created_at           DateTime              @default(now()) @map("created_at")
   updated_at           DateTime              @updatedAt @map("updated_at")
-  photographer_profile photographer_profile?
-  images               image[]
-  payments             payment[]
-  credits              credit[]
-  bookings             booking[]             @relation("UserBookings")
-  analytics_events     analytics_event[]
-  guest_tracking       guest_tracking[]
   stripe_customer_id   String?               @map("stripe_customer_id")
   deleted_at           DateTime?             @map("deleted_at")
+  auth_provider        auth_provider         @default(LOCAL) @map("auth_provider")
+  avatar_url           String?               @map("avatar_url")
+  google_id            String?               @unique @map("google_id")
+  apple_id             String?               @unique @map("apple_id")
+  facebook_id          String?               @unique @map("facebook_id")
+  analytics_events     analytics_event[]
+  bookings             booking[]             @relation("UserBookings")
+  credits              credit[]
+  guest_tracking       guest_tracking[]
+  images               image[]
+  payments             payment[]
+  photographer_profile photographer_profile?
+  userRoles            user_roles[]
 
   @@map("user")
 }
 
-enum auth_provider {
-  LOCAL
-  GOOGLE
-  FACEBOOK
-  APPLE
-
-  @@map("auth_provider")
-}
-
-enum role {
-  USER
-  PHOTOGRAPHER
-  ADMIN
-
-  @@map("role")
-}
-
-// =========================
-// Photographer Profile
-// =========================
 model photographer_profile {
   id                          String    @id @default(uuid()) @map("id")
-  user                        user      @relation(fields: [user_id], references: [id])
   user_id                     String    @unique @map("user_id")
   bio                         String?   @map("bio")
   documents_url               String?   @map("documents_url")
@@ -73,13 +43,11 @@ model photographer_profile {
   created_at                  DateTime  @default(now()) @map("created_at")
   updated_at                  DateTime  @updatedAt @map("updated_at")
   bookings                    booking[] @relation("PhotographerBookings")
+  user                        user      @relation(fields: [user_id], references: [id])
 
   @@map("photographer_profile")
 }
 
-// =========================
-// Guest Tracking (Demo)
-// =========================
 model guest_tracking {
   id            String   @id @default(uuid()) @map("id")
   ip            String   @map("ip")
@@ -87,21 +55,16 @@ model guest_tracking {
   uploads_count Int      @default(0) @map("uploads_count")
   blocked       Boolean  @default(false) @map("blocked")
   last_used_at  DateTime @default(now()) @map("last_used_at")
-  images        image[]
-  user          user?    @relation(fields: [userId], references: [id])
   userId        String?
+  user          user?    @relation(fields: [userId], references: [id])
+  images        image[]
 
   @@map("guest_tracking")
 }
 
-// =========================
-// Images (AI Staging)
-// =========================
 model image {
   id                      String            @id @default(uuid()) @map("id")
-  user                    user?             @relation(fields: [user_id], references: [id])
   user_id                 String?           @map("user_id")
-  guest_tracking          guest_tracking?   @relation(fields: [guest_id], references: [id])
   guest_id                String?           @map("guest_id")
   original_image_url      String            @map("original_image_url")
   staged_image_url        String?           @map("staged_image_url")
@@ -117,34 +80,25 @@ model image {
   max_revisions           Int               @default(3) @map("max_revisions")
   created_at              DateTime          @default(now()) @map("created_at")
   updated_at              DateTime          @updatedAt @map("updated_at")
-  analytics_events        analytics_event[]
   source                  String?           @default("demo") @map("source")
+  analytics_events        analytics_event[]
+  guest_tracking          guest_tracking?   @relation(fields: [guest_id], references: [id])
+  user                    user?             @relation(fields: [user_id], references: [id])
 
   @@map("image")
 }
 
-enum image_status {
-  PROCESSING
-  COMPLETED
-  FAILED
-
-  @@map("image_status")
-}
-
-// =========================
-// Credits & Packages
-// =========================
 model credit {
   id         String          @id @default(uuid()) @map("id")
-  user       user            @relation(fields: [user_id], references: [id])
   user_id    String          @map("user_id")
   total      Int             @map("total")
   used       Int             @default(0) @map("used")
   available  Int             @default(0) @map("available")
-  package    credit_package? @relation(fields: [package_id], references: [id])
   package_id String?         @map("package_id")
   created_at DateTime        @default(now()) @map("created_at")
   updated_at DateTime        @updatedAt @map("updated_at")
+  package    credit_package? @relation(fields: [package_id], references: [id])
+  user       user            @relation(fields: [user_id], references: [id])
 
   @@map("credit")
 }
@@ -163,12 +117,8 @@ model credit_package {
   @@map("credit_package")
 }
 
-// =========================
-// Payments & Transactions
-// =========================
 model payment {
   id                String         @id @default(uuid()) @map("id")
-  user              user           @relation(fields: [user_id], references: [id])
   user_id           String         @map("user_id")
   amount            Float          @map("amount")
   currency          String         @default("usd") @map("currency")
@@ -176,8 +126,115 @@ model payment {
   stripe_session_id String?        @map("stripe_session_id")
   created_at        DateTime       @default(now()) @map("created_at")
   booking           booking?
+  user              user           @relation(fields: [user_id], references: [id])
 
   @@map("payment")
+}
+
+model booking {
+  id               String               @id @default(uuid()) @map("id")
+  user_id          String               @map("user_id")
+  photographer_id  String               @map("photographer_id")
+  date             DateTime             @map("date")
+  status           booking_status       @default(PENDING) @map("status")
+  payment_id       String?              @unique @map("payment_id")
+  payment_status   payment_status       @default(PENDING) @map("payment_status")
+  transaction_id   String?              @map("transaction_id")
+  created_at       DateTime             @default(now()) @map("created_at")
+  updated_at       DateTime             @updatedAt @map("updated_at")
+  analytics_events analytics_event[]
+  payment          payment?             @relation(fields: [payment_id], references: [id])
+  photographer     photographer_profile @relation("PhotographerBookings", fields: [photographer_id], references: [id])
+  user             user                 @relation("UserBookings", fields: [user_id], references: [id])
+
+  @@map("booking")
+}
+
+model analytics_event {
+  id          String   @id @default(uuid()) @map("id")
+  user_id     String?  @map("user_id")
+  image_id    String?  @map("image_id")
+  booking_id  String?  @map("booking_id")
+  event_type  String   @map("event_type")
+  ip          String?  @map("ip")
+  device_type String?  @map("device_type")
+  location    String?  @map("location")
+  language    String?  @map("language")
+  source      String?  @map("source")
+  timestamp   DateTime @default(now()) @map("timestamp")
+  booking     booking? @relation(fields: [booking_id], references: [id])
+  image       image?   @relation(fields: [image_id], references: [id])
+  user        user?    @relation(fields: [user_id], references: [id])
+
+  @@map("analytics_event")
+}
+
+model admin_content {
+  id         String   @id @default(uuid()) @map("id")
+  page       String   @unique @map("page")
+  content    String   @map("content")
+  updated_at DateTime @updatedAt @map("updated_at")
+  created_at DateTime @default(now()) @map("created_at")
+
+  @@map("admin_content")
+}
+
+model roles {
+  id          String             @id @default(uuid()) @map("id")
+  name        String             @unique @map("name")
+  description String?
+  created_at  DateTime           @default(now()) @map("created_at")
+  updated_at  DateTime           @default(now()) @updatedAt @map("updated_at")
+  permissions role_permissions[]
+  users       user_roles[]
+}
+
+model permissions {
+  id          String             @id @default(uuid()) @map("id")
+  name        String             @unique @map("name")
+  description String?
+  created_at  DateTime           @default(now()) @map("created_at")
+  updated_at  DateTime           @default(now()) @updatedAt @map("updated_at")
+  roles       role_permissions[]
+}
+
+model user_roles {
+  id          String   @id @default(uuid()) @map("id")
+  user_id     String   @map("user_id")
+  role_id     String   @map("role_id")
+  assigned_at DateTime @default(now()) @map("assigned_at")
+  role        roles    @relation(fields: [role_id], references: [id])
+  user        user     @relation(fields: [user_id], references: [id])
+
+  @@unique([user_id, role_id])
+}
+
+model role_permissions {
+  id            String      @id @default(uuid()) @map("id")
+  role_id       String      @map("role_id")
+  permission_id String      @map("permission_id")
+  assigned_at   DateTime    @default(now()) @map("assigned_at")
+  permission    permissions @relation(fields: [permission_id], references: [id])
+  role          roles       @relation(fields: [role_id], references: [id])
+
+  @@unique([role_id, permission_id])
+}
+
+enum auth_provider {
+  LOCAL
+  GOOGLE
+  FACEBOOK
+  APPLE
+
+  @@map("auth_provider")
+}
+
+enum image_status {
+  PROCESSING
+  COMPLETED
+  FAILED
+
+  @@map("image_status")
 }
 
 enum payment_status {
@@ -188,67 +245,10 @@ enum payment_status {
   @@map("payment_status")
 }
 
-// =========================
-// Bookings (Marketplace)
-// =========================
-model booking {
-  id               String               @id @default(uuid()) @map("id")
-  user             user                 @relation("UserBookings", fields: [user_id], references: [id])
-  user_id          String               @map("user_id")
-  photographer     photographer_profile @relation("PhotographerBookings", fields: [photographer_id], references: [id])
-  photographer_id  String               @map("photographer_id")
-  date             DateTime             @map("date")
-  status           booking_status       @default(PENDING) @map("status")
-  payment          payment?             @relation(fields: [payment_id], references: [id])
-  payment_id       String?              @unique @map("payment_id")
-  payment_status   payment_status       @default(PENDING) @map("payment_status")
-  transaction_id   String?              @map("transaction_id")
-  created_at       DateTime             @default(now()) @map("created_at")
-  updated_at       DateTime             @updatedAt @map("updated_at")
-  analytics_events analytics_event[]
-
-  @@map("booking")
-}
-
 enum booking_status {
   PENDING
   CONFIRMED
   CANCELLED
 
   @@map("booking_status")
-}
-
-// =========================
-// Analytics Events
-// =========================
-model analytics_event {
-  id          String   @id @default(uuid()) @map("id")
-  user        user?    @relation(fields: [user_id], references: [id])
-  user_id     String?  @map("user_id")
-  image       image?   @relation(fields: [image_id], references: [id])
-  image_id    String?  @map("image_id")
-  booking     booking? @relation(fields: [booking_id], references: [id])
-  booking_id  String?  @map("booking_id")
-  event_type  String   @map("event_type")
-  ip          String?  @map("ip")
-  device_type String?  @map("device_type")
-  location    String?  @map("location")
-  language    String?  @map("language")
-  source      String?  @map("source")
-  timestamp   DateTime @default(now()) @map("timestamp")
-
-  @@map("analytics_event")
-}
-
-// =========================
-// Admin Content (Legal, About, etc.)
-// =========================
-model admin_content {
-  id         String   @id @default(uuid()) @map("id")
-  page       String   @unique @map("page")
-  content    String   @map("content")
-  updated_at DateTime @updatedAt @map("updated_at")
-  created_at DateTime @default(now()) @map("created_at")
-
-  @@map("admin_content")
 }

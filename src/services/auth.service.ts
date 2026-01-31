@@ -21,12 +21,23 @@ export async function signupService({
   }
   const hash = await bcrypt.hash(password, 10);
   const user = await prisma.user.create({
-    data: { email, password_hash: hash, name, role: "USER", auth_provider: "LOCAL" },
+    data: { email, password_hash: hash, name, auth_provider: "LOCAL" },
   });
-  const token = jwt.sign({ userId: user.id, role: user.role }, JWT_SECRET, { expiresIn: "7d" });
+
+  const defaultRole = await prisma.roles.findUnique({ where: { name: "USER" } });
+  if (!defaultRole) {
+    throw new Error("Default role 'USER' not found");
+  }
+  const assignRole = await prisma.user_roles.create({
+    data: {
+      user_id: user?.id,
+      role_id: defaultRole?.id
+    }
+  })
+  const token = jwt.sign({ userId: user.id, role: defaultRole.name }, JWT_SECRET, { expiresIn: "7d" });
   return {
     token,
-    user: { id: user.id, email: user.email, name: user.name, role: user.role },
+    user: { id: user.id, email: user.email, name: user.name, role: defaultRole.name },
     success: true,
   };
 }
@@ -60,7 +71,18 @@ export async function loginService({ email, password }: { email: string; passwor
     throw err;
   }
 
-  const token = jwt.sign({ userId: user.id, role: user.role }, JWT_SECRET, { expiresIn: "7d" });
+  const userRole = await prisma.user_roles.findFirst({
+    where: { user_id: user.id },
+    include: { role: true }
+  })
+
+  if (!userRole) {
+    const err: any = new Error("Invalid Role");
+    err.code = "INVALID_USER_ROLE";
+    throw err;
+  }
+
+  const token = jwt.sign({ userId: user.id, role: userRole.role.name }, JWT_SECRET, { expiresIn: "7d" });
   return {
     token,
     user,

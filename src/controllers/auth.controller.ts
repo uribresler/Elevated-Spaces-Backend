@@ -6,6 +6,7 @@ import { oauthService } from "../services/oauth.service";
 import { logger } from "../utils/logger";
 import { OAuthResult } from "../types/auth";
 import jwt from 'jsonwebtoken'
+import prisma from "../dbConnection";
 
 // FRONTEND_URL - prioritize env var (REQUIRED in production), default to localhost for development
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
@@ -85,6 +86,14 @@ export async function oauthCallback(req: Request, res: Response) {
     // Now you have everything: token, isNewUser, avatarUrl, etc.
     // Always fetch the latest user from DB to get the latest role
     const latestUser = await oauthService.getUserById(authResult.user.id);
+
+    const userRoles = await prisma.user_roles.findMany({
+      where: { user_id: latestUser?.id },
+      include: { role: true },
+    });
+    const roleNames = userRoles.map(ur => ur.role.name);
+    const roleString = roleNames.join(",") || "USER";
+
     const params = new URLSearchParams({
       token: authResult.token,
       userId: authResult.user.id,
@@ -92,7 +101,7 @@ export async function oauthCallback(req: Request, res: Response) {
       name: authResult.user.name || "",
       provider: authResult.user.authProvider.toLowerCase(),
       isNewUser: authResult.isNewUser ? "true" : "false",
-      role: latestUser?.role || authResult.user.role || "USER",
+      role: roleString
     });
 
     if (authResult.user.avatarUrl) {

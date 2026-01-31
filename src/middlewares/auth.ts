@@ -2,7 +2,6 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { AuthUser } from "../types/auth";
-import { role } from "@prisma/client";
 
 
 // Optional authentication middleware: sets req.user if token is present and valid, otherwise allows guest
@@ -22,7 +21,7 @@ export function optionalAuth(
             req.user = {
                 id: payload.id,
                 email: payload.email,
-                role: payload.role as role,
+                role: payload.role,
             };
             console.log("[optionalAuth] Token verified, user attached:", req.user);
         } catch (e) {
@@ -60,7 +59,7 @@ export function requireAuth(
         req.user = {
             id: payload.id,
             email: payload.email,
-            role: payload.role as role,
+            role: payload.role,
         };
 
         next();
