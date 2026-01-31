@@ -31,12 +31,19 @@ declare global {
  */
 export async function restageImage(req: Request, res: Response): Promise<void> {
   // ADMIN BYPASS: If user is ADMIN, skip all restrictions
-  if (req.user && req.user.role === 'ADMIN') {
+  let isAdmin = false;
+  if (req.user && req.user.id) {
+    const verifyRole = await prisma.user_roles.findFirst({
+      where: { user_id: req.user.id },
+      include: { role: true }
+    })
+
+    isAdmin = verifyRole?.role.name == "ADMIN" ? true : false;
     // Proceed with no demo/block/plan checks
     // ...existing code, but skip all demoLimitReached, block, and plan logic
     // Only require stagedId and process as normal
     // const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false, removeFurniture = false } = req.body;
-    const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false } = req.body;
+    const { stagedId } = req.body;
     if (!stagedId) {
       res.status(400).json({
         success: false,
@@ -317,7 +324,6 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
   }
 }
 
-
 /**
  * Get recent uploads from Supabase Storage
  */
@@ -354,15 +360,13 @@ export async function getRecentUploads(req: Request, res: Response): Promise<voi
 export async function generateImage(req: Request, res: Response): Promise<void> {
   let isAdmin = false;
   if (req.user && req.user.id) {
-    const verifyAdmin = await prisma.user.findUnique({
-      where: { id: req.user.id },
-    });
-    const matchRole = await prisma.user_roles.findFirst({
-      where: {
-        user_id: verifyAdmin?.id
-      },
+    const verifyRole = await prisma.user_roles.findFirst({
+      where: { user_id: req.user.id },
       include: { role: true }
     })
+
+    isAdmin = verifyRole?.role.name == "ADMIN" ? true : false;
+
     if (!isAdmin) {
       res.status(403).json({
         success: false,
@@ -785,7 +789,7 @@ export async function generateMultipleImages(
 
   const files = req.files as Express.Multer.File[];
 
-  // 1️⃣ Create DB records
+  // Create DB records
   const images = await prisma.$transaction(
     files.map((file) =>
       prisma.image.create({
@@ -798,7 +802,7 @@ export async function generateMultipleImages(
     )
   );
 
-  // 2️⃣ Push jobs to queue
+  // Push jobs to queue
   images.forEach((image) => {
     imageQueue.add({
       imageId: image.id,
@@ -809,7 +813,7 @@ export async function generateMultipleImages(
     });
   });
 
-  // 3️⃣ Respond immediately
+  // Respond immediately
   res.status(202).json({
     success: true,
     message: "Images uploaded successfully. Staging started.",
