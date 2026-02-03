@@ -7,29 +7,178 @@ datasource db {
 }
 
 model user {
-  id                   String                @id @default(uuid()) @map("id")
-  email                String                @unique @map("email")
-  password_hash        String?               @map("password_hash")
-  name                 String?               @map("name")
-  created_at           DateTime              @default(now()) @map("created_at")
-  updated_at           DateTime              @updatedAt @map("updated_at")
-  stripe_customer_id   String?               @map("stripe_customer_id")
-  deleted_at           DateTime?             @map("deleted_at")
-  auth_provider        auth_provider         @default(LOCAL) @map("auth_provider")
-  avatar_url           String?               @map("avatar_url")
-  google_id            String?               @unique @map("google_id")
-  apple_id             String?               @unique @map("apple_id")
-  facebook_id          String?               @unique @map("facebook_id")
-  analytics_events     analytics_event[]
-  bookings             booking[]             @relation("UserBookings")
-  credits              credit[]
-  guest_tracking       guest_tracking[]
-  images               image[]
-  payments             payment[]
-  photographer_profile photographer_profile?
-  userRoles            user_roles[]
+  id                    String                 @id @default(uuid()) @map("id")
+  email                 String                 @unique @map("email")
+  password_hash         String?                @map("password_hash")
+  name                  String?                @map("name")
+  created_at            DateTime               @default(now()) @map("created_at")
+  updated_at            DateTime               @updatedAt @map("updated_at")
+  stripe_customer_id    String?                @map("stripe_customer_id")
+  deleted_at            DateTime?              @map("deleted_at")
+  auth_provider         auth_provider          @default(LOCAL) @map("auth_provider")
+  avatar_url            String?                @map("avatar_url")
+  google_id             String?                @unique @map("google_id")
+  apple_id              String?                @unique @map("apple_id")
+  facebook_id           String?                @unique @map("facebook_id")
+  analytics_events      analytics_event[]
+  bookings              booking[]              @relation("UserBookings")
+  credits               credit[]
+  guest_tracking        guest_tracking[]
+  images                image[]
+  payments              payment[]
+  photographer_profile  photographer_profile?
+  // System RBAC roles (ADMIN, PHOTOGRAPHER, USER)
+  system_roles          user_roles[]           @relation("system_roles")
+  owned_teams           teams[]                @relation("TeamOwner")
+  // Team-specific memberships and invitations
+  team_memberships      team_membership[]      @relation("TeamMember")
+  team_invites_sent     team_invites[]         @relation("InvitesSent")
+  team_invites_accepted team_invites[]         @relation("InvitesAccepted")
+  // Personal credit tracking
+  credit_balance        user_credit_balance?
+  credit_purchases      user_credit_purchase[] @relation("CreditPurchases")
+  credit_usage          user_credit_usage[]
 
   @@map("user")
+}
+
+model teams {
+  id          String            @id @default(uuid()) @map("id")
+  name        String            @map("name")
+  owner_id    String            @map("owner_id")
+  description String?           @map("description")
+  // Team credit pool: owner buys credits here, allocates to members
+  wallet      Int               @default(0) @map("wallet")
+  created_at  DateTime          @default(now()) @map("created_at")
+  updated_at  DateTime          @updatedAt @map("updated_at")
+  deleted_at  DateTime?         @map("deleted_at")
+  owner       user              @relation("TeamOwner", fields: [owner_id], references: [id])
+  members     team_membership[]
+  purchases   team_purchase[]
+  usage_log   team_usage[]
+  teamInvites team_invites[]
+
+  @@map("teams")
+}
+
+model team_membership {
+  id           String       @id @default(uuid()) @map("id")
+  team_id      String       @map("team_id")
+  user_id      String       @map("user_id")
+  team_role_id String       @map("team_role_id")
+  // Credits allocated to this member from team pool
+  allocated    Int          @default(0) @map("allocated")
+  // Credits used by this member (sum of team_usage for this member)
+  used         Int          @default(0) @map("used")
+  joined_at    DateTime     @default(now()) @map("joined_at")
+  updated_at   DateTime     @updatedAt @map("updated_at")
+  user         user         @relation("TeamMember", fields: [user_id], references: [id], onDelete: Cascade)
+  team         teams        @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  role         team_roles   @relation(fields: [team_role_id], references: [id])
+  usage_log    team_usage[]
+
+  @@unique([team_id, user_id])
+  @@map("team_membership")
+}
+
+// Track usage per member
+model team_usage {
+  id            String          @id @default(uuid()) @map("id")
+  membership_id String          @map("membership_id")
+  image_id      String          @map("image_id")
+  credits_used  Int             @map("credits_used")
+  created_at    DateTime        @default(now()) @map("created_at")
+  membership    team_membership @relation(fields: [membership_id], references: [id], onDelete: Cascade)
+  teams         teams?          @relation(fields: [teamsId], references: [id])
+  teamsId       String?
+
+  @@index([membership_id, created_at])
+  @@map("team_usage")
+}
+
+// When owner purchases credits for team
+model team_purchase {
+  id                String    @id @default(uuid()) @map("id")
+  team_id           String    @map("team_id")
+  amount            Int       @map("amount")
+  price_usd         Float     @map("price_usd")
+  status            String    @default("pending") @map("status")
+  stripe_session_id String?   @map("stripe_session_id")
+  stripe_invoice_id String?   @map("stripe_invoice_id")
+  created_at        DateTime  @default(now()) @map("created_at")
+  completed_at      DateTime? @map("completed_at")
+  team              teams     @relation(fields: [team_id], references: [id], onDelete: Cascade)
+
+  @@index([team_id, status])
+  @@map("team_purchase")
+}
+
+// Personal credits: separate from team allocation
+model user_credit_balance {
+  id         String   @id @default(uuid()) @map("id")
+  user_id    String   @unique @map("user_id")
+  balance    Int      @default(0) @map("balance")
+  updated_at DateTime @updatedAt @map("updated_at")
+  user       user     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("user_credit_balance")
+}
+
+// User purchases personal credits
+model user_credit_purchase {
+  id                String         @id @default(uuid()) @map("id")
+  user_id           String         @map("user_id")
+  package_id        String         @map("package_id")
+  amount            Int            @map("amount")
+  price_usd         Float          @map("price_usd")
+  status            String         @default("pending") @map("status")
+  stripe_session_id String?        @map("stripe_session_id")
+  stripe_invoice_id String?        @map("stripe_invoice_id")
+  created_at        DateTime       @default(now()) @map("created_at")
+  completed_at      DateTime?      @map("completed_at")
+  user              user           @relation("CreditPurchases", fields: [user_id], references: [id])
+  package           credit_package @relation("UserCreditPurchases", fields: [package_id], references: [id])
+
+  @@index([user_id, status])
+  @@map("user_credit_purchase")
+}
+
+// Track personal credit usage
+model user_credit_usage {
+  id           String   @id @default(uuid()) @map("id")
+  user_id      String   @map("user_id")
+  image_id     String   @map("image_id")
+  credits_used Int      @map("credits_used")
+  created_at   DateTime @default(now()) @map("created_at")
+  user         user     @relation(fields: [user_id], references: [id])
+
+  @@index([user_id, created_at])
+  @@map("user_credit_usage")
+}
+
+model team_invites {
+  id                        String        @id @default(uuid()) @map("id")
+  team_id                   String        @map("team_id")
+  email                     String        @map("email")
+  team_role_id              String        @map("team_role_id")
+  role_permissions_snapshot String?       @map("role_permissions_snapshot")
+  invited_by_user_id        String        @map("invited_by_user_id")
+  credit_limit              Int?          @default(0) @map("credit_limit")
+  token                     String        @unique @map("token")
+  status                    invite_status @default(PENDING) @map("status")
+  invited_at                DateTime      @default(now()) @map("invited_at")
+  expires_at                DateTime      @map("expires_at")
+  accepted_at               DateTime?     @map("accepted_at")
+  accepted_by_user_id       String?       @map("accepted_by_user_id")
+  created_at                DateTime      @default(now()) @map("created_at")
+  updated_at                DateTime      @updatedAt @map("updated_at")
+  team                      teams         @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  role                      team_roles    @relation(fields: [team_role_id], references: [id])
+  invited_by                user          @relation("InvitesSent", fields: [invited_by_user_id], references: [id])
+  accepted_by               user?         @relation("InvitesAccepted", fields: [accepted_by_user_id], references: [id])
+
+  @@unique([team_id, email])
+  @@map("team_invites")
 }
 
 model photographer_profile {
@@ -75,7 +224,7 @@ model image {
   room_type               String?           @map("room_type")
   staging_style           String?           @map("staging_style")
   prompt                  String?           @map("prompt")
-  credits_used            Int               @default(0) @map("credits_used")
+  // ❌ REMOVED: credits_used (stored here). Use team_credit_ledger + team_credit_actions instead.
   revisions               Int               @default(0) @map("revisions")
   max_revisions           Int               @default(3) @map("max_revisions")
   created_at              DateTime          @default(now()) @map("created_at")
@@ -88,6 +237,9 @@ model image {
   @@map("image")
 }
 
+// ⚠️  DEPRECATED: Individual user credits. Use team wallet + team_credit_usage instead.
+// Kept for backward compatibility only. All new credit logic should use team_credit_usage.
+// Migration path: Transfer individual credits to team wallet when user creates/joins team.
 model credit {
   id         String          @id @default(uuid()) @map("id")
   user_id    String          @map("user_id")
@@ -104,15 +256,16 @@ model credit {
 }
 
 model credit_package {
-  id               String   @id @default(uuid()) @map("id")
-  name             String   @map("name")
-  credits          Int      @map("credits")
-  price            Float    @map("price")
-  currency         String   @default("usd") @map("currency")
-  active           Boolean  @default(true) @map("active")
-  created_at       DateTime @default(now()) @map("created_at")
-  updated_at       DateTime @updatedAt @map("updated_at")
-  credit_purchases credit[]
+  id                    String                 @id @default(uuid()) @map("id")
+  name                  String                 @map("name")
+  credits               Int                    @map("credits")
+  price                 Float                  @map("price")
+  currency              String                 @default("usd") @map("currency")
+  active                Boolean                @default(true) @map("active")
+  created_at            DateTime               @default(now()) @map("created_at")
+  updated_at            DateTime               @updatedAt @map("updated_at")
+  legacy_credit_usage   credit[]
+  user_credit_purchases user_credit_purchase[] @relation("UserCreditPurchases")
 
   @@map("credit_package")
 }
@@ -182,11 +335,28 @@ model admin_content {
 model roles {
   id          String             @id @default(uuid()) @map("id")
   name        String             @unique @map("name")
-  description String?
+  description String?            @map("description")
   created_at  DateTime           @default(now()) @map("created_at")
-  updated_at  DateTime           @default(now()) @updatedAt @map("updated_at")
+  updated_at  DateTime           @updatedAt @map("updated_at")
   permissions role_permissions[]
   users       user_roles[]
+
+  @@map("roles")
+}
+
+// Separate team-specific roles from system RBAC
+model team_roles {
+  id          String            @id @default(uuid()) @map("id")
+  name        String            @unique @map("name")
+  description String?           @map("description")
+  // JSON for future permission matrix (view_reports, manage_team, assign_credits, etc.)
+  permissions String?           @map("permissions")
+  created_at  DateTime          @default(now()) @map("created_at")
+  updated_at  DateTime          @updatedAt @map("updated_at")
+  members     team_membership[]
+  invites     team_invites[]
+
+  @@map("team_roles")
 }
 
 model permissions {
@@ -204,9 +374,10 @@ model user_roles {
   role_id     String   @map("role_id")
   assigned_at DateTime @default(now()) @map("assigned_at")
   role        roles    @relation(fields: [role_id], references: [id])
-  user        user     @relation(fields: [user_id], references: [id])
+  user        user     @relation("system_roles", fields: [user_id], references: [id])
 
   @@unique([user_id, role_id])
+  @@map("user_roles")
 }
 
 model role_permissions {
@@ -251,4 +422,12 @@ enum booking_status {
   CANCELLED
 
   @@map("booking_status")
+}
+
+enum invite_status {
+  PENDING
+  ACCEPTED
+  REJECTED
+
+  @@map("invite_status")
 }
