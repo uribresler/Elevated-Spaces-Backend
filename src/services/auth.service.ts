@@ -43,7 +43,9 @@ export async function signupService({
 }
 
 export async function loginService({ email, password }: { email: string; password: string }) {
-  const user = await prisma.user.findUnique({ where: { email } });
+  const user = await prisma.user.findUnique({
+    where: { email },
+  });
   if (!user) {
     const err: any = new Error("Invalid credentials");
     err.code = "INVALID_CREDENTIALS";
@@ -81,11 +83,14 @@ export async function loginService({ email, password }: { email: string; passwor
     err.code = "INVALID_USER_ROLE";
     throw err;
   }
-
+  const userWithRole = {
+    ...user,
+    role: userRole.role.name,
+  };
   const token = jwt.sign({ userId: user.id, role: userRole.role.name }, JWT_SECRET, { expiresIn: "7d" });
   return {
     token,
-    user,
+    user: userWithRole,
     success: true,
   };
 }
