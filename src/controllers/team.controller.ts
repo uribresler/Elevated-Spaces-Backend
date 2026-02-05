@@ -62,15 +62,15 @@ export async function sendInvitation(req: Request, res: Response) {
             return res.status(404).json({ message: error.message });
         }
 
-        // ✅ Log detailed error for debugging
-        console.error("❌ Invitation error:", {
+        // Log detailed error for debugging
+        console.error("Invitation error:", {
             message: error.message,
             code: error.code,
             stack: error.stack,
             timestamp: new Date().toISOString(),
         });
 
-        // ✅ Return actual error message to frontend
+        // Return actual error message to frontend
         return res.status(500).json({ 
             message: error.message || "Failed to send invitation" 
         });

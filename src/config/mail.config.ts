@@ -53,14 +53,17 @@ export const sendEmail = async ({
         html,
     };
 
-    try {
-        const info = await transporter.sendMail(mailOptions);
-        console.log("Email sent:", info.messageId);
-        return info;
-    } catch (err) {
-        console.error("Error sending email:", err);
-        throw err;
-    }
+    return new Promise((resolve, reject) => {
+        transporter.sendMail(mailOptions, (err, info) => {
+            if (err) {
+                console.error("Error sending email:", err);
+                reject(err);
+            } else {
+                console.log("Email sent:", info.messageId);
+                resolve(info);
+            }
+        });
+    });
 };
 
 // const { MailtrapClient } = require("mailtrap");
