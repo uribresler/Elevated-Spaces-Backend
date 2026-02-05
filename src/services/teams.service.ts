@@ -117,17 +117,41 @@ Accept invite:
 ${frontendUrl}/accept-invite?token=${inviteToken}`,
             // category: "Team Invitation",
         });
-    } catch (err) {
+
+        // ✅ Update status to PENDING only if email sent successfully
         await prisma.team_invites.update({
             where: { id: invite.id },
-            data: { status: invite_status.FAILED },
+            data: { status: invite_status.PENDING },
         });
-    }
 
-    return {
-        success: true,
-        message: "Invitation sent successfully",
-        invite
+        return {
+            success: true,
+            message: "Invitation sent successfully",
+            invite
+        };
+    } catch (err: any) {
+        // ✅ Log detailed error information for debugging
+        console.error("❌ Email sending failed:", {
+            error: err.message,
+            code: err.code,
+            command: err.command,
+            response: err.response,
+            responseCode: err.responseCode,
+            email: email,
+            smtpHost: process.env.SMTP_HOST,
+            timestamp: new Date().toISOString(),
+        });
+
+        // ✅ Mark as failed in database
+        await prisma.team_invites.update({
+            where: { id: invite.id },
+            data: { 
+                status: invite_status.FAILED,
+            },
+        });
+
+        // ✅ Re-throw the error so frontend gets proper error message
+        throw new Error(`Failed to send invitation email: ${err.message || 'Email server error'}`);
     }
 }
 

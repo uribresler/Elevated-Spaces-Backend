@@ -13,3 +13,6 @@ uploads/
 
 personal-notes.md
 DATABASE_SCHEMA_FLOW.md
+EMAIL_FIX_GUIDE.md
+
+dist/
