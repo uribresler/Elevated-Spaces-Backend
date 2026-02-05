@@ -4,6 +4,8 @@ node_modules
 
 /generated/prisma
 
+.vscode/
+
 docs
 generated
 
