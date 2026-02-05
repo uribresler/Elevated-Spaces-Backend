@@ -19,6 +19,7 @@
     "type": "git",
     "url": "git+https://github.com/uribresler/elevate-spaces.git"
   },
+  
   "keywords": [],
   "author": "",
   "license": "ISC",
@@ -32,6 +33,7 @@
     "@prisma/adapter-pg": "^7.2.0",
     "@prisma/client": "^7.2.0",
     "@supabase/supabase-js": "^2.90.1",
+    "@types/nodemailer": "^6.4.22",
     "@types/passport": "^1.0.17",
     "bcrypt": "^6.0.0",
     "body-parser": "^2.2.1",
@@ -39,7 +41,9 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
+    "mailtrap": "^4.4.0",
     "multer": "^2.0.2",
+    "nodemailer": "^7.0.13",
     "passport": "^0.7.0",
     "passport-apple": "^2.0.2",
     "passport-facebook": "^3.0.0",

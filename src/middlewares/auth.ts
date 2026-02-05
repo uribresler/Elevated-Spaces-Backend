@@ -17,9 +17,9 @@ export function optionalAuth(
             const payload = jwt.verify(
                 token,
                 process.env.JWT_SECRET!
-            ) as AuthUser;
+            ) as any;
             req.user = {
-                id: payload.id,
+                id: payload.userId || payload.id,
                 email: payload.email,
                 role: payload.role,
             };
@@ -47,17 +47,17 @@ export function requireAuth(
         });
     }
 
-    const token = authHeader.split(" ")[1];
+    const token = authHeader?.split(" ")[1];
 
     try {
         const payload = jwt.verify(
             token,
             process.env.JWT_SECRET!
-        ) as AuthUser;
+        ) as any;
 
         // THIS IS WHERE USER IS ATTACHED
         req.user = {
-            id: payload.id,
+            id: payload.userId || payload.id,
             email: payload.email,
             role: payload.role,
         };

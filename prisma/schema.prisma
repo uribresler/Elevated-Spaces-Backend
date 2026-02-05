@@ -350,7 +350,7 @@ model team_roles {
   name        String            @unique @map("name")
   description String?           @map("description")
   // JSON for future permission matrix (view_reports, manage_team, assign_credits, etc.)
-  permissions String?           @map("permissions")
+  permissions Json?           @map("permissions")
   created_at  DateTime          @default(now()) @map("created_at")
   updated_at  DateTime          @updatedAt @map("updated_at")
   members     team_membership[]
@@ -428,6 +428,7 @@ enum invite_status {
   PENDING
   ACCEPTED
   REJECTED
+  FAILED
 
   @@map("invite_status")
 }
