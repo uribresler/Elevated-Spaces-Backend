@@ -12,11 +12,17 @@ const SMTP_PASS = process.env.SMTP_PASS!;
 const transporter = nodemailer.createTransport({
     host: SMTP_HOST,
     port: SMTP_PORT,
-    secure: SMTP_PORT === 465, // true for 465, false for other ports
+    secure: SMTP_PORT === 465, // true for 465 (SSL), false for 587 (TLS)
     auth: {
         user: SMTP_USER,
         pass: SMTP_PASS,
     },
+    // Add connection timeout and additional options
+    connectionTimeout: 10000, // 10 seconds
+    greetingTimeout: 5000,
+    socketTimeout: 30000, // 30 seconds
+    logger: true, // Enable logging
+    debug: process.env.NODE_ENV !== 'production', // Debug in dev only
 });
 
 // Email properties interface
