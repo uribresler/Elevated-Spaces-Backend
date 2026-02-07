@@ -1,29 +1,15 @@
-import nodemailer from "nodemailer";
 import dotenv from "dotenv";
+import sgMail from "@sendgrid/mail";
 dotenv.config();
 
-// SendGrid SMTP Configuration (use environment variables)
-const SMTP_HOST = process.env.SMTP_HOST || "smtp.sendgrid.net";
-const SMTP_PORT = Number(process.env.SMTP_PORT) || 587;
-const SMTP_USER = process.env.SMTP_USER;
-const SMTP_PASS = process.env.SMTP_PASS!; // SendGrid API key from environment
+// SendGrid HTTP API Configuration (use environment variables)
+const SENDGRID_API_KEY = process.env.SMTP_PASS || process.env.SENDGRID_API_KEY;
 
-// Create a reusable transporter object for SendGrid
-const transporter = nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: SMTP_PORT,
-    secure: true, // false for port 587 (TLS)
-    auth: {
-        user: SMTP_USER,
-        pass: SMTP_PASS,
-    },
-    // Add connection timeout and additional options
-    connectionTimeout: 10000, // 10 seconds
-    greetingTimeout: 5000,
-    socketTimeout: 30000, // 30 seconds
-    logger: true, // Enable logging
-    debug: process.env.NODE_ENV !== 'production', // Debug in dev only
-});
+if (!SENDGRID_API_KEY) {
+    throw new Error("SendGrid API key is missing. Set SMTP_PASS or SENDGRID_API_KEY.");
+}
+
+sgMail.setApiKey(SENDGRID_API_KEY);
 
 // Email properties interface
 export interface EmailProps {
@@ -50,26 +36,26 @@ export const sendEmail = async ({
 }: EmailProps) => {
     // SendGrid requires verified sender email
     const verifiedSender = "saifullahahmed380@gmail.com"; // Your verified SendGrid sender
-    const mailOptions = {
-        from: `"${senderName}" <${verifiedSender}>`, // Use verified sender
-        replyTo: replyTo || from, // Original sender as reply-to
+    const msg = {
         to,
+        from: {
+            email: verifiedSender,
+            name: senderName,
+        },
+        replyTo: replyTo || from,
         subject,
         text,
         html,
     };
 
-    return new Promise((resolve, reject) => {
-        transporter.sendMail(mailOptions, (err, info) => {
-            if (err) {
-                console.error("Error sending email:", err);
-                reject(err);
-            } else {
-                console.log("Email sent:", info.messageId);
-                resolve(info);
-            }
-        });
-    });
+    try {
+        const [response] = await sgMail.send(msg);
+        console.log("Email sent:", response.headers["x-message-id"]);
+        return response;
+    } catch (err) {
+        console.error("Error sending email:", err);
+        throw err;
+    }
 };
 
 // const { MailtrapClient } = require("mailtrap");

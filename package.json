@@ -19,7 +19,6 @@
     "type": "git",
     "url": "git+https://github.com/uribresler/elevate-spaces.git"
   },
-  
   "keywords": [],
   "author": "",
   "license": "ISC",
@@ -32,6 +31,7 @@
     "@google/genai": "^1.34.0",
     "@prisma/adapter-pg": "^7.2.0",
     "@prisma/client": "^7.2.0",
+    "@sendgrid/mail": "^8.1.6",
     "@supabase/supabase-js": "^2.90.1",
     "@types/nodemailer": "^6.4.22",
     "@types/passport": "^1.0.17",
