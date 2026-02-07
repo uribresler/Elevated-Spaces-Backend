@@ -12,7 +12,7 @@ const SMTP_PASS = process.env.SMTP_PASS!; // SendGrid API key from environment
 const transporter = nodemailer.createTransport({
     host: SMTP_HOST,
     port: SMTP_PORT,
-    secure: false, // false for port 587 (TLS)
+    secure: true, // false for port 587 (TLS)
     auth: {
         user: SMTP_USER,
         pass: SMTP_PASS,
