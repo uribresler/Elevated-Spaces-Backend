@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { createTeamSchema } from "../utils/teamSchema";
-import { acceptInvitationService, createTeamService, invitationService } from "../services/teams.service";
+import { acceptInvitationService, createTeamService, invitationService, removeTeamMemberService } from "../services/teams.service";
 import prisma from "../dbConnection";
 import { success } from "zod";
 
@@ -71,8 +71,8 @@ export async function sendInvitation(req: Request, res: Response) {
         });
 
         // Return actual error message to frontend
-        return res.status(500).json({ 
-            message: error.message || "Failed to send invitation" 
+        return res.status(500).json({
+            message: error.message || "Failed to send invitation"
         });
     }
 }
@@ -105,12 +105,48 @@ export async function getMyTeams(req: Request, res: Response) {
                 message: "No teams created yet!"
             })
         }
+        const filteredTeams = teams.map((team) => {
+            const activeMemberIds = new Set(team.members.map((m) => m.user_id));
+            const filteredInvites = team.teamInvites.filter((invite) => {
+                if (invite.status !== "ACCEPTED") {
+                    return true;
+                }
+                return invite.accepted_by_user_id
+                    ? activeMemberIds.has(invite.accepted_by_user_id)
+                    : false;
+            });
+
+            return {
+                ...team,
+                teamInvites: filteredInvites,
+            };
+        });
+
         res.status(200).json({
             success: true,
             message: "Teams fetched successfully",
-            teams
+            teams: filteredTeams
         })
     } catch (error) {
 
+    }
+}
+
+export async function removeMemberById(req: Request, res: Response) {
+    try {
+        const { id } = req.params;
+        const userId = req.user?.id
+        const { owner_id, team_id } = req.body;
+
+        if (!userId) {
+            throw new Error("No logged-in user id found");
+        }
+
+        const result = await removeTeamMemberService({ owner_id, team_id, id, userId });
+
+        return res.status(200).json(result);
+    } catch (error: any) {
+        console.error(error);
+        return res.status(400).json({ message: error.message || "Failed to remove member from the team" });
     }
 }

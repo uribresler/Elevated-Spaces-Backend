@@ -2,17 +2,17 @@ import nodemailer from "nodemailer";
 import dotenv from "dotenv";
 dotenv.config();
 
-// Load SMTP credentials from environment
-const SMTP_HOST = process.env.SMTP_HOST!;
+// SendGrid SMTP Configuration (use environment variables)
+const SMTP_HOST = process.env.SMTP_HOST || "smtp.sendgrid.net";
 const SMTP_PORT = Number(process.env.SMTP_PORT) || 587;
-const SMTP_USER = process.env.SMTP_USER!;
-const SMTP_PASS = process.env.SMTP_PASS!;
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS!; // SendGrid API key from environment
 
-// Create a reusable transporter object
+// Create a reusable transporter object for SendGrid
 const transporter = nodemailer.createTransport({
     host: SMTP_HOST,
     port: SMTP_PORT,
-    secure: SMTP_PORT === 465, // true for 465 (SSL), false for 587 (TLS)
+    secure: false, // false for port 587 (TLS)
     auth: {
         user: SMTP_USER,
         pass: SMTP_PASS,
@@ -48,11 +48,11 @@ export const sendEmail = async ({
     replyTo,
     senderEmail,
 }: EmailProps) => {
-    const effectiveSenderEmail = senderEmail || SMTP_USER;
+    // SendGrid requires verified sender email
+    const verifiedSender = "saifullahahmed380@gmail.com"; // Your verified SendGrid sender
     const mailOptions = {
-        from: `"${senderName}" <${from}>`,
-        sender: `"Elevate Spaces" <${effectiveSenderEmail}>`,
-        replyTo: replyTo || from,
+        from: `"${senderName}" <${verifiedSender}>`, // Use verified sender
+        replyTo: replyTo || from, // Original sender as reply-to
         to,
         subject,
         text,

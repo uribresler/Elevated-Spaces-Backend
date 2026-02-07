@@ -1,7 +1,5 @@
-import { success } from "zod";
 import { sendEmail } from "../config/mail.config";
 import prisma from "../dbConnection"
-import { Request } from "express"
 import jwt from 'jsonwebtoken'
 import crypto from "crypto";
 import { invite_status } from "@prisma/client";
@@ -145,7 +143,7 @@ ${frontendUrl}/accept-invite?token=${inviteToken}`,
         // ✅ Mark as failed in database
         await prisma.team_invites.update({
             where: { id: invite.id },
-            data: { 
+            data: {
                 status: invite_status.FAILED,
             },
         });
@@ -266,5 +264,92 @@ export async function acceptInvitationService({
         accepted: true,
         teamId: invite.team_id,
         userId: user.id,
+    };
+}
+
+export async function removeTeamMemberService({
+    id,
+    owner_id,
+    team_id,
+    userId
+}:
+    { id: string, owner_id: string, team_id: string, userId: string }) {
+
+    if (!id || !team_id) {
+        throw new Error(
+            !id && !team_id
+                ? "Member ID and Team ID are required"
+                : !id ? "Member ID is required" : "Team ID is required");
+    }
+
+    const invite = await prisma.team_invites.findFirst({
+        where: { id, team_id },
+    });
+
+    if (!invite || !invite.accepted_by_user_id) {
+        throw new Error("No such member exists in the team");
+    }
+
+    if (invite.accepted_by_user_id === userId) {
+        const removedMembership = await prisma.team_membership.deleteMany({
+            where: {
+                team_id,
+                user_id: userId,
+            },
+        });
+
+        if (removedMembership.count === 0) {
+            throw new Error("No such member exists in the team");
+        }
+
+        console.log("TEAM_MEMBER_REMOVED", {
+            action: "SELF_REMOVE",
+            team_id,
+            invite_id: invite.id,
+            member_user_id: userId,
+            removed_by_user_id: userId,
+            timestamp: new Date().toISOString(),
+        });
+
+        return {
+            success: true,
+            message: "You have left the team",
+        };
+    }
+
+    const ownerVerify = await prisma.teams.findFirst({
+        where: {
+            id: team_id,
+            owner_id: owner_id || userId,
+        },
+    });
+
+    if (!ownerVerify) {
+        throw new Error("Only the team owner can remove members");
+    }
+
+    const removedMembership = await prisma.team_membership.deleteMany({
+        where: {
+            team_id,
+            user_id: invite.accepted_by_user_id,
+        },
+    });
+
+    if (removedMembership.count === 0) {
+        throw new Error("No such member exists in the team");
+    }
+
+    console.log("TEAM_MEMBER_REMOVED", {
+        action: "OWNER_REMOVE",
+        team_id,
+        invite_id: invite.id,
+        member_user_id: invite.accepted_by_user_id,
+        removed_by_user_id: ownerVerify.owner_id,
+        timestamp: new Date().toISOString(),
+    });
+
+    return {
+        success: true,
+        message: "Member removed from the team",
     };
 }
