@@ -291,6 +291,31 @@ export async function removeTeamMemberService({
     }
 
     if (invite.accepted_by_user_id === userId) {
+        const userCredits = await prisma.team_membership.findFirst({
+            where: {
+                team_id,
+                user_id: userId,
+            }
+        });
+
+        if (!userCredits) {
+            throw new Error("No such member exists in the team");
+        }
+
+        const unusedCredits = Math.max(
+            Number(userCredits.allocated) - Number(userCredits.used),
+            0
+        );
+
+        if (unusedCredits > 0) {
+            await prisma.teams.update({
+                where: { id: team_id },
+                data: {
+                    wallet: { increment: unusedCredits },
+                }
+            });
+        }
+
         const removedMembership = await prisma.team_membership.deleteMany({
             where: {
                 team_id,
@@ -326,6 +351,31 @@ export async function removeTeamMemberService({
 
     if (!ownerVerify) {
         throw new Error("Only the team owner can remove members");
+    }
+
+    const memberCredits = await prisma.team_membership.findFirst({
+        where: {
+            team_id,
+            user_id: invite.accepted_by_user_id,
+        }
+    });
+
+    if (!memberCredits) {
+        throw new Error("No such member exists in the team");
+    }
+
+    const unusedCredits = Math.max(
+        Number(memberCredits.allocated) - Number(memberCredits.used),
+        0
+    );
+
+    if (unusedCredits > 0) {
+        await prisma.teams.update({
+            where: { id: team_id },
+            data: {
+                wallet: { increment: unusedCredits },
+            }
+        });
     }
 
     const removedMembership = await prisma.team_membership.deleteMany({

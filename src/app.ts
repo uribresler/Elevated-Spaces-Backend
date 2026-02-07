@@ -5,6 +5,7 @@ import healthRoute from "./api/health.route";
 import authRoute from "./api/auth.route";
 import imageRoute from "./api/image.route";
 import teamsRoute from './api/teams.route'
+import teamsCreditRoute from './api/teams.credits.route'
 import { errorHandler } from "./middlewares/errorHandler";
 import { zodErrorHandler } from "./middlewares/zodErrorHandler";
 import cors from "cors";
@@ -40,7 +41,7 @@ app.use(
             return callback(new Error("Not allowed by CORS"));
         },
         credentials: true,
-        methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
         allowedHeaders: ["Content-Type", "Authorization", "X-Fingerprint"],
     })
 );
@@ -78,6 +79,7 @@ app.use("/api", healthRoute);
 app.use("/api/auth", authRoute);
 app.use("/api/images", imageRoute);
 app.use('/api/teams', teamsRoute)
+app.use('/api/teams/credits', teamsCreditRoute)
 
 /* =======================
    ERROR HANDLERS
