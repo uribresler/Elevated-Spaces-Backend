@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { createTeamSchema } from "../utils/teamSchema";
-import { acceptInvitationService, createTeamService, invitationService, removeTeamMemberService } from "../services/teams.service";
+import { acceptInvitationService, createTeamService, invitationService, reinviteService, removeTeamMemberService } from "../services/teams.service";
 import prisma from "../dbConnection";
 import { success } from "zod";
 
@@ -148,5 +148,44 @@ export async function removeMemberById(req: Request, res: Response) {
     } catch (error: any) {
         console.error(error);
         return res.status(400).json({ message: error.message || "Failed to remove member from the team" });
+    }
+}
+
+export async function reinviteInvitation(req: Request, res: Response) {
+    try {
+        const { email, subject, text, teamId } = req.body;
+        const userId = req.user?.id
+
+        if (!userId) {
+            return res.status(401).json({ message: "Unauthorized" });
+        }
+        const result = await reinviteService({ email, userId, subject, text, teamId })
+
+        return res.status(201).json({
+            message: "Invitation re-sent successfully",
+            data: result,
+        });
+
+    } catch (error: any) {
+        if (error.name === "ZodError") {
+            return res.status(400).json({ errors: error.errors });
+        }
+
+        if (error.code === "USER_NOT_FOUND") {
+            return res.status(404).json({ message: error.message });
+        }
+
+        // Log detailed error for debugging
+        console.error("Reinvite error:", {
+            message: error.message,
+            code: error.code,
+            stack: error.stack,
+            timestamp: new Date().toISOString(),
+        });
+
+        // Return actual error message to frontend
+        return res.status(500).json({
+            message: error.message || "Failed to re-send invitation"
+        });
     }
 }

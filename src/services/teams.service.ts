@@ -7,6 +7,40 @@ import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 dotenv.config();
 
+const INVITE_EXPIRY_MS = 24 * 60 * 60 * 1000;
+
+function buildInviteToken({
+    email,
+    invitedBy,
+    roleId,
+}: {
+    email: string;
+    invitedBy: string;
+    roleId: string;
+}) {
+    const JWT_SECRET = process.env.JWT_SECRET;
+    if (!JWT_SECRET) {
+        throw new Error("JWT_SECRET is not configured");
+    }
+
+    const rawToken = crypto.randomBytes(32).toString("hex");
+    return jwt.sign(
+        {
+            email,
+            invitedBy,
+            roleId,
+            type: "TEAM_INVITE",
+            tokenId: rawToken,
+        },
+        JWT_SECRET,
+        { expiresIn: "7d" }
+    );
+}
+
+function getInviteExpiry() {
+    return new Date(Date.now() + INVITE_EXPIRY_MS);
+}
+
 export async function createTeamService(
     { name,
         description,
@@ -48,23 +82,28 @@ export async function invitationService({ email, userId, subject, text, teamId }
     const team_exists = await prisma.teams.findUnique({ where: { id: teamId, owner_id: userId } })
     if (!team_exists) throw new Error("Team doesnot exists or you might not be the owner of team")
 
+    const inviteeUser = await prisma.user.findUnique({ where: { email } });
+    if (inviteeUser) {
+        const existingMembership = await prisma.team_membership.findFirst({
+            where: {
+                team_id: team_exists.id,
+                user_id: inviteeUser.id,
+            },
+        });
+
+        if (existingMembership) {
+            throw new Error("User is already a team member");
+        }
+    }
+
     const defaultRole = await prisma.team_roles.findFirst({ where: { name: "TEAM_USER" } })
     if (!defaultRole) throw new Error("Default role not found");
 
-    const rawToken = crypto.randomBytes(32).toString("hex");
-    const JWT_SECRET = process.env.JWT_SECRET;
-
-    const inviteToken = jwt.sign(
-        {
-            email,
-            invitedBy: userId,
-            roleId: defaultRole.id,
-            type: "TEAM_INVITE",
-            tokenId: rawToken, // helps revocation
-        },
-        JWT_SECRET!,
-        { expiresIn: "7d" }
-    );
+    const inviteToken = buildInviteToken({
+        email,
+        invitedBy: userId,
+        roleId: defaultRole.id,
+    });
 
     const invite = await prisma.team_invites.upsert({
         where: {
@@ -82,7 +121,7 @@ export async function invitationService({ email, userId, subject, text, teamId }
             credit_limit: 0,
             token: inviteToken,
             status: invite_status.PENDING,
-            expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000),
+            expires_at: getInviteExpiry(),
         },
         update: {
             team_role_id: defaultRole?.id,
@@ -91,7 +130,7 @@ export async function invitationService({ email, userId, subject, text, teamId }
             credit_limit: 0,
             token: inviteToken,
             status: invite_status.PENDING,
-            expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000),
+            expires_at: getInviteExpiry(),
             accepted_at: null,
             accepted_by_user_id: null,
         },
@@ -402,4 +441,129 @@ export async function removeTeamMemberService({
         success: true,
         message: "Member removed from the team",
     };
+}
+
+export async function reinviteService({
+    email,
+    userId,
+    subject,
+    text,
+    teamId,
+}: {
+    email: string;
+    userId: string;
+    subject: string;
+    text: string;
+    teamId: string;
+}) {
+    const existing = await prisma.user.findUnique({ where: { id: userId } });
+    if (!existing || !userId) {
+        const err: any = new Error("User doesnot exists, please create a normal account first");
+        err.code = "USER_NOT_FOUND";
+        throw err;
+    }
+
+    const team_exists = await prisma.teams.findUnique({ where: { id: teamId, owner_id: userId } });
+    if (!team_exists) throw new Error("Team doesnot exists or you might not be the owner of team");
+
+    const defaultRole = await prisma.team_roles.findFirst({ where: { name: "TEAM_USER" } });
+    if (!defaultRole) throw new Error("Default role not found");
+
+    const inviteeUser = await prisma.user.findUnique({ where: { email } });
+    if (inviteeUser) {
+        const existingMembership = await prisma.team_membership.findFirst({
+            where: {
+                team_id: team_exists.id,
+                user_id: inviteeUser.id,
+            },
+        });
+
+        if (existingMembership) {
+            throw new Error("User is already a team member");
+        }
+    }
+
+    const inviteToken = buildInviteToken({
+        email,
+        invitedBy: userId,
+        roleId: defaultRole.id,
+    });
+
+    const invite = await prisma.team_invites.upsert({
+        where: {
+            team_id_email: {
+                team_id: team_exists?.id,
+                email,
+            },
+        },
+        create: {
+            email,
+            team_id: team_exists?.id,
+            team_role_id: defaultRole?.id,
+            role_permissions_snapshot: defaultRole?.permissions?.toLocaleString(),
+            invited_by_user_id: userId,
+            credit_limit: 0,
+            token: inviteToken,
+            status: invite_status.PENDING,
+            expires_at: getInviteExpiry(),
+        },
+        update: {
+            team_role_id: defaultRole?.id,
+            role_permissions_snapshot: defaultRole?.permissions?.toLocaleString(),
+            invited_by_user_id: userId,
+            credit_limit: 0,
+            token: inviteToken,
+            status: invite_status.PENDING,
+            expires_at: getInviteExpiry(),
+            accepted_at: null,
+            accepted_by_user_id: null,
+        },
+    })
+
+    try {
+        const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+        await sendEmail({
+            from: existing.email,
+            senderName: existing.name ?? existing.email,
+            replyTo: existing.email,
+            to: email,
+            subject:
+                subject ??
+                `Reminder: ${existing.email} invited you to join Elevate Spaces`,
+            text:
+                text ??
+                `Reminder: you've been invited!\n\nAccept invite:\n${frontendUrl}/accept-invite?token=${inviteToken}`,
+        });
+
+        await prisma.team_invites.update({
+            where: { id: invite.id },
+            data: { status: invite_status.PENDING },
+        });
+
+        return {
+            success: true,
+            message: "Invitation re-sent successfully",
+            invite
+        };
+    } catch (err: any) {
+        console.error("❌ Reinvite email failed:", {
+            error: err.message,
+            code: err.code,
+            command: err.command,
+            response: err.response,
+            responseCode: err.responseCode,
+            email: email,
+            smtpHost: process.env.SMTP_HOST,
+            timestamp: new Date().toISOString(),
+        });
+
+        await prisma.team_invites.update({
+            where: { id: invite.id },
+            data: {
+                status: invite_status.FAILED,
+            },
+        });
+
+        throw new Error(`Failed to send reinvite email: ${err.message || 'Email server error'}`);
+    }
 }
