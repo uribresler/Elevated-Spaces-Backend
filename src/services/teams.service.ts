@@ -41,6 +41,62 @@ function getInviteExpiry() {
     return new Date(Date.now() + INVITE_EXPIRY_MS);
 }
 
+function buildInviteEmail({
+    inviterName,
+    inviterEmail,
+    teamName,
+    acceptUrl,
+    expiresAt,
+    isReinvite,
+}: {
+    inviterName: string;
+    inviterEmail: string;
+    teamName: string;
+    acceptUrl: string;
+    expiresAt: Date;
+    isReinvite?: boolean;
+}) {
+    const safeInviterName = inviterName || inviterEmail;
+    const expiryText = expiresAt.toLocaleString();
+    const headline = isReinvite
+        ? "Your team invite has been re-sent"
+        : "You have been invited to join a team";
+    const intro = isReinvite
+        ? "Here is your newest invite. Your previous invite is no longer valid."
+        : "Use the button below to accept your invite.";
+
+    const text = `${headline}\n\n` +
+        `Invited by: ${safeInviterName} (${inviterEmail})\n` +
+        `Team: ${teamName}\n` +
+        `Expires: ${expiryText}\n\n` +
+        `${intro}\n\n` +
+        `Accept invite: ${acceptUrl}`;
+
+    const html = `
+        <div style="font-family: Arial, sans-serif; background: #f8fafc; padding: 24px;">
+            <div style="max-width: 640px; margin: 0 auto; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
+                <div style="background: #0f172a; color: #ffffff; padding: 20px 24px;">
+                    <h1 style="margin: 0; font-size: 20px; font-weight: 600;">${headline}</h1>
+                </div>
+                <div style="padding: 24px; color: #0f172a;">
+                    <p style="margin: 0 0 16px 0; font-size: 14px;">${intro}</p>
+                    <div style="border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px; background: #f8fafc;">
+                        <p style="margin: 0 0 8px 0; font-size: 14px;"><strong>Invited by:</strong> ${safeInviterName} (${inviterEmail})</p>
+                        <p style="margin: 0 0 8px 0; font-size: 14px;"><strong>Team:</strong> ${teamName}</p>
+                        <p style="margin: 0; font-size: 14px;"><strong>Expires:</strong> ${expiryText}</p>
+                    </div>
+                    <div style="margin: 24px 0; text-align: center;">
+                        <a href="${acceptUrl}" style="display: inline-block; padding: 12px 20px; background: #2563eb; color: #ffffff; text-decoration: none; border-radius: 8px; font-size: 14px; font-weight: 600;">Accept Invite</a>
+                    </div>
+                    <p style="margin: 0; font-size: 12px; color: #64748b;">If the button does not work, copy and paste this link into your browser: ${acceptUrl}</p>
+                </div>
+            </div>
+        </div>
+    `;
+
+    return { text, html };
+}
+
 export async function createTeamService(
     { name,
         description,
@@ -138,6 +194,14 @@ export async function invitationService({ email, userId, subject, text, teamId }
 
     try {
         const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+        const acceptUrl = `${frontendUrl}/accept-invite?token=${inviteToken}`;
+        const emailTemplate = buildInviteEmail({
+            inviterName: existing.name ?? existing.email,
+            inviterEmail: existing.email,
+            teamName: team_exists.name,
+            acceptUrl,
+            expiresAt: invite.expires_at,
+        });
         await sendEmail({
             from: existing.email,
             senderName: existing.name ?? existing.email,
@@ -145,13 +209,9 @@ export async function invitationService({ email, userId, subject, text, teamId }
             to: email,
             subject:
                 subject ??
-                `${existing.email} invited you to join Elevate Spaces`,
-            text:
-                text ??
-                `You’ve been invited!
-
-Accept invite:
-${frontendUrl}/accept-invite?token=${inviteToken}`,
+                `${existing.email} invited you to join ${team_exists.name}`,
+            text: text ?? emailTemplate.text,
+            html: emailTemplate.html,
             // category: "Team Invitation",
         });
 
@@ -217,7 +277,7 @@ export async function acceptInvitationService({
 
     const invite = await prisma.team_invites.findUnique({ where: { token } });
     if (!invite) {
-        throw new Error("Invite not found");
+        throw new Error("This invite has been expired, please check your inbox for a newer invite");
     }
 
     if (invite.status === invite_status.ACCEPTED) {
@@ -522,6 +582,15 @@ export async function reinviteService({
 
     try {
         const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+        const acceptUrl = `${frontendUrl}/accept-invite?token=${inviteToken}`;
+        const emailTemplate = buildInviteEmail({
+            inviterName: existing.name ?? existing.email,
+            inviterEmail: existing.email,
+            teamName: team_exists.name,
+            acceptUrl,
+            expiresAt: invite.expires_at,
+            isReinvite: true,
+        });
         await sendEmail({
             from: existing.email,
             senderName: existing.name ?? existing.email,
@@ -529,10 +598,9 @@ export async function reinviteService({
             to: email,
             subject:
                 subject ??
-                `Reminder: ${existing.email} invited you to join Elevate Spaces`,
-            text:
-                text ??
-                `Reminder: you've been invited!\n\nAccept invite:\n${frontendUrl}/accept-invite?token=${inviteToken}`,
+                `Reminder: ${existing.email} invited you to join ${team_exists.name}`,
+            text: text ?? emailTemplate.text,
+            html: emailTemplate.html,
         });
 
         await prisma.team_invites.update({
