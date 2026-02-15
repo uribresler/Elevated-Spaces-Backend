@@ -34,6 +34,9 @@ model user {
   team_memberships      team_membership[]      @relation("TeamMember")
   team_invites_sent     team_invites[]         @relation("InvitesSent")
   team_invites_accepted team_invites[]         @relation("InvitesAccepted")
+  // Team projects
+  created_projects      team_project[]         @relation("ProjectCreator")
+  project_memberships   team_project_member[]
   // Personal credit tracking
   credit_balance        user_credit_balance?
   credit_purchases      user_credit_purchase[] @relation("CreditPurchases")
@@ -57,6 +60,7 @@ model teams {
   purchases   team_purchase[]
   usage_log   team_usage[]
   teamInvites team_invites[]
+  projects    team_project[]
 
   @@map("teams")
 }
@@ -179,6 +183,36 @@ model team_invites {
 
   @@unique([team_id, email])
   @@map("team_invites")
+}
+
+model team_project {
+  id                 String                 @id @default(uuid()) @map("id")
+  team_id            String                 @map("team_id")
+  name               String                 @map("name")
+  address            String?                @map("address")
+  description        String?                @map("description")
+  created_by_user_id String                 @map("created_by_user_id")
+  created_at         DateTime               @default(now()) @map("created_at")
+  updated_at         DateTime               @updatedAt @map("updated_at")
+  team               teams                  @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  created_by         user                   @relation("ProjectCreator", fields: [created_by_user_id], references: [id])
+  members            team_project_member[]
+
+  @@index([team_id, created_by_user_id])
+  @@map("team_project")
+}
+
+model team_project_member {
+  id          String               @id @default(uuid()) @map("id")
+  project_id  String               @map("project_id")
+  user_id     String               @map("user_id")
+  role        project_member_role  @default(PHOTOGRAPHER) @map("role")
+  assigned_at DateTime             @default(now()) @map("assigned_at")
+  project     team_project         @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  user        user                 @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([project_id, user_id])
+  @@map("team_project_member")
 }
 
 model photographer_profile {
@@ -422,6 +456,13 @@ enum booking_status {
   CANCELLED
 
   @@map("booking_status")
+}
+
+enum project_member_role {
+  PHOTOGRAPHER
+  AGENT
+
+  @@map("project_member_role")
 }
 
 enum invite_status {

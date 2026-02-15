@@ -57,44 +57,162 @@ function buildInviteEmail({
     isReinvite?: boolean;
 }) {
     const safeInviterName = inviterName || inviterEmail;
-    const expiryText = expiresAt.toLocaleString();
+    const expiryText = expiresAt.toLocaleString("en-US", { 
+        dateStyle: "full", 
+        timeStyle: "short" 
+    });
     const headline = isReinvite
         ? "Your team invite has been re-sent"
-        : "You have been invited to join a team";
+        : "You're invited to join a team";
     const intro = isReinvite
-        ? "Here is your newest invite. Your previous invite is no longer valid."
-        : "Use the button below to accept your invite.";
+        ? "Your previous invite has been replaced with this new one."
+        : "Click the button below to accept your invitation and join the team.";
 
     const text = `${headline}\n\n` +
+        `${intro}\n\n` +
         `Invited by: ${safeInviterName} (${inviterEmail})\n` +
         `Team: ${teamName}\n` +
-        `Expires: ${expiryText}\n\n` +
-        `${intro}\n\n` +
+        `Valid until: ${expiryText}\n\n` +
         `Accept invite: ${acceptUrl}`;
 
     const html = `
-        <div style="font-family: Arial, sans-serif; background: #f8fafc; padding: 24px;">
-            <div style="max-width: 640px; margin: 0 auto; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
-                <div style="background: #0f172a; color: #ffffff; padding: 20px 24px;">
-                    <h1 style="margin: 0; font-size: 20px; font-weight: 600;">${headline}</h1>
-                </div>
-                <div style="padding: 24px; color: #0f172a;">
-                    <p style="margin: 0 0 16px 0; font-size: 14px;">${intro}</p>
-                    <div style="border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px; background: #f8fafc;">
-                        <p style="margin: 0 0 8px 0; font-size: 14px;"><strong>Invited by:</strong> ${safeInviterName} (${inviterEmail})</p>
-                        <p style="margin: 0 0 8px 0; font-size: 14px;"><strong>Team:</strong> ${teamName}</p>
-                        <p style="margin: 0; font-size: 14px;"><strong>Expires:</strong> ${expiryText}</p>
-                    </div>
-                    <div style="margin: 24px 0; text-align: center;">
-                        <a href="${acceptUrl}" style="display: inline-block; padding: 12px 20px; background: #2563eb; color: #ffffff; text-decoration: none; border-radius: 8px; font-size: 14px; font-weight: 600;">Accept Invite</a>
-                    </div>
-                    <p style="margin: 0; font-size: 12px; color: #64748b;">If the button does not work, copy and paste this link into your browser: ${acceptUrl}</p>
-                </div>
-            </div>
-        </div>
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+        </head>
+        <body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc;">
+            <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f8fafc; padding: 40px 20px;">
+                <tr>
+                    <td align="center">
+                        <table width="600" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
+                            <tr>
+                                <td style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 32px 24px; text-align: center;">
+                                    <h1 style="margin: 0; color: #ffffff; font-size: 24px; font-weight: 600;">${headline}</h1>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 32px 24px;">
+                                    <p style="margin: 0 0 20px 0; font-size: 16px; line-height: 1.5; color: #334155;">${intro}</p>
+                                    
+                                    <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; margin: 24px 0;">
+                                        <tr>
+                                            <td style="padding: 20px;">
+                                                <p style="margin: 0 0 12px 0; font-size: 14px; color: #475569;"><strong style="color: #0f172a;">Invited by:</strong> ${safeInviterName}</p>
+                                                <p style="margin: 0 0 12px 0; font-size: 14px; color: #475569;"><strong style="color: #0f172a;">Email:</strong> ${inviterEmail}</p>
+                                                <p style="margin: 0 0 12px 0; font-size: 14px; color: #475569;"><strong style="color: #0f172a;">Team:</strong> ${teamName}</p>
+                                                <p style="margin: 0; font-size: 14px; color: #475569;"><strong style="color: #0f172a;">Valid until:</strong> ${expiryText}</p>
+                                            </td>
+                                        </tr>
+                                    </table>
+                                    
+                                    <table width="100%" cellpadding="0" cellspacing="0">
+                                        <tr>
+                                            <td align="center" style="padding: 24px 0;">
+                                                <a href="${acceptUrl}" style="display: inline-block; padding: 14px 32px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; border-radius: 8px; font-size: 16px; font-weight: 600; box-shadow: 0 4px 6px rgba(102, 126, 234, 0.3);">Accept Invitation</a>
+                                            </td>
+                                        </tr>
+                                    </table>
+                                    
+                                    <p style="margin: 24px 0 0 0; font-size: 13px; line-height: 1.6; color: #64748b; text-align: center;">If the button doesn't work, copy and paste this URL into your browser:<br><a href="${acceptUrl}" style="color: #667eea; word-break: break-all;">${acceptUrl}</a></p>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="background-color: #f8fafc; padding: 20px 24px; text-align: center; border-top: 1px solid #e2e8f0;">
+                                    <p style="margin: 0; font-size: 12px; color: #94a3b8;">This invitation will expire in 24 hours. If you didn't expect this invitation, you can safely ignore this email.</p>
+                                </td>
+                            </tr>
+                        </table>
+                    </td>
+                </tr>
+            </table>
+        </body>
+        </html>
     `;
 
     return { text, html };
+}
+
+async function getTeamAccess({
+    teamId,
+    userId,
+}: {
+    teamId: string;
+    userId: string;
+}) {
+    const team = await prisma.teams.findUnique({ where: { id: teamId } });
+    if (!team) {
+        throw new Error("Team doesnot exists");
+    }
+
+    if (team.owner_id === userId) {
+        return { team, roleName: "TEAM_OWNER" };
+    }
+
+    const membership = await prisma.team_membership.findUnique({
+        where: { team_id_user_id: { team_id: teamId, user_id: userId } },
+        include: { role: true },
+    });
+
+    if (!membership) {
+        throw new Error("You are not a member of this team");
+    }
+
+    return { team, roleName: membership.role.name };
+}
+
+function resolveInviteRoleName(roleName?: string) {
+    const normalized = roleName?.trim().toUpperCase();
+    const allowedRoles = ["TEAM_MEMBER", "TEAM_AGENT", "TEAM_PHOTOGRAPHER", "TEAM_ADMIN"];
+
+    if (!normalized) {
+        return "TEAM_MEMBER";
+    }
+
+    if (!allowedRoles.includes(normalized)) {
+        throw new Error("Invalid team role for invite");
+    }
+
+    return normalized;
+}
+
+function canInviteRole(inviterRole: string, requestedRole: string) {
+    if (inviterRole === "TEAM_OWNER" || inviterRole === "TEAM_ADMIN") {
+        return requestedRole !== "TEAM_OWNER";
+    }
+
+    if (inviterRole === "TEAM_AGENT") {
+        return requestedRole === "TEAM_PHOTOGRAPHER";
+    }
+
+    return false;
+}
+
+function normalizeAssignableRole(roleName: string) {
+    const normalized = roleName.trim().toUpperCase();
+    if (normalized === "TEAM_USER") {
+        return "TEAM_MEMBER";
+    }
+
+    const allowedRoles = ["TEAM_ADMIN", "TEAM_AGENT", "TEAM_PHOTOGRAPHER", "TEAM_MEMBER"];
+    if (!allowedRoles.includes(normalized)) {
+        throw new Error("Invalid team role assignment");
+    }
+
+    return normalized;
+}
+
+function canAssignRole(assignerRole: string, requestedRole: string) {
+    if (assignerRole === "TEAM_OWNER") {
+        return true;
+    }
+
+    if (assignerRole === "TEAM_ADMIN") {
+        return ["TEAM_PHOTOGRAPHER", "TEAM_AGENT", "TEAM_MEMBER"].includes(requestedRole);
+    }
+
+    return false;
 }
 
 export async function createTeamService(
@@ -127,7 +245,7 @@ export async function createTeamService(
     }
 }
 
-export async function invitationService({ email, userId, subject, text, teamId }: { email: string, userId: string, subject: string, text: string, teamId: string }) {
+export async function invitationService({ email, userId, subject, text, teamId, roleName }: { email: string, userId: string, subject: string, text: string, teamId: string, roleName?: string }) {
     const existing = await prisma.user.findUnique({ where: { id: userId } });
     if (!existing || !userId) {
         const err: any = new Error("User doesnot exists, please create a normal account first");
@@ -135,8 +253,11 @@ export async function invitationService({ email, userId, subject, text, teamId }
         throw err;
     }
 
-    const team_exists = await prisma.teams.findUnique({ where: { id: teamId, owner_id: userId } })
-    if (!team_exists) throw new Error("Team doesnot exists or you might not be the owner of team")
+    const { team: team_exists, roleName: inviterRole } = await getTeamAccess({ teamId, userId });
+    const inviteRoleName = resolveInviteRoleName(roleName);
+    if (!canInviteRole(inviterRole, inviteRoleName)) {
+        throw new Error("You are not allowed to invite this role");
+    }
 
     const inviteeUser = await prisma.user.findUnique({ where: { email } });
     if (inviteeUser) {
@@ -152,7 +273,9 @@ export async function invitationService({ email, userId, subject, text, teamId }
         }
     }
 
-    const defaultRole = await prisma.team_roles.findFirst({ where: { name: "TEAM_USER" } })
+    const defaultRole = await prisma.team_roles.findFirst({
+        where: { name: inviteRoleName },
+    }) || await prisma.team_roles.findFirst({ where: { name: "TEAM_USER" } });
     if (!defaultRole) throw new Error("Default role not found");
 
     const inviteToken = buildInviteToken({
@@ -192,64 +315,58 @@ export async function invitationService({ email, userId, subject, text, teamId }
         },
     })
 
-    try {
-        const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
-        const acceptUrl = `${frontendUrl}/accept-invite?token=${inviteToken}`;
-        const emailTemplate = buildInviteEmail({
-            inviterName: existing.name ?? existing.email,
-            inviterEmail: existing.email,
-            teamName: team_exists.name,
-            acceptUrl,
-            expiresAt: invite.expires_at,
-        });
-        await sendEmail({
-            from: existing.email,
-            senderName: existing.name ?? existing.email,
-            replyTo: existing.email,
-            to: email,
-            subject:
-                subject ??
-                `${existing.email} invited you to join ${team_exists.name}`,
-            text: text ?? emailTemplate.text,
-            html: emailTemplate.html,
-            // category: "Team Invitation",
-        });
+    // Send email asynchronously (non-blocking)
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const acceptUrl = `${frontendUrl}/accept-invite?token=${inviteToken}`;
+    const emailTemplate = buildInviteEmail({
+        inviterName: existing.name ?? existing.email,
+        inviterEmail: existing.email,
+        teamName: team_exists.name,
+        acceptUrl,
+        expiresAt: invite.expires_at,
+    });
 
-        // ✅ Update status to PENDING only if email sent successfully
-        await prisma.team_invites.update({
-            where: { id: invite.id },
-            data: { status: invite_status.PENDING },
-        });
+    // Send email in background without awaiting
+    setImmediate(async () => {
+        try {
+            await sendEmail({
+                from: existing.email,
+                senderName: existing.name ?? "Elevated Spaces Team",
+                replyTo: existing.email,
+                to: email,
+                subject: subject ?? `Join ${team_exists.name} - Team Invitation`,
+                text: text ?? emailTemplate.text,
+                html: emailTemplate.html,
+            });
 
-        return {
-            success: true,
-            message: "Invitation sent successfully",
-            invite
-        };
-    } catch (err: any) {
-        // ✅ Log detailed error information for debugging
-        console.error("❌ Email sending failed:", {
-            error: err.message,
-            code: err.code,
-            command: err.command,
-            response: err.response,
-            responseCode: err.responseCode,
-            email: email,
-            smtpHost: process.env.SMTP_HOST,
-            timestamp: new Date().toISOString(),
-        });
+            // Update status to PENDING if email sent successfully
+            await prisma.team_invites.update({
+                where: { id: invite.id },
+                data: { status: invite_status.PENDING },
+            });
 
-        // ✅ Mark as failed in database
-        await prisma.team_invites.update({
-            where: { id: invite.id },
-            data: {
-                status: invite_status.FAILED,
-            },
-        });
+            console.log(`✅ Invitation email sent to ${email}`);
+        } catch (err: any) {
+            console.error("❌ Email sending failed:", {
+                error: err.message,
+                email: email,
+                inviteId: invite.id,
+            });
 
-        // ✅ Re-throw the error so frontend gets proper error message
-        throw new Error(`Failed to send invitation email: ${err.message || 'Email server error'}`);
-    }
+            // Mark as failed in database
+            await prisma.team_invites.update({
+                where: { id: invite.id },
+                data: { status: invite_status.FAILED },
+            }).catch(console.error);
+        }
+    });
+
+    // Return immediately without waiting for email
+    return {
+        success: true,
+        message: "Invitation is being sent",
+        invite
+    };
 }
 
 export async function acceptInvitationService({
@@ -509,12 +626,14 @@ export async function reinviteService({
     subject,
     text,
     teamId,
+    roleName,
 }: {
     email: string;
     userId: string;
     subject: string;
     text: string;
     teamId: string;
+    roleName?: string;
 }) {
     const existing = await prisma.user.findUnique({ where: { id: userId } });
     if (!existing || !userId) {
@@ -523,10 +642,15 @@ export async function reinviteService({
         throw err;
     }
 
-    const team_exists = await prisma.teams.findUnique({ where: { id: teamId, owner_id: userId } });
-    if (!team_exists) throw new Error("Team doesnot exists or you might not be the owner of team");
+    const { team: team_exists, roleName: inviterRole } = await getTeamAccess({ teamId, userId });
+    const inviteRoleName = resolveInviteRoleName(roleName);
+    if (!canInviteRole(inviterRole, inviteRoleName)) {
+        throw new Error("You are not allowed to invite this role");
+    }
 
-    const defaultRole = await prisma.team_roles.findFirst({ where: { name: "TEAM_USER" } });
+    const defaultRole = await prisma.team_roles.findFirst({
+        where: { name: inviteRoleName },
+    }) || await prisma.team_roles.findFirst({ where: { name: "TEAM_USER" } });
     if (!defaultRole) throw new Error("Default role not found");
 
     const inviteeUser = await prisma.user.findUnique({ where: { email } });
@@ -580,58 +704,105 @@ export async function reinviteService({
         },
     })
 
-    try {
-        const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
-        const acceptUrl = `${frontendUrl}/accept-invite?token=${inviteToken}`;
-        const emailTemplate = buildInviteEmail({
-            inviterName: existing.name ?? existing.email,
-            inviterEmail: existing.email,
-            teamName: team_exists.name,
-            acceptUrl,
-            expiresAt: invite.expires_at,
-            isReinvite: true,
-        });
-        await sendEmail({
-            from: existing.email,
-            senderName: existing.name ?? existing.email,
-            replyTo: existing.email,
-            to: email,
-            subject:
-                subject ??
-                `Reminder: ${existing.email} invited you to join ${team_exists.name}`,
-            text: text ?? emailTemplate.text,
-            html: emailTemplate.html,
-        });
+    // Build email template
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const acceptUrl = `${frontendUrl}/accept-invite?token=${inviteToken}`;
+    const emailTemplate = buildInviteEmail({
+        inviterName: existing.name ?? existing.email,
+        inviterEmail: existing.email,
+        teamName: team_exists.name,
+        acceptUrl,
+        expiresAt: invite.expires_at,
+        isReinvite: true,
+    });
 
-        await prisma.team_invites.update({
-            where: { id: invite.id },
-            data: { status: invite_status.PENDING },
-        });
+    // Send reinvite email asynchronously (non-blocking)
+    setImmediate(async () => {
+        try {
+            await sendEmail({
+                from: existing.email,
+                senderName: existing.name ?? "Elevated Spaces Team",
+                replyTo: existing.email,
+                to: email,
+                subject: subject ?? `Reminder: Join ${team_exists.name} - Team Invitation`,
+                text: text ?? emailTemplate.text,
+                html: emailTemplate.html,
+            });
 
-        return {
-            success: true,
-            message: "Invitation re-sent successfully",
-            invite
-        };
-    } catch (err: any) {
-        console.error("❌ Reinvite email failed:", {
-            error: err.message,
-            code: err.code,
-            command: err.command,
-            response: err.response,
-            responseCode: err.responseCode,
-            email: email,
-            smtpHost: process.env.SMTP_HOST,
-            timestamp: new Date().toISOString(),
-        });
+            // Update status to PENDING if email sent successfully
+            await prisma.team_invites.update({
+                where: { id: invite.id },
+                data: { status: invite_status.PENDING },
+            });
 
-        await prisma.team_invites.update({
-            where: { id: invite.id },
-            data: {
-                status: invite_status.FAILED,
-            },
-        });
+            console.log(`✅ Reinvite email sent to ${email}`);
+        } catch (err: any) {
+            console.error("❌ Reinvite email failed:", {
+                error: err.message,
+                email: email,
+                inviteId: invite.id,
+            });
 
-        throw new Error(`Failed to send reinvite email: ${err.message || 'Email server error'}`);
+            // Mark as failed in database
+            await prisma.team_invites.update({
+                where: { id: invite.id },
+                data: { status: invite_status.FAILED },
+            }).catch(console.error);
+        }
+    });
+
+    // Return immediately without waiting for email
+    return {
+        success: true,
+        message: "Invitation is being re-sent",
+        invite
+    };
+}
+
+export async function updateTeamMemberRoleService({
+    teamId,
+    memberId,
+    roleName,
+    userId,
+}: {
+    teamId: string;
+    memberId: string;
+    roleName: string;
+    userId: string;
+}) {
+    if (!teamId || !memberId || !roleName) {
+        throw new Error("Team ID, member ID, and role are required");
     }
+
+    const { team, roleName: assignerRole } = await getTeamAccess({ teamId, userId });
+    const normalizedRole = normalizeAssignableRole(roleName);
+
+    if (!canAssignRole(assignerRole, normalizedRole)) {
+        throw new Error("You are not allowed to assign this role");
+    }
+
+    const membership = await prisma.team_membership.findUnique({
+        where: { team_id_user_id: { team_id: team.id, user_id: memberId } },
+    });
+
+    if (!membership) {
+        throw new Error("Member not found in this team");
+    }
+
+    const role = await prisma.team_roles.findFirst({ where: { name: normalizedRole } });
+    if (!role) {
+        throw new Error("Role not found");
+    }
+
+    const updated = await prisma.team_membership.update({
+        where: { team_id_user_id: { team_id: team.id, user_id: memberId } },
+        data: { team_role_id: role.id },
+        include: { role: true, user: true, team: true },
+    });
+
+    return {
+        success: true,
+        message: "Member role updated successfully",
+        membership: updated,
+    };
 }

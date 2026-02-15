@@ -23,7 +23,7 @@ export interface EmailProps {
     senderEmail?: string;
 }
 
-// Send email function
+// Send email function with spam prevention
 export const sendEmail = async ({
     from,
     senderName,
@@ -36,24 +36,53 @@ export const sendEmail = async ({
 }: EmailProps) => {
     // SendGrid requires verified sender email
     const verifiedSender = "saifullahahmed380@gmail.com"; // Your verified SendGrid sender
+    
     const msg = {
         to,
         from: {
             email: verifiedSender,
-            name: senderName,
+            name: senderName || "Elevated Spaces",
         },
-        replyTo: replyTo || from,
+        replyTo: replyTo || from || verifiedSender,
         subject,
         text,
         html,
+        // Anti-spam headers
+        headers: {
+            'X-Entity-Ref-ID': `invite-${Date.now()}`,
+        },
+        // Email categories for tracking
+        categories: ['team-invitation'],
+        // Custom arguments
+        customArgs: {
+            invite_type: 'team_member',
+            sender: from,
+        },
+        // Tracking settings to avoid spam triggers
+        trackingSettings: {
+            clickTracking: {
+                enable: false,
+            },
+            openTracking: {
+                enable: false,
+            },
+        },
     };
 
     try {
         const [response] = await sgMail.send(msg);
-        console.log("Email sent:", response.headers["x-message-id"]);
+        console.log("✅ Email sent successfully:", {
+            messageId: response.headers["x-message-id"],
+            to,
+            statusCode: response.statusCode,
+        });
         return response;
-    } catch (err) {
-        console.error("Error sending email:", err);
+    } catch (err: any) {
+        console.error("❌ SendGrid error:", {
+            message: err.message,
+            code: err.code,
+            response: err.response?.body,
+        });
         throw err;
     }
 };

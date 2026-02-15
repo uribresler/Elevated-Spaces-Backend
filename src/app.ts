@@ -6,6 +6,7 @@ import authRoute from "./api/auth.route";
 import imageRoute from "./api/image.route";
 import teamsRoute from './api/teams.route'
 import teamsCreditRoute from './api/teams.credits.route'
+import projectsRoute from './api/projects.route'
 import { errorHandler } from "./middlewares/errorHandler";
 import { zodErrorHandler } from "./middlewares/zodErrorHandler";
 import cors from "cors";
@@ -80,6 +81,7 @@ app.use("/api/auth", authRoute);
 app.use("/api/images", imageRoute);
 app.use('/api/teams', teamsRoute)
 app.use('/api/teams/credits', teamsCreditRoute)
+app.use('/api/projects', projectsRoute)
 
 /* =======================
    ERROR HANDLERS

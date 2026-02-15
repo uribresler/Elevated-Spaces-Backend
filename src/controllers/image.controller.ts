@@ -359,28 +359,98 @@ export async function getRecentUploads(req: Request, res: Response): Promise<voi
 
 export async function generateImage(req: Request, res: Response): Promise<void> {
   let isAdmin = false;
+  let userId: string | null = null;
+  let teamId: string | null = req.body.teamId || null; // Get teamId from request body
+  let teamMembership: any = null;
+  let isTeamOwner = false;
+
+  // Check if user is authenticated
   if (req.user && req.user.id) {
+    userId = req.user.id;
     const verifyRole = await prisma.user_roles.findFirst({
-      where: { user_id: req.user.id },
+      where: { user_id: userId },
       include: { role: true }
     })
 
     isAdmin = verifyRole?.role.name == "ADMIN" ? true : false;
+  }
 
-    if (!isAdmin) {
-      res.status(403).json({
-        success: false,
-        error: {
-          code: 'FORBIDDEN',
-          message: 'You do not have permission to perform this action.',
+  // If logged in and teamId provided, validate team access and credits
+  if (userId && teamId) {
+    // Check if user is team owner
+    const team = await prisma.teams.findFirst({
+      where: { 
+        id: teamId,
+        owner_id: userId,
+        deleted_at: null
+      }
+    });
+
+    if (team) {
+      isTeamOwner = true;
+      // Check if owner has credits in team wallet
+      if (team.wallet <= 0) {
+        res.status(403).json({
+          success: false,
+          error: {
+            code: 'INSUFFICIENT_CREDITS',
+            message: 'Team has insufficient credits. Please purchase more credits.',
+          },
+        });
+        return;
+      }
+    } else {
+      // Check if user is team member with allocated credits
+      teamMembership = await prisma.team_membership.findUnique({
+        where: { 
+          team_id_user_id: {
+            team_id: teamId,
+            user_id: userId
+          }
         },
+        include: {
+          team: true
+        }
       });
-      return;
+
+      if (!teamMembership || teamMembership.team.deleted_at) {
+        res.status(403).json({
+          success: false,
+          error: {
+            code: 'TEAM_ACCESS_DENIED',
+            message: 'You do not have access to this team.',
+          },
+        });
+        return;
+      }
+
+      // Check if member has remaining credits
+      const remainingCredits = teamMembership.allocated - teamMembership.used;
+      if (remainingCredits <= 0) {
+        res.status(403).json({
+          success: false,
+          error: {
+            code: 'INSUFFICIENT_CREDITS',
+            message: 'You have no remaining credits in this team. Please contact your team owner.',
+          },
+        });
+        return;
+      }
     }
+  } else if (userId && !teamId) {
+    // Logged in but no teamId provided - require team selection
+    res.status(400).json({
+      success: false,
+      error: {
+        code: 'TEAM_REQUIRED',
+        message: 'Please select a team to use credits from.',
+      },
+    });
+    return;
   }
 
   let inputImagePath: string | null = null;
-  const isDemo = true;
+  const isDemo = !userId; // Demo mode only for guests
   const sessionId = req.cookies?.session_id || req.headers['x-fingerprint'] || req.ip;
   let guestTracking = null;
   let demoCount = 0;
@@ -672,6 +742,39 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
       }
     });
     await Promise.all(imagePromises);
+
+    // Deduct credits after successful generation (1 credit per image set)
+    if (userId && teamId) {
+      try {
+        if (isTeamOwner) {
+          // Deduct from team wallet
+          await prisma.teams.update({
+            where: { id: teamId },
+            data: { wallet: { decrement: 1 } }
+          });
+        } else if (teamMembership) {
+          // Deduct from member's allocated credits
+          await prisma.team_membership.update({
+            where: { id: teamMembership.id },
+            data: { used: { increment: 1 } }
+          });
+
+          // Log usage
+          await prisma.team_usage.create({
+            data: {
+              membership_id: teamMembership.id,
+              image_id: originalUrl || 'unknown',
+              credits_used: 1,
+              teamsId: teamId,
+            }
+          });
+        }
+      } catch (err) {
+        logger(`Failed to deduct credits: ${err}`);
+        // Don't fail the request, just log the error
+      }
+    }
+
     // Signal completion
     res.write('event: done\ndata: {}\n\n');
     res.end();
