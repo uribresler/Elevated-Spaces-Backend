@@ -130,31 +130,6 @@ async function seedRoles() {
     },
   });
 
-  await prisma.team_roles.upsert({
-    where: { name: "TEAM_MEMBER" },
-    update: {
-      permissions: teamMemberPermissions,
-    },
-    create: {
-      name: "TEAM_MEMBER",
-      description: "Standard team member",
-      permissions: teamMemberPermissions,
-    },
-  });
-
-  // Backward compatibility for existing TEAM_USER references
-  await prisma.team_roles.upsert({
-    where: { name: "TEAM_USER" },
-    update: {
-      permissions: teamMemberPermissions,
-    },
-    create: {
-      name: "TEAM_USER",
-      description: "Legacy team member role",
-      permissions: teamMemberPermissions,
-    },
-  });
-
   console.log("Team roles seeded with hierarchy permissions");
 }
 

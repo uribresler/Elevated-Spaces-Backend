@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { createTeamSchema } from "../utils/teamSchema";
-import { acceptInvitationService, createTeamService, invitationService, reinviteService, removeTeamMemberService, updateTeamMemberRoleService } from "../services/teams.service";
+import { acceptInvitationService, createTeamService, invitationService, reinviteService, removeTeamMemberService, updateTeamMemberRoleService, leaveTeamService, transferCreditsBeforeLeavingService, completeLeaveTeamService, deleteTeamService, cancelInvitationService } from "../services/teams.service";
 import prisma from "../dbConnection";
 import { success } from "zod";
 
@@ -35,6 +35,43 @@ export async function createTeam(req: Request, res: Response) {
 
         console.error(error);
         return res.status(500).json({ message: "Something went wrong" });
+    }
+}
+
+// Update team name endpoint
+export async function updateTeamName(req: Request, res: Response) {
+    try {
+        const { teamId, name } = req.body;
+        const userId = req.user?.id;
+        if (!userId) {
+            return res.status(401).json({ message: "Unauthorized" });
+        }
+        // Fetch membership to check role
+        const membership = await prisma.team_membership.findFirst({
+            where: {
+                team_id: teamId,
+                user_id: userId,
+                deleted_at: null,
+            },
+            include: { role: true }
+        });
+        const team = await prisma.teams.findUnique({ where: { id: teamId } });
+        if (!team) {
+            return res.status(404).json({ message: "Team not found" });
+        }
+        const isOwner = team.owner_id === userId;
+        const isAdmin = membership?.role?.name === "TEAM_ADMIN";
+        if (!isOwner && !isAdmin) {
+            return res.status(403).json({ message: "Only owner or admin can update team name" });
+        }
+        await prisma.teams.update({
+            where: { id: teamId },
+            data: { name },
+        });
+        return res.status(200).json({ message: "Team name updated successfully" });
+    } catch (error: any) {
+        console.error(error);
+        return res.status(500).json({ message: error.message || "Failed to update team name" });
     }
 }
 
@@ -90,16 +127,36 @@ export async function acceptInvitation(req: Request, res: Response) {
     }
 }
 
+export async function cancelInvitation(req: Request, res: Response) {
+    try {
+        const inviteId = req.params.id;
+        const userId = req.user?.id;
+        if (!userId) {
+            return res.status(401).json({ message: "Unauthorized" });
+        }
+        const result = await cancelInvitationService({ inviteId, userId });
+        return res.status(200).json({ message: result.message });
+    } catch (error: any) {
+        return res.status(400).json({ message: error.message });
+    }
+}
+
 export async function getMyTeams(req: Request, res: Response) {
     try {
         const userId = req.user?.id;
 
         const teams = await prisma.teams.findMany({
-            where: { owner_id: userId },
+            where: {
+                owner_id: userId,
+                deleted_at: null,
+            },
             include: {
                 teamInvites: true,
                 owner: true,
-                members: { include: { role: true, user: true } },
+                members: {
+                    where: { deleted_at: null },
+                    include: { role: true, user: true }
+                },
                 purchases: true,
                 usage_log: true
             }
@@ -136,10 +193,6 @@ export async function getMyTeams(req: Request, res: Response) {
     }
 }
 
-/**
- * Get teams with credit allocation for the logged-in user
- * Returns teams where user is owner or member with their allocated/remaining credits
- */
 export async function getMyTeamsWithCredits(req: Request, res: Response) {
     try {
         const userId = req.user?.id;
@@ -153,7 +206,7 @@ export async function getMyTeamsWithCredits(req: Request, res: Response) {
 
         // Get teams where user is owner
         const ownedTeams = await prisma.teams.findMany({
-            where: { 
+            where: {
                 owner_id: userId,
                 deleted_at: null
             },
@@ -166,8 +219,9 @@ export async function getMyTeamsWithCredits(req: Request, res: Response) {
 
         // Get teams where user is a member
         const memberTeams = await prisma.team_membership.findMany({
-            where: { 
+            where: {
                 user_id: userId,
+                deleted_at: null,
             },
             include: {
                 team: {
@@ -298,13 +352,19 @@ export async function getTeamsByUserId(req: Request, res: Response) {
         }
 
         const memberships = await prisma.team_membership.findMany({
-            where: { user_id: userId },
+            where: {
+                user_id: userId,
+                deleted_at: null,
+            },
             include: {
                 team: {
                     include: {
                         teamInvites: true,
                         owner: true,
-                        members: { include: { role: true, user: true } },
+                        members: {
+                            where: { deleted_at: null },
+                            include: { role: true, user: true }
+                        },
                         purchases: true,
                         usage_log: true,
                     }
@@ -314,10 +374,12 @@ export async function getTeamsByUserId(req: Request, res: Response) {
 
         const teams = memberships
             .map((membership) => membership.team)
-            .filter((team) => team.owner_id !== userId);
+            .filter((team) => team.owner_id !== userId && !team.deleted_at);
 
         const filteredTeams = teams.map((team) => {
-            const activeMemberIds = new Set(team.members.map((m) => m.user_id));
+            const activeMemberIds = new Set(team.members
+                .filter((m) => !m.deleted_at)
+                .map((m) => m.user_id));
             const filteredInvites = team.teamInvites.filter((invite) => {
                 if (invite.status !== "ACCEPTED") {
                     return true;
@@ -364,5 +426,98 @@ export async function updateTeamMemberRole(req: Request, res: Response) {
     } catch (error: any) {
         console.error(error);
         return res.status(400).json({ message: error.message || "Failed to update member role" });
+    }
+}
+
+export async function leaveTeam(req: Request, res: Response) {
+    try {
+        const { teamId } = req.body;
+        const userId = req.user?.id;
+
+        if (!userId) {
+            return res.status(401).json({ message: "Unauthorized" });
+        }
+
+        if (!teamId) {
+            return res.status(400).json({ message: "Team ID is required" });
+        }
+
+        const result = await leaveTeamService({ teamId, userId });
+
+        return res.status(200).json(result);
+    } catch (error: any) {
+        console.error(error);
+        return res.status(400).json({ message: error.message || "Failed to leave the team" });
+    }
+}
+
+export async function transferCreditsBeforeLeaving(req: Request, res: Response) {
+    try {
+        const { teamId, transferToUserId, credits } = req.body;
+        const userId = req.user?.id;
+
+        if (!userId) {
+            return res.status(401).json({ message: "Unauthorized" });
+        }
+
+        if (!teamId || !credits || credits <= 0) {
+            return res.status(400).json({ message: "Team ID and credits amount are required" });
+        }
+
+        const result = await transferCreditsBeforeLeavingService({
+            teamId,
+            userId,
+            transferToUserId,
+            credits,
+        });
+
+        return res.status(200).json(result);
+    } catch (error: any) {
+        console.error(error);
+        return res.status(400).json({ message: error.message || "Failed to transfer credits" });
+    }
+}
+
+export async function completeLeaveTeam(req: Request, res: Response) {
+    try {
+        const { teamId } = req.body;
+        const userId = req.user?.id;
+
+        if (!userId) {
+            return res.status(401).json({ message: "Unauthorized" });
+        }
+
+        if (!teamId) {
+            return res.status(400).json({ message: "Team ID is required" });
+        }
+
+        const result = await completeLeaveTeamService({ teamId, userId });
+
+        return res.status(200).json(result);
+    } catch (error: any) {
+        console.error(error);
+        return res.status(400).json({ message: error.message || "Failed to complete leave" });
+    }
+}
+
+export async function deleteTeam(req: Request, res: Response) {
+    try {
+        const { teamId } = req.body;
+        const userId = req.user?.id;
+
+        if (!userId) {
+            return res.status(401).json({ message: "Unauthorized" });
+        }
+
+        if (!teamId) {
+            return res.status(400).json({ message: "Team ID is required" });
+        }
+
+        const result = await deleteTeamService({ teamId, userId });
+
+        return res.status(200).json(result);
+    } catch (error: any) {
+        console.error(error);
+        return res.status(400).json({ message: error.message || "Failed to delete team" });
     }
 }

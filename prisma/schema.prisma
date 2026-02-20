@@ -76,6 +76,7 @@ model team_membership {
   used         Int          @default(0) @map("used")
   joined_at    DateTime     @default(now()) @map("joined_at")
   updated_at   DateTime     @updatedAt @map("updated_at")
+  deleted_at   DateTime?    @map("deleted_at")
   user         user         @relation("TeamMember", fields: [user_id], references: [id], onDelete: Cascade)
   team         teams        @relation(fields: [team_id], references: [id], onDelete: Cascade)
   role         team_roles   @relation(fields: [team_role_id], references: [id])

@@ -15,7 +15,7 @@ async function getTeamRole({ teamId, userId }: { teamId: string; userId: string 
         include: { role: true },
     });
 
-    if (!membership) {
+    if (!membership || membership.deleted_at) {
         throw new Error("You are not a member of this team");
     }
 
@@ -102,11 +102,10 @@ export async function getMyProjectsService({ userId }: { userId: string }) {
 
     const ownerTeamIds = ownedTeams.map((team) => team.id);
     const adminTeamIds = memberships.filter((m) => m.role.name === "TEAM_ADMIN").map((m) => m.team_id);
-    const memberTeamIds = memberships.filter((m) => m.role.name === "TEAM_MEMBER" || m.role.name === "TEAM_USER").map((m) => m.team_id);
     const agentTeamIds = memberships.filter((m) => m.role.name === "TEAM_AGENT").map((m) => m.team_id);
     const photographerTeamIds = memberships.filter((m) => m.role.name === "TEAM_PHOTOGRAPHER").map((m) => m.team_id);
 
-    const fullAccessTeamIds = Array.from(new Set([...ownerTeamIds, ...adminTeamIds, ...memberTeamIds]));
+    const fullAccessTeamIds = Array.from(new Set([...ownerTeamIds, ...adminTeamIds]));
 
     const orFilters: any[] = [];
 

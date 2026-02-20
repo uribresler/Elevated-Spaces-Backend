@@ -7,7 +7,8 @@ import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 dotenv.config();
 
-const INVITE_EXPIRY_MS = 24 * 60 * 60 * 1000;
+// const INVITE_EXPIRY_MS = 24 * 60 * 60 * 1000;
+const INVITE_EXPIRY_MS = 60 * 1000;
 
 function buildInviteToken({
     email,
@@ -57,9 +58,9 @@ function buildInviteEmail({
     isReinvite?: boolean;
 }) {
     const safeInviterName = inviterName || inviterEmail;
-    const expiryText = expiresAt.toLocaleString("en-US", { 
-        dateStyle: "full", 
-        timeStyle: "short" 
+    const expiryText = expiresAt.toLocaleString("en-US", {
+        dateStyle: "full",
+        timeStyle: "short"
     });
     const headline = isReinvite
         ? "Your team invite has been re-sent"
@@ -155,7 +156,7 @@ async function getTeamAccess({
         include: { role: true },
     });
 
-    if (!membership) {
+    if (!membership || membership.deleted_at) {
         throw new Error("You are not a member of this team");
     }
 
@@ -164,10 +165,10 @@ async function getTeamAccess({
 
 function resolveInviteRoleName(roleName?: string) {
     const normalized = roleName?.trim().toUpperCase();
-    const allowedRoles = ["TEAM_MEMBER", "TEAM_AGENT", "TEAM_PHOTOGRAPHER", "TEAM_ADMIN"];
+    const allowedRoles = ["TEAM_AGENT", "TEAM_PHOTOGRAPHER", "TEAM_ADMIN"];
 
     if (!normalized) {
-        return "TEAM_MEMBER";
+        return "TEAM_AGENT";
     }
 
     if (!allowedRoles.includes(normalized)) {
@@ -191,11 +192,7 @@ function canInviteRole(inviterRole: string, requestedRole: string) {
 
 function normalizeAssignableRole(roleName: string) {
     const normalized = roleName.trim().toUpperCase();
-    if (normalized === "TEAM_USER") {
-        return "TEAM_MEMBER";
-    }
-
-    const allowedRoles = ["TEAM_ADMIN", "TEAM_AGENT", "TEAM_PHOTOGRAPHER", "TEAM_MEMBER"];
+    const allowedRoles = ["TEAM_ADMIN", "TEAM_AGENT", "TEAM_PHOTOGRAPHER"];
     if (!allowedRoles.includes(normalized)) {
         throw new Error("Invalid team role assignment");
     }
@@ -209,7 +206,7 @@ function canAssignRole(assignerRole: string, requestedRole: string) {
     }
 
     if (assignerRole === "TEAM_ADMIN") {
-        return ["TEAM_PHOTOGRAPHER", "TEAM_AGENT", "TEAM_MEMBER"].includes(requestedRole);
+        return ["TEAM_PHOTOGRAPHER", "TEAM_AGENT"].includes(requestedRole);
     }
 
     return false;
@@ -260,23 +257,34 @@ export async function invitationService({ email, userId, subject, text, teamId, 
     }
 
     const inviteeUser = await prisma.user.findUnique({ where: { email } });
+    const defaultRole = await prisma.team_roles.findFirst({
+        where: { name: inviteRoleName },
+    });
+
+    if (!defaultRole) throw new Error("Default role not found");
     if (inviteeUser) {
         const existingMembership = await prisma.team_membership.findFirst({
             where: {
                 team_id: team_exists.id,
                 user_id: inviteeUser.id,
+                deleted_at: null,
             },
         });
 
         if (existingMembership) {
             throw new Error("User is already a team member");
         }
-    }
 
-    const defaultRole = await prisma.team_roles.findFirst({
-        where: { name: inviteRoleName },
-    }) || await prisma.team_roles.findFirst({ where: { name: "TEAM_USER" } });
-    if (!defaultRole) throw new Error("Default role not found");
+        // Check if there's a deleted membership record, but DO NOT reactivate it yet
+        const deletedMembership = await prisma.team_membership.findFirst({
+            where: {
+                team_id: team_exists.id,
+                user_id: inviteeUser.id,
+                deleted_at: { not: null },
+            },
+        });
+        // Do not reactivate membership here; only do so on invite acceptance
+    }
 
     const inviteToken = buildInviteToken({
         email,
@@ -294,8 +302,8 @@ export async function invitationService({ email, userId, subject, text, teamId, 
         create: {
             email,
             team_id: team_exists?.id,
-            team_role_id: defaultRole?.id,
-            role_permissions_snapshot: defaultRole?.permissions?.toLocaleString(),
+            team_role_id: defaultRole.id,
+            role_permissions_snapshot: defaultRole.permissions?.toLocaleString(),
             invited_by_user_id: userId,
             credit_limit: 0,
             token: inviteToken,
@@ -303,8 +311,8 @@ export async function invitationService({ email, userId, subject, text, teamId, 
             expires_at: getInviteExpiry(),
         },
         update: {
-            team_role_id: defaultRole?.id,
-            role_permissions_snapshot: defaultRole?.permissions?.toLocaleString(),
+            team_role_id: defaultRole.id,
+            role_permissions_snapshot: defaultRole.permissions?.toLocaleString(),
             invited_by_user_id: userId,
             credit_limit: 0,
             token: inviteToken,
@@ -462,6 +470,8 @@ export async function acceptInvitationService({
         },
         update: {
             team_role_id: invite.team_role_id,
+            deleted_at: null, // Ensure any previously deleted membership is reactivated
+            joined_at: new Date(), // Reset joined_at to current time for reactivated members
         },
     });
 
@@ -511,6 +521,7 @@ export async function removeTeamMemberService({
             where: {
                 team_id,
                 user_id: userId,
+                deleted_at: null,
             }
         });
 
@@ -532,11 +543,16 @@ export async function removeTeamMemberService({
             });
         }
 
-        const removedMembership = await prisma.team_membership.deleteMany({
+        // Soft delete - set deleted_at instead of hard delete
+        const removedMembership = await prisma.team_membership.updateMany({
             where: {
                 team_id,
                 user_id: userId,
+                deleted_at: null,
             },
+            data: {
+                deleted_at: new Date(),
+            }
         });
 
         if (removedMembership.count === 0) {
@@ -573,6 +589,7 @@ export async function removeTeamMemberService({
         where: {
             team_id,
             user_id: invite.accepted_by_user_id,
+            deleted_at: null,
         }
     });
 
@@ -594,11 +611,16 @@ export async function removeTeamMemberService({
         });
     }
 
-    const removedMembership = await prisma.team_membership.deleteMany({
+    // Soft delete - set deleted_at instead of hard delete
+    const removedMembership = await prisma.team_membership.updateMany({
         where: {
             team_id,
             user_id: invite.accepted_by_user_id,
+            deleted_at: null,
         },
+        data: {
+            deleted_at: new Date(),
+        }
     });
 
     if (removedMembership.count === 0) {
@@ -650,7 +672,7 @@ export async function reinviteService({
 
     const defaultRole = await prisma.team_roles.findFirst({
         where: { name: inviteRoleName },
-    }) || await prisma.team_roles.findFirst({ where: { name: "TEAM_USER" } });
+    });
     if (!defaultRole) throw new Error("Default role not found");
 
     const inviteeUser = await prisma.user.findUnique({ where: { email } });
@@ -659,12 +681,23 @@ export async function reinviteService({
             where: {
                 team_id: team_exists.id,
                 user_id: inviteeUser.id,
+                deleted_at: null,
             },
         });
 
         if (existingMembership) {
             throw new Error("User is already a team member");
         }
+
+        // Check if there's a deleted membership record, but DO NOT reactivate it yet
+        const deletedMembership = await prisma.team_membership.findFirst({
+            where: {
+                team_id: team_exists.id,
+                user_id: inviteeUser.id,
+                deleted_at: { not: null },
+            },
+        });
+        // Do not reactivate membership here; only do so on invite acceptance
     }
 
     const inviteToken = buildInviteToken({
@@ -683,8 +716,8 @@ export async function reinviteService({
         create: {
             email,
             team_id: team_exists?.id,
-            team_role_id: defaultRole?.id,
-            role_permissions_snapshot: defaultRole?.permissions?.toLocaleString(),
+            team_role_id: defaultRole.id,
+            role_permissions_snapshot: defaultRole.permissions?.toLocaleString(),
             invited_by_user_id: userId,
             credit_limit: 0,
             token: inviteToken,
@@ -692,8 +725,8 @@ export async function reinviteService({
             expires_at: getInviteExpiry(),
         },
         update: {
-            team_role_id: defaultRole?.id,
-            role_permissions_snapshot: defaultRole?.permissions?.toLocaleString(),
+            team_role_id: defaultRole.id,
+            role_permissions_snapshot: defaultRole.permissions?.toLocaleString(),
             invited_by_user_id: userId,
             credit_limit: 0,
             token: inviteToken,
@@ -759,6 +792,54 @@ export async function reinviteService({
     };
 }
 
+export async function cancelInvitationService({ inviteId, userId }: { inviteId: string, userId: string }) {
+    if (!inviteId || !userId) {
+        throw new Error("Invite ID and User ID are required");
+    }
+
+    const invite = await prisma.team_invites.findUnique({ where: { id: inviteId } });
+    if (!invite) {
+        throw new Error("Invitation not found");
+    }
+
+    // Only allow cancel if status is PENDING
+    if (invite.status !== invite_status.PENDING) {
+        throw new Error("Only pending invitations can be cancelled");
+    }
+
+    // Only owner/admin can cancel
+    const team = await prisma.teams.findUnique({ where: { id: invite.team_id } });
+    if (!team) {
+        throw new Error("Team not found");
+    }
+
+    // Check if user is team owner
+    const isTeamOwner = team.owner_id === userId;
+
+    // Or check if user is admin
+    const membership = await prisma.team_membership.findFirst({
+        where: {
+            team_id: invite.team_id,
+            user_id: userId,
+            deleted_at: null,
+        },
+        include: { role: true }
+    });
+
+    const isTeamAdmin = membership?.role?.name === "TEAM_ADMIN";
+
+    if (!isTeamOwner && !isTeamAdmin) {
+        throw new Error("Only team owner or admin can cancel invitations");
+    }
+
+    await prisma.team_invites.update({
+        where: { id: inviteId },
+        data: { status: invite_status.FAILED, expires_at: new Date() },
+    });
+
+    return { success: true, message: "Invitation cancelled" };
+}
+
 export async function updateTeamMemberRoleService({
     teamId,
     memberId,
@@ -804,5 +885,232 @@ export async function updateTeamMemberRoleService({
         success: true,
         message: "Member role updated successfully",
         membership: updated,
+    };
+}
+
+export async function leaveTeamService({ teamId, userId }: { teamId: string, userId: string }) {
+    if (!teamId || !userId) {
+        throw new Error("Team ID and User ID are required");
+    }
+
+    const team = await prisma.teams.findUnique({ where: { id: teamId } });
+    if (!team) {
+        throw new Error("Team does not exist");
+    }
+
+    if (team.owner_id === userId) {
+        throw new Error("Team owner cannot leave the team. Please transfer ownership or delete the team.");
+    }
+
+    const userMembership = await prisma.team_membership.findUnique({
+        where: { team_id_user_id: { team_id: teamId, user_id: userId } },
+        include: { user: true }
+    });
+
+    if (!userMembership || userMembership.deleted_at) {
+        throw new Error("You are not a member of this team");
+    }
+
+    // Check available credits
+    const availableCredits = Math.max(
+        Number(userMembership.allocated) - Number(userMembership.used),
+        0
+    );
+
+    // If user has credits, return them without leaving
+    if (availableCredits > 0) {
+        return {
+            success: true,
+            requiresCreditsTransfer: true,
+            availableCredits,
+            message: "Please transfer your credits before leaving the team",
+            teamId,
+            userId,
+        };
+    }
+
+    // Soft delete the membership
+    await prisma.team_membership.update({
+        where: { id: userMembership.id },
+        data: { deleted_at: new Date() },
+    });
+
+    console.log("TEAM_MEMBER_LEFT", {
+        action: "SELF_LEAVE",
+        team_id: teamId,
+        user_id: userId,
+        timestamp: new Date().toISOString(),
+    });
+
+    return {
+        success: true,
+        requiresCreditsTransfer: false,
+        message: "You have left the team",
+    };
+}
+
+export async function transferCreditsBeforeLeavingService({
+    teamId,
+    userId,
+    transferToUserId,
+    credits,
+}: {
+    teamId: string;
+    userId: string;
+    transferToUserId?: string;
+    credits: number;
+}) {
+    if (!teamId || !userId || credits <= 0) {
+        throw new Error("Team ID, User ID, and credits amount are required");
+    }
+
+    const team = await prisma.teams.findUnique({ where: { id: teamId } });
+    if (!team) {
+        throw new Error("Team does not exist");
+    }
+
+    const userMembership = await prisma.team_membership.findUnique({
+        where: { team_id_user_id: { team_id: teamId, user_id: userId } },
+    });
+
+    if (!userMembership || userMembership.deleted_at) {
+        throw new Error("You are not a member of this team");
+    }
+
+    const availableCredits = Math.max(
+        Number(userMembership.allocated) - Number(userMembership.used),
+        0
+    );
+
+    if (credits > availableCredits) {
+        throw new Error(`Cannot transfer more credits than available (${availableCredits})`);
+    }
+
+    // Transfer to team wallet
+    if (!transferToUserId) {
+        await prisma.teams.update({
+            where: { id: teamId },
+            data: {
+                wallet: { increment: credits },
+            }
+        });
+
+        // Reduce user's allocated credits
+        await prisma.team_membership.update({
+            where: { id: userMembership.id },
+            data: {
+                allocated: { decrement: credits },
+            }
+        });
+
+        return {
+            success: true,
+            message: `${credits} credits transferred to team wallet`,
+        };
+    }
+
+    // Transfer to another team member
+    const targetMembership = await prisma.team_membership.findUnique({
+        where: { team_id_user_id: { team_id: teamId, user_id: transferToUserId } },
+    });
+
+    if (!targetMembership || targetMembership.deleted_at) {
+        throw new Error("Target member not found or is inactive");
+    }
+
+    // Transfer credits
+    await prisma.team_membership.update({
+        where: { id: userMembership.id },
+        data: {
+            allocated: { decrement: credits },
+        }
+    });
+
+    await prisma.team_membership.update({
+        where: { id: targetMembership.id },
+        data: {
+            allocated: { increment: credits },
+        }
+    });
+
+    console.log("CREDITS_TRANSFERRED_BEFORE_LEAVE", {
+        from_user_id: userId,
+        to_user_id: transferToUserId,
+        team_id: teamId,
+        credits,
+        timestamp: new Date().toISOString(),
+    });
+
+    return {
+        success: true,
+        message: `${credits} credits transferred to team member`,
+    };
+}
+
+export async function completeLeaveTeamService({ teamId, userId }: { teamId: string, userId: string }) {
+    if (!teamId || !userId) {
+        throw new Error("Team ID and User ID are required");
+    }
+
+    const userMembership = await prisma.team_membership.findUnique({
+        where: { team_id_user_id: { team_id: teamId, user_id: userId } },
+    });
+
+    if (!userMembership || userMembership.deleted_at) {
+        throw new Error("You are not a member of this team");
+    }
+
+    // Soft delete the membership
+    await prisma.team_membership.update({
+        where: { id: userMembership.id },
+        data: { deleted_at: new Date() },
+    });
+
+    console.log("TEAM_MEMBER_LEFT", {
+        action: "SELF_LEAVE_AFTER_CREDIT_TRANSFER",
+        team_id: teamId,
+        user_id: userId,
+        timestamp: new Date().toISOString(),
+    });
+
+    return {
+        success: true,
+        message: "You have successfully left the team",
+    };
+}
+
+export async function deleteTeamService({ teamId, userId }: { teamId: string, userId: string }) {
+    if (!teamId || !userId) {
+        throw new Error("Team ID and User ID are required");
+    }
+
+    const team = await prisma.teams.findUnique({ where: { id: teamId } });
+    if (!team) {
+        throw new Error("Team does not exist");
+    }
+
+    if (team.owner_id !== userId) {
+        throw new Error("Only the team owner can delete the team");
+    }
+
+    if (team.deleted_at) {
+        throw new Error("Team is already deleted");
+    }
+
+    // Soft delete the team
+    await prisma.teams.update({
+        where: { id: teamId },
+        data: { deleted_at: new Date() },
+    });
+
+    console.log("TEAM_DELETED", {
+        team_id: teamId,
+        deleted_by_user_id: userId,
+        timestamp: new Date().toISOString(),
+    });
+
+    return {
+        success: true,
+        message: "Team has been deleted successfully",
     };
 }
