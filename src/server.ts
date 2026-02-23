@@ -3,6 +3,7 @@ import app from './app';
 import prisma from './dbConnection';
 import { supabaseStorage } from './services/supabaseStorage.service';
 import { startCleanupCron } from './cron/cleanupExpiredInvitations';
+import { processPendingPurchases } from './services/payment.service';
 dotenv.config();
 
 const PORT = process.env.PORT || 3003;
@@ -36,4 +37,18 @@ app.listen(PORT, async () => {
 
   // Start cron job for cleaning up expired invitations
   startCleanupCron();
+
+  // Process pending purchases on startup
+  try {
+    await processPendingPurchases();
+  } catch (err) {
+    console.error('Failed to process pending purchases on startup:', err);
+  }
+
+  // Schedule pending purchase processing every 5 minutes
+  setInterval(() => {
+    processPendingPurchases().catch(err => {
+      console.error('Scheduled pending purchase processing failed:', err);
+    });
+  }, 5 * 60 * 1000); // 5 minutes
 });

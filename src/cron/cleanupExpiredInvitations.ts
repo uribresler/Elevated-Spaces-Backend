@@ -7,7 +7,7 @@ import { invite_status } from "@prisma/client";
 async function cleanupExpiredInvitations() {
     try {
         // Calculate the date 24 hours ago
-        const oneDayAgo = new Date(Date.now() -  60 * 1000);
+        const oneDayAgo = new Date(Date.now() - 60 * 1000);
 
         // Find and delete pending invitations that expired more than 24 hours ago
         const result = await prisma.team_invites.deleteMany({
@@ -46,7 +46,7 @@ export function startCleanupCron() {
     cleanupExpiredInvitations();
 
     // Run every 24 hours (24 * 60 * 60 * 1000 milliseconds)
-    const CRON_INTERVAL = 60 * 1000;
+    const CRON_INTERVAL = 24 * 60 * 60 * 1000;
     const intervalId = setInterval(() => {
         cleanupExpiredInvitations();
     }, CRON_INTERVAL);

@@ -6,7 +6,7 @@ import { requireAuth, optionalAuth } from "../middlewares/auth";
 const router = Router();
 
 // Get recent uploads (local storage)
-router.get("/recent", getRecentUploads);
+router.get("/recent", requireAuth, getRecentUploads);
 
 // Generate/stage an image using AI
 router.post("/generate", optionalAuth, uploadImage, generateImage);

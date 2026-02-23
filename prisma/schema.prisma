@@ -188,16 +188,17 @@ model team_invites {
 
 model team_project {
   id                 String                 @id @default(uuid()) @map("id")
-  team_id            String                 @map("team_id")
+  team_id            String?                @map("team_id")
   name               String                 @map("name")
   address            String?                @map("address")
   description        String?                @map("description")
   created_by_user_id String                 @map("created_by_user_id")
   created_at         DateTime               @default(now()) @map("created_at")
   updated_at         DateTime               @updatedAt @map("updated_at")
-  team               teams                  @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  team               teams?                 @relation(fields: [team_id], references: [id], onDelete: Cascade)
   created_by         user                   @relation("ProjectCreator", fields: [created_by_user_id], references: [id])
   members            team_project_member[]
+  images             image[]                @relation("ProjectImages")
 
   @@index([team_id, created_by_user_id])
   @@map("team_project")
@@ -250,6 +251,7 @@ model image {
   id                      String            @id @default(uuid()) @map("id")
   user_id                 String?           @map("user_id")
   guest_id                String?           @map("guest_id")
+  project_id              String?           @map("project_id")
   original_image_url      String            @map("original_image_url")
   staged_image_url        String?           @map("staged_image_url")
   watermarked_preview_url String?           @map("watermarked_preview_url")
@@ -268,7 +270,9 @@ model image {
   analytics_events        analytics_event[]
   guest_tracking          guest_tracking?   @relation(fields: [guest_id], references: [id])
   user                    user?             @relation(fields: [user_id], references: [id])
+  project                 team_project?     @relation("ProjectImages", fields: [project_id], references: [id], onDelete: SetNull)
 
+  @@index([project_id])
   @@map("image")
 }
 
@@ -317,6 +321,18 @@ model payment {
   user              user           @relation(fields: [user_id], references: [id])
 
   @@map("payment")
+}
+
+model webhook_event {
+  id            String   @id @default(uuid()) @map("id")
+  event_type    String   @map("event_type")
+  event_id      String   @unique @map("event_id")
+  data          Json     @map("data")
+  processed     Boolean  @default(false) @map("processed")
+  error_message String?  @map("error_message")
+  created_at    DateTime @default(now()) @map("created_at")
+
+  @@map("webhook_event")
 }
 
 model booking {

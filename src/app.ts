@@ -7,6 +7,8 @@ import imageRoute from "./api/image.route";
 import teamsRoute from './api/teams.route'
 import teamsCreditRoute from './api/teams.credits.route'
 import projectsRoute from './api/projects.route'
+import paymentRoutes from './api/payment.routes'
+import { stripeWebhookHandler } from "./controllers/payment.controller";
 import { errorHandler } from "./middlewares/errorHandler";
 import { zodErrorHandler } from "./middlewares/zodErrorHandler";
 import cors from "cors";
@@ -55,6 +57,10 @@ app.use(cors())
    MIDDLEWARES
 ======================= */
 
+// Stripe webhook requires raw body
+app.post("/api/payment/webhook", express.raw({ type: "application/json" }),
+    stripeWebhookHandler);
+
 app.use(express.json());
 
 // Initialize Passport
@@ -82,6 +88,7 @@ app.use("/api/images", imageRoute);
 app.use('/api/teams', teamsRoute)
 app.use('/api/teams/credits', teamsCreditRoute)
 app.use('/api/projects', projectsRoute)
+app.use('/api/payment', paymentRoutes)
 
 /* =======================
    ERROR HANDLERS

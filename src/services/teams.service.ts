@@ -8,7 +8,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 // const INVITE_EXPIRY_MS = 24 * 60 * 60 * 1000;
-const INVITE_EXPIRY_MS = 60 * 1000;
+const INVITE_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 function buildInviteToken({
     email,

@@ -32,9 +32,12 @@ declare global {
 export async function restageImage(req: Request, res: Response): Promise<void> {
   // ADMIN BYPASS: If user is ADMIN, skip all restrictions
   let isAdmin = false;
+  let userId: string | null = null;
+  
   if (req.user && req.user.id) {
+    userId = req.user.id;
     const verifyRole = await prisma.user_roles.findFirst({
-      where: { user_id: req.user.id },
+      where: { user_id: userId },
       include: { role: true }
     })
 
@@ -78,8 +81,8 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
   try {
     const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false, removeFurniture = false } = req.body;
     // DEMO LIMIT & ABUSE TRACKING (DB-backed)
-    // Apply demo logic to guests and logged-in users without a subscription (subscription logic to be added later)
-    let isDemo = true;
+    // Demo mode only for guests (users without authentication)
+    let isDemo = !userId;
     let guestTracking = null;
     let demoCount = 0;
     let demoLimitReached = false;
@@ -230,8 +233,8 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
       });
       return;
     }
-    // Always watermark restaged images (demo mode)
-    if (stagedImageBuffer) {
+    // Add watermark only for demo users (guests without a paid plan)
+    if (isDemo && stagedImageBuffer) {
       stagedImageBuffer = await addWatermark(stagedImageBuffer, "DEMO PREVIEW");
     }
     // STORAGE: Upload to Supabase
@@ -329,19 +332,66 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
  */
 export async function getRecentUploads(req: Request, res: Response): Promise<void> {
   try {
+    // Check if user is authenticated
+    if (!req.user || !req.user.id) {
+      res.status(401).json({
+        success: false,
+        error: {
+          code: "UNAUTHORIZED",
+          message: "Authentication required to view your uploads.",
+        },
+      });
+      return;
+    }
+
+    const userId = req.user.id;
     const { limit = 10 } = req.query;
     const maxLimit = Math.min(Number(limit), 50); // Cap at 50
 
-    // Fetch from Supabase storage
-    const result = await supabaseStorage.listRecentUploads(maxLimit);
+    // Fetch user's images from database
+    const userImages = await prisma.image.findMany({
+      where: {
+        user_id: userId,
+      },
+      orderBy: {
+        created_at: "desc",
+      },
+      take: maxLimit,
+    });
+
+    // Build response with image URLs
+    const uploads = userImages.map((img) => {
+      const originalUrl = img.original_image_url;
+      const stagedUrl = img.staged_image_url || null;
+
+      // Extract original filename from URL if needed
+      const originalFilename = originalUrl.split("/").pop() || "original";
+      const stagedFilename = stagedUrl ? stagedUrl.split("/").pop() || "staged" : null;
+
+      return {
+        original: {
+          filename: originalFilename,
+          url: originalUrl,
+          createdAt: img.created_at.toISOString(),
+        },
+        staged: stagedUrl
+          ? {
+              filename: stagedFilename,
+              url: stagedUrl,
+              createdAt: img.updated_at.toISOString(),
+            }
+          : null,
+        createdAt: img.created_at.toISOString(),
+      };
+    });
 
     res.status(200).json({
       success: true,
       data: {
-        uploads: result.uploads,
-        total: result.total,
+        uploads,
+        total: userImages.length,
         limit: maxLimit,
-        storage: "supabase",
+        storage: "database",
       },
     });
   } catch (error) {
@@ -361,6 +411,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
   let isAdmin = false;
   let userId: string | null = null;
   let teamId: string | null = req.body.teamId || null; // Get teamId from request body
+  let projectId: string | null = req.body.projectId || null; // Get projectId from request body
   let teamMembership: any = null;
   let isTeamOwner = false;
 
@@ -373,6 +424,17 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     })
 
     isAdmin = verifyRole?.role.name == "ADMIN" ? true : false;
+  }
+
+  // Validate teamId - only process if it's a non-empty string
+  // Empty strings, "undefined", null, etc. should not be treated as valid teamIds
+  if (!teamId || typeof teamId !== 'string' || teamId.trim() === '' || teamId === 'undefined' || teamId === 'null') {
+    teamId = null;
+  }
+
+  // Validate projectId
+  if (!projectId || typeof projectId !== 'string' || projectId.trim() === '' || projectId === 'undefined' || projectId === 'null') {
+    projectId = null;
   }
 
   // If logged in and teamId provided, validate team access and credits
@@ -438,15 +500,23 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
       }
     }
   } else if (userId && !teamId) {
-    // Logged in but no teamId provided - require team selection
-    res.status(400).json({
-      success: false,
-      error: {
-        code: 'TEAM_REQUIRED',
-        message: 'Please select a team to use credits from.',
-      },
+    // Logged in but no teamId provided - check personal credits
+    const personalCredits = await prisma.user_credit_balance.findUnique({
+      where: { user_id: userId }
     });
-    return;
+
+    logger(`Personal credits check - userId: ${userId}, balance: ${personalCredits?.balance || 0}`);
+
+    if (!personalCredits || personalCredits.balance <= 0) {
+      res.status(403).json({
+        success: false,
+        error: {
+          code: 'INSUFFICIENT_CREDITS',
+          message: 'You have no remaining credits. Please purchase more credits to continue.',
+        },
+      });
+      return;
+    }
   }
 
   let inputImagePath: string | null = null;
@@ -724,10 +794,28 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
         const unwatermarkedFileName = `staged-unwatermarked-${Date.now()}-${i}.png`;
         const stagedUrl = await supabaseStorage.uploadStagedFromBuffer(watermarked, stagedFileName, "image/png");
         await supabaseStorage.uploadStagedFromBuffer(unwatermarked, unwatermarkedFileName, "image/png");
+        // Save to database
+        const imageRecord = await prisma.image.create({
+          data: {
+            user_id: userId,
+            project_id: projectId,
+            original_image_url: originalUrl || '',
+            staged_image_url: stagedUrl,
+            watermarked_preview_url: isDemo ? stagedUrl : null,
+            status: 'COMPLETED',
+            is_demo: isDemo,
+            room_type: roomType,
+            staging_style: stagingStyle,
+            prompt: prompt || null,
+            source: isDemo ? 'demo' : 'user',
+          }
+        });
+
         // Stream each image as soon as it's ready
         res.write(`event: image\ndata: ${JSON.stringify({
           stagedImageUrl: stagedUrl,
           stagedId: unwatermarkedFileName,
+          imageId: imageRecord.id,
           index: i,
           isDemo,
           roomType,
@@ -771,6 +859,17 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
         }
       } catch (err) {
         logger(`Failed to deduct credits: ${err}`);
+        // Don't fail the request, just log the error
+      }
+    } else if (userId && !teamId) {
+      // Deduct from personal credits
+      try {
+        await prisma.user_credit_balance.update({
+          where: { user_id: userId },
+          data: { balance: { decrement: 1 } }
+        });
+      } catch (err) {
+        logger(`Failed to deduct personal credits: ${err}`);
         // Don't fail the request, just log the error
       }
     }

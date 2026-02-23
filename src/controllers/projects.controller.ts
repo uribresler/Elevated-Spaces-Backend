@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { addProjectPhotographerService, createProjectService, getMyProjectsService } from "../services/projects.service";
+import { addProjectPhotographerService, createProjectService, getMyProjectsService, getProjectImagesService } from "../services/projects.service";
 
 export async function createProject(req: Request, res: Response) {
     try {
@@ -61,5 +61,26 @@ export async function addProjectPhotographer(req: Request, res: Response) {
     } catch (error: any) {
         console.error(error);
         return res.status(400).json({ message: error.message || "Failed to add photographer" });
+    }
+}
+
+export async function getProjectImages(req: Request, res: Response) {
+    try {
+        const { projectId } = req.params;
+        const userId = req.user?.id;
+
+        if (!userId) {
+            return res.status(401).json({ message: "Unauthorized" });
+        }
+
+        const result = await getProjectImagesService({
+            projectId,
+            userId,
+        });
+
+        return res.status(200).json(result);
+    } catch (error: any) {
+        console.error(error);
+        return res.status(400).json({ message: error.message || "Failed to fetch project images" });
     }
 }
