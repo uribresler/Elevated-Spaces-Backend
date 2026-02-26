@@ -20,7 +20,8 @@ if (process.env.NODE_ENV === 'production' && !process.env.FRONTEND_URL) {
 export async function signup(req: Request, res: Response) {
   try {
     const data = signupSchema.parse(req.body);
-    const result = await signupService(data);
+    const fromDemoBonus = req.body.fromDemoBonus === true;
+    const result = await signupService({ ...data, fromDemoBonus });
     return res.status(201).json(result);
   } catch (err: unknown) {
     if (err instanceof ZodError) {

@@ -520,14 +520,34 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
   }
 
   let inputImagePath: string | null = null;
-  const isDemo = !userId; // Demo mode only for guests
+  // Demo mode: guests OR logged-in users who haven't purchased credits (bonus credits only)
+  let isDemo = !userId;
+  let hasPurchasedCredits = false;
+  
+  // If logged in, check if they have purchased credits
+  if (userId) {
+    const purchaseCount = await prisma.user_credit_purchase.count({
+      where: {
+        user_id: userId,
+        status: 'completed',
+      },
+    });
+    hasPurchasedCredits = purchaseCount > 0;
+    // If they haven't purchased credits, treat them as demo users (bonus credits)
+    if (!hasPurchasedCredits) {
+      isDemo = true;
+    }
+  }
+  
   const sessionId = req.cookies?.session_id || req.headers['x-fingerprint'] || req.ip;
   let guestTracking = null;
   let demoCount = 0;
   let demoLimitReached = false;
   let blocked = false;
   const now = new Date();
-  if (isDemo) {
+  
+  // Only apply guest tracking for actual guests (not logged in)
+  if (!userId) {
     // Find or create guest_tracking record
     const ipStr = req.ip || '';
     guestTracking = await prisma.guest_tracking.findFirst({
@@ -822,8 +842,8 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
           stagingStyle,
           prompt: prompt || null,
           storage: "supabase",
-          demoCount: isDemo ? demoCount : undefined,
-          demoLimit: isDemo ? 10 : undefined,
+          demoCount: (!userId && isDemo) ? demoCount : undefined,
+          demoLimit: (!userId && isDemo) ? 10 : undefined,
         })}\n\n`);
       } catch (err) {
         res.write(`event: error\ndata: ${JSON.stringify({ message: 'Failed to generate or upload image', error: String(err) })}\n\n`);

@@ -8,10 +8,12 @@ export async function signupService({
   email,
   password,
   name,
+  fromDemoBonus = false,
 }: {
   email: string;
   password: string;
   name?: string;
+  fromDemoBonus?: boolean;
 }) {
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing) {
@@ -34,6 +36,23 @@ export async function signupService({
       role_id: defaultRole?.id
     }
   })
+
+  // Add 5 bonus credits if signing up from demo bonus offer
+  if (fromDemoBonus) {
+    await prisma.user_credit_balance.upsert({
+      where: { user_id: user.id },
+      create: {
+        user_id: user.id,
+        balance: 5,
+      },
+      update: {
+        balance: {
+          increment: 5,
+        },
+      },
+    });
+  }
+
   const token = jwt.sign({ userId: user.id, role: defaultRole.name }, JWT_SECRET, { expiresIn: "7d" });
   return {
     token,

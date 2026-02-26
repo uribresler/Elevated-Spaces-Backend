@@ -12,6 +12,13 @@ if (!STRIPE_SECRET_KEY) {
 
 const stripe = new Stripe(STRIPE_SECRET_KEY, { apiVersion: STRIPE_API_VERSION });
 
+const ACTIVE_SUBSCRIPTION_STATUSES = new Set([
+    "active",
+    "trialing",
+    "past_due",
+    "unpaid",
+]);
+
 export type PurchaseFor = "individual" | "team";
 export type ProductKey =
     | "starter"
@@ -84,6 +91,89 @@ async function ensureStripeCustomer(userId: string) {
     return { user, customerId: customer.id };
 }
 
+async function listActiveSubscriptionsForScope({
+    customerId,
+    purchaseFor,
+    teamId,
+    userId,
+}: {
+    customerId: string;
+    purchaseFor: PurchaseFor;
+    teamId?: string;
+    userId: string;
+}) {
+    const subscriptions = await stripe.subscriptions.list({
+        customer: customerId,
+        status: "all",
+        limit: 100,
+    });
+
+    return subscriptions.data.filter((subscription) => {
+        if (!ACTIVE_SUBSCRIPTION_STATUSES.has(subscription.status)) {
+            return false;
+        }
+
+        const metadata = subscription.metadata || {};
+        if (metadata.purchaseFor !== purchaseFor || metadata.userId !== userId) {
+            return false;
+        }
+
+        if (purchaseFor === "team") {
+            return metadata.teamId === teamId;
+        }
+
+        return !metadata.teamId;
+    });
+}
+
+async function cancelOtherActiveSubscriptions({
+    customerId,
+    purchaseFor,
+    teamId,
+    userId,
+    keepSubscriptionId,
+}: {
+    customerId: string;
+    purchaseFor: PurchaseFor;
+    teamId?: string;
+    userId: string;
+    keepSubscriptionId: string;
+}) {
+    const activeSubscriptions = await listActiveSubscriptionsForScope({
+        customerId,
+        purchaseFor,
+        teamId,
+        userId,
+    });
+
+    const subscriptionsToCancel = activeSubscriptions.filter(
+        (subscription) => subscription.id !== keepSubscriptionId
+    );
+
+    if (subscriptionsToCancel.length === 0) {
+        return;
+    }
+
+    await Promise.all(
+        subscriptionsToCancel.map(async (subscription) => {
+            try {
+                await stripe.subscriptions.cancel(subscription.id);
+                console.log("[PAYMENT] Canceled previous subscription", {
+                    subscriptionId: subscription.id,
+                    purchaseFor,
+                    teamId,
+                    userId,
+                });
+            } catch (error: any) {
+                console.error("[PAYMENT] Failed to cancel subscription", {
+                    subscriptionId: subscription.id,
+                    error: error?.message || error,
+                });
+            }
+        })
+    );
+}
+
 async function assertTeamOwner(teamId: string, userId: string) {
     const team = await prisma.teams.findFirst({
         where: { id: teamId, deleted_at: null },
@@ -131,12 +221,14 @@ export async function createCheckoutSession({
     purchaseFor,
     teamId,
     quantity,
+    confirmPlanChange,
 }: {
     userId: string;
     productKey: string;
     purchaseFor: PurchaseFor;
     teamId?: string;
     quantity?: number;
+    confirmPlanChange?: boolean;
 }) {
     const config = getProductConfig(productKey);
     if (purchaseFor !== "individual" && purchaseFor !== "team") {
@@ -157,6 +249,24 @@ export async function createCheckoutSession({
 
     const { customerId } = await ensureStripeCustomer(userId);
 
+    const existingSubscriptions = config.type === "subscription"
+        ? await listActiveSubscriptionsForScope({
+            customerId,
+            purchaseFor,
+            teamId,
+            userId,
+        })
+        : [];
+    const replacingSubscriptionId = existingSubscriptions[0]?.id;
+
+    if (config.type === "subscription" && existingSubscriptions.length > 0 && !confirmPlanChange) {
+        const error: any = new Error(
+            "You already have an active subscription. Changing plans will cancel the current plan and transfer any unused credits to your wallet. Confirm to proceed."
+        );
+        error.code = "PLAN_CHANGE_CONFIRMATION_REQUIRED";
+        throw error;
+    }
+
     const credits = calcCredits(config, safeQuantity);
     const unitAmount = toCents(config.unitAmountUsd);
     const totalAmount = unitAmount * safeQuantity;
@@ -172,6 +282,10 @@ export async function createCheckoutSession({
 
     if (teamId) {
         metadata.teamId = teamId;
+    }
+
+    if (replacingSubscriptionId) {
+        metadata.replacingSubscriptionId = replacingSubscriptionId;
     }
 
     const session = await stripe.checkout.sessions.create({
@@ -339,6 +453,22 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
         }
 
         await prisma.$transaction(operations);
+
+        if (config.type === "subscription") {
+            const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
+            const newSubscriptionId = typeof session.subscription === "string"
+                ? session.subscription
+                : session.subscription?.id;
+            if (customerId && newSubscriptionId) {
+                await cancelOtherActiveSubscriptions({
+                    customerId,
+                    purchaseFor,
+                    teamId,
+                    userId,
+                    keepSubscriptionId: newSubscriptionId,
+                });
+            }
+        }
         return;
     }
 
@@ -384,6 +514,21 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
 
         operations.push(applyCreditsToUser(userId, credits));
         await prisma.$transaction(operations);
+
+        if (config.type === "subscription") {
+            const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
+            const newSubscriptionId = typeof session.subscription === "string"
+                ? session.subscription
+                : session.subscription?.id;
+            if (customerId && newSubscriptionId) {
+                await cancelOtherActiveSubscriptions({
+                    customerId,
+                    purchaseFor,
+                    userId,
+                    keepSubscriptionId: newSubscriptionId,
+                });
+            }
+        }
         return;
     }
 

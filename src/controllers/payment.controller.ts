@@ -10,7 +10,7 @@ export async function createCheckoutSessionHandler(req: Request, res: Response) 
             return res.status(401).json({ message: "Unauthorized" });
         }
 
-        const { productKey, purchaseFor, teamId, quantity } = req.body;
+        const { productKey, purchaseFor, teamId, quantity, confirmPlanChange } = req.body;
         if (!productKey || !purchaseFor) {
             return res.status(400).json({ message: "Product key and purchase type are required" });
         }
@@ -21,10 +21,17 @@ export async function createCheckoutSessionHandler(req: Request, res: Response) 
             purchaseFor,
             teamId,
             quantity,
+            confirmPlanChange,
         });
 
         return res.status(200).json(result);
     } catch (error: any) {
+        if (error?.code === "PLAN_CHANGE_CONFIRMATION_REQUIRED") {
+            return res.status(409).json({
+                message: error.message || "Plan change confirmation required",
+                code: error.code,
+            });
+        }
         return res.status(400).json({ message: error.message || "Failed to create checkout session" });
     }
 }
