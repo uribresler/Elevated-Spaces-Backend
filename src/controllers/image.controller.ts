@@ -25,6 +25,28 @@ declare global {
   var demoUploadCounts: Record<string, number> | undefined;
 }
 
+function getDeviceTypeFromUserAgent(userAgent: string | string[] | undefined): string | null {
+  const ua = Array.isArray(userAgent) ? userAgent[0] : userAgent || "";
+  if (!ua) return null;
+  if (/mobile/i.test(ua)) return "mobile";
+  if (/tablet/i.test(ua)) return "tablet";
+  return "desktop";
+}
+
+async function getDemoLimitForUser(userId: string): Promise<number> {
+  const demoBonus = await prisma.analytics_event.findFirst({
+    where: { user_id: userId, event_type: "demo_bonus_granted" },
+    select: { id: true },
+  });
+  return demoBonus ? 15 : 10;
+}
+
+async function getDemoUsageCountForUser(userId: string): Promise<number> {
+  return prisma.analytics_event.count({
+    where: { user_id: userId, event_type: "demo_credit_used" },
+  });
+}
+
 /**
  * Restage a previously staged image with a new prompt (variation/edit)
  * Accepts a staged image file and prompt, returns a new staged image
@@ -81,55 +103,77 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
   try {
     const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false, removeFurniture = false } = req.body;
     // DEMO LIMIT & ABUSE TRACKING (DB-backed)
-    // Demo mode only for guests (users without authentication)
     let isDemo = !userId;
+    let hasPurchasedCredits = false;
     let guestTracking = null;
     let demoCount = 0;
+    let demoLimit = 10;
     let demoLimitReached = false;
     const now = new Date();
     // Always use device fingerprint for demo tracking (from header/cookie or fallback to session)
     const deviceFingerprint = req.headers['x-fingerprint'] || req.cookies?.device_id || req.cookies?.session_id || req.ip;
-    // For both guests and unpaid users, use device-based tracking
-    guestTracking = await prisma.guest_tracking.findFirst({
-      where: { fingerprint: deviceFingerprint },
-    });
-    if (!guestTracking) {
-      guestTracking = await prisma.guest_tracking.create({
-        data: {
-          fingerprint: deviceFingerprint,
-          ip: req.ip || '',
-          uploads_count: 0,
-          blocked: false,
-          last_used_at: now,
+
+    if (userId) {
+      const purchaseCount = await prisma.user_credit_purchase.count({
+        where: {
+          user_id: userId,
+          status: 'completed',
         },
       });
+      hasPurchasedCredits = purchaseCount > 0;
+      if (!hasPurchasedCredits) {
+        isDemo = true;
+      }
     }
-    // Check if 30 days have passed since last_used_at
-    const lastUsed = new Date(guestTracking.last_used_at);
-    const daysSinceLast = Math.floor((now.getTime() - lastUsed.getTime()) / (1000 * 60 * 60 * 24));
-    let uploads_count = guestTracking.uploads_count;
-    if (daysSinceLast >= 30) {
-      // Log a reset event
-      await prisma.analytics_event.create({
-        data: {
-          event_type: 'demo_limit_reset',
-          ip: req.ip || '',
-          source: 'demo',
-          timestamp: now,
-        },
+
+    if (userId && isDemo) {
+      demoLimit = await getDemoLimitForUser(userId);
+      demoCount = await getDemoUsageCountForUser(userId);
+    }
+
+    if (!userId) {
+      guestTracking = await prisma.guest_tracking.findFirst({
+        where: { fingerprint: deviceFingerprint },
       });
-      // Reset uploads_count and update last_used_at
-      uploads_count = 0;
-      await prisma.guest_tracking.update({
-        where: { id: guestTracking.id },
-        data: { uploads_count: 0, last_used_at: now },
-      });
+      if (!guestTracking) {
+        guestTracking = await prisma.guest_tracking.create({
+          data: {
+            fingerprint: deviceFingerprint,
+            ip: req.ip || '',
+            uploads_count: 0,
+            blocked: false,
+            last_used_at: now,
+          },
+        });
+      }
+      // Check if 30 days have passed since last_used_at
+      const lastUsed = new Date(guestTracking.last_used_at);
+      const daysSinceLast = Math.floor((now.getTime() - lastUsed.getTime()) / (1000 * 60 * 60 * 24));
+      let uploads_count = guestTracking.uploads_count;
+      if (daysSinceLast >= 30) {
+        // Log a reset event
+        await prisma.analytics_event.create({
+          data: {
+            event_type: 'demo_limit_reset',
+            ip: req.ip || '',
+            source: 'demo',
+            timestamp: now,
+          },
+        });
+        // Reset uploads_count and update last_used_at
+        uploads_count = 0;
+        await prisma.guest_tracking.update({
+          where: { id: guestTracking.id },
+          data: { uploads_count: 0, last_used_at: now },
+        });
+      }
+      demoCount = uploads_count;
+      if (demoCount >= 10) {
+        demoLimitReached = true;
+      }
     }
-    demoCount = uploads_count;
-    if (demoCount >= 10) {
-      demoLimitReached = true;
-    }
-    if (demoLimitReached) {
+
+    if (!userId && demoLimitReached) {
       res.status(429).json({
         success: false,
         error: {
@@ -267,6 +311,24 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
     // CLEANUP: Remove temp file
     await fs.promises.unlink(tempPath);
     // Track demo upload for session/IP/fingerprint (restage counts as a demo use)
+    if (isDemo && userId) {
+      const ip = req.ip || '';
+      const language = req.headers['accept-language'] || null;
+      const deviceType = getDeviceTypeFromUserAgent(req.headers['user-agent']);
+      const location = ip || null;
+      await prisma.analytics_event.create({
+        data: {
+          event_type: 'demo_credit_used',
+          user_id: userId,
+          ip,
+          language: typeof language === 'string' ? language.split(',')[0] : null,
+          device_type: deviceType,
+          location,
+          source: 'demo',
+        },
+      });
+      demoCount += 1;
+    }
     if (isDemo && guestTracking) {
       await prisma.guest_tracking.update({
         where: { id: guestTracking.id },
@@ -279,11 +341,7 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
       // --- Analytics event logging ---
       const ip = req.ip || '';
       const language = req.headers['accept-language'] || null;
-      const userAgent = req.headers['user-agent'] || '';
-      let deviceType: string | null = null;
-      if (/mobile/i.test(userAgent)) deviceType = 'mobile';
-      else if (/tablet/i.test(userAgent)) deviceType = 'tablet';
-      else deviceType = 'desktop';
+      const deviceType = getDeviceTypeFromUserAgent(req.headers['user-agent']);
       const location = ip;
       // Check if this guest is a repeat demo user (3+ resets)
       const resetEvents = await prisma.analytics_event.count({
@@ -312,7 +370,9 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
         stagingStyle,
         prompt: prompt || null,
         storage: "supabase",
-        demoCount,
+        demoCount: isDemo ? demoCount : undefined,
+        demoLimit: isDemo ? demoLimit : undefined,
+        isDemo,
       },
     });
   } catch (error) {
@@ -542,9 +602,15 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
   const sessionId = req.cookies?.session_id || req.headers['x-fingerprint'] || req.ip;
   let guestTracking = null;
   let demoCount = 0;
+  let demoLimit = 10;
   let demoLimitReached = false;
   let blocked = false;
   const now = new Date();
+
+  if (userId && isDemo) {
+    demoLimit = await getDemoLimitForUser(userId);
+    demoCount = await getDemoUsageCountForUser(userId);
+  }
   
   // Only apply guest tracking for actual guests (not logged in)
   if (!userId) {
@@ -653,6 +719,24 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
 
     inputImagePath = req.file.path;
     // Track demo upload for session/IP/fingerprint
+    if (isDemo && userId) {
+      const ip = req.ip || '';
+      const language = req.headers['accept-language'] || null;
+      const deviceType = getDeviceTypeFromUserAgent(req.headers['user-agent']);
+      const location = ip || null;
+      await prisma.analytics_event.create({
+        data: {
+          event_type: 'demo_credit_used',
+          user_id: userId,
+          ip,
+          language: typeof language === 'string' ? language.split(',')[0] : null,
+          device_type: deviceType,
+          location,
+          source: 'demo',
+        },
+      });
+      demoCount += 1;
+    }
     if (isDemo && guestTracking) {
       await prisma.guest_tracking.update({
         where: { id: guestTracking.id },
@@ -665,11 +749,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
       // --- Analytics event logging ---
       const ip = req.ip || '';
       const language = req.headers['accept-language'] || null;
-      const userAgent = req.headers['user-agent'] || '';
-      let deviceType: string | null = null;
-      if (/mobile/i.test(userAgent)) deviceType = 'mobile';
-      else if (/tablet/i.test(userAgent)) deviceType = 'tablet';
-      else deviceType = 'desktop';
+      const deviceType = getDeviceTypeFromUserAgent(req.headers['user-agent']);
       // Basic location: use IP as placeholder (for real use, integrate geoip)
       const location = ip;
       // Check if this guest is a repeat demo user (3+ resets)
@@ -842,8 +922,8 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
           stagingStyle,
           prompt: prompt || null,
           storage: "supabase",
-          demoCount: (!userId && isDemo) ? demoCount : undefined,
-          demoLimit: (!userId && isDemo) ? 10 : undefined,
+          demoCount: isDemo ? demoCount : undefined,
+          demoLimit: isDemo ? demoLimit : undefined,
         })}\n\n`);
       } catch (err) {
         res.write(`event: error\ndata: ${JSON.stringify({ message: 'Failed to generate or upload image', error: String(err) })}\n\n`);

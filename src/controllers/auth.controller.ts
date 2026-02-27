@@ -22,6 +22,30 @@ export async function signup(req: Request, res: Response) {
     const data = signupSchema.parse(req.body);
     const fromDemoBonus = req.body.fromDemoBonus === true;
     const result = await signupService({ ...data, fromDemoBonus });
+    if (fromDemoBonus && result?.user?.id) {
+      const userAgent = req.headers['user-agent'];
+      const ua = Array.isArray(userAgent) ? userAgent[0] : userAgent || '';
+      let deviceType: string | null = null;
+      if (ua) {
+        if (/mobile/i.test(ua)) deviceType = 'mobile';
+        else if (/tablet/i.test(ua)) deviceType = 'tablet';
+        else deviceType = 'desktop';
+      }
+      const language = req.headers['accept-language'] || null;
+      const ip = req.ip || null;
+      await prisma.analytics_event.create({
+        data: {
+          event_type: 'demo_bonus_granted',
+          user_id: result.user.id,
+          ip,
+          language: typeof language === 'string' ? language.split(',')[0] : null,
+          device_type: deviceType,
+          location: ip,
+          source: 'demo',
+          timestamp: new Date(),
+        },
+      });
+    }
     return res.status(201).json(result);
   } catch (err: unknown) {
     if (err instanceof ZodError) {
