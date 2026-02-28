@@ -1,6 +1,7 @@
 import Stripe from "stripe";
 import { Prisma } from "@prisma/client";
 import prisma from "../dbConnection";
+import { sendEmail } from "../config/mail.config";
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
@@ -388,6 +389,16 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
         amountTotal: session.amount_total,
         metadata
     });
+    
+    // Extra debug log
+    console.log('[DEBUG] Entered handleCheckoutCompleted, about to process payment logic');
+
+    // Send receipt email to user (team purchase)
+    const config = getProductConfig(productKey);
+
+    const credits = calcCredits(config, quantity);
+    const expectedAmount = toCents(config.unitAmountUsd) * quantity;
+
 
     if (!productKey || !purchaseFor || !userId) {
         console.error(`[PAYMENT] Missing required metadata:`, {
@@ -399,18 +410,18 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
         return;
     }
 
-    const config = getProductConfig(productKey);
     if (session.payment_status !== "paid") {
+        // Not a successful payment, do not process further
         return;
     }
 
-    const credits = calcCredits(config, quantity);
-    const expectedAmount = toCents(config.unitAmountUsd) * quantity;
 
     if (session.amount_total !== null && session.amount_total !== expectedAmount) {
         throw new Error("Amount mismatch for checkout session");
     }
 
+    let userEmail: string | undefined = undefined;
+    let userName: string | undefined = undefined;
     if (purchaseFor === "team") {
         if (!teamId) {
             throw new Error("Team ID missing in metadata");
@@ -421,38 +432,45 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
         });
 
         if (existing?.status === "completed") {
-            return;
-        }
-
-        const operations: Prisma.PrismaPromise<any>[] = [];
-
-        if (!existing) {
-            operations.push(
-                prisma.team_purchase.create({
-                    data: {
-                        team_id: teamId,
-                        amount: credits,
-                        price_usd: (session.amount_total || 0) / 100,
-                        status: "completed",
-                        stripe_session_id: session.id,
-                        completed_at: new Date(),
-                    },
-                })
-            );
+            // Still send email if not sent before
+            const user = await prisma.user.findUnique({ where: { id: userId } });
+            userEmail = user?.email;
+            userName = user?.name || undefined;
         } else {
-            operations.push(
-                prisma.team_purchase.update({
-                    where: { id: existing.id },
-                    data: { status: "completed", completed_at: new Date() },
-                })
-            );
-        }
+            const operations: Prisma.PrismaPromise<any>[] = [];
 
-        if (credits > 0) {
-            operations.push(applyCreditsToTeam(teamId, credits));
-        }
+            if (!existing) {
+                operations.push(
+                    prisma.team_purchase.create({
+                        data: {
+                            team_id: teamId,
+                            amount: credits,
+                            price_usd: (session.amount_total || 0) / 100,
+                            status: "completed",
+                            stripe_session_id: session.id,
+                            completed_at: new Date(),
+                        },
+                    })
+                );
+            } else {
+                operations.push(
+                    prisma.team_purchase.update({
+                        where: { id: existing.id },
+                        data: { status: "completed", completed_at: new Date() },
+                    })
+                );
+            }
 
-        await prisma.$transaction(operations);
+            if (credits > 0) {
+                operations.push(applyCreditsToTeam(teamId, credits));
+            }
+
+            await prisma.$transaction(operations);
+
+            const user = await prisma.user.findUnique({ where: { id: userId } });
+            userEmail = user?.email;
+            userName = user?.name || undefined;
+        }
 
         if (config.type === "subscription") {
             const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
@@ -469,10 +487,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                 });
             }
         }
-        return;
-    }
-
-    if (credits > 0) {
+    } else if (credits > 0) {
         const packageRecord = await ensureCreditPackage({
             name: `plan_${productKey}`,
             credits,
@@ -484,36 +499,43 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
         });
 
         if (existing?.status === "completed") {
-            return;
-        }
-
-        const operations: Prisma.PrismaPromise<any>[] = [];
-
-        if (!existing) {
-            operations.push(
-                prisma.user_credit_purchase.create({
-                    data: {
-                        user_id: userId,
-                        package_id: packageRecord.id,
-                        amount: credits,
-                        price_usd: (session.amount_total || 0) / 100,
-                        status: "completed",
-                        stripe_session_id: session.id,
-                        completed_at: new Date(),
-                    },
-                })
-            );
+            // Still send email if not sent before
+            const user = await prisma.user.findUnique({ where: { id: userId } });
+            userEmail = user?.email;
+            userName = user?.name || undefined;
         } else {
-            operations.push(
-                prisma.user_credit_purchase.update({
-                    where: { id: existing.id },
-                    data: { status: "completed", completed_at: new Date() },
-                })
-            );
-        }
+            const operations: Prisma.PrismaPromise<any>[] = [];
 
-        operations.push(applyCreditsToUser(userId, credits));
-        await prisma.$transaction(operations);
+            if (!existing) {
+                operations.push(
+                    prisma.user_credit_purchase.create({
+                        data: {
+                            user_id: userId,
+                            package_id: packageRecord.id,
+                            amount: credits,
+                            price_usd: (session.amount_total || 0) / 100,
+                            status: "completed",
+                            stripe_session_id: session.id,
+                            completed_at: new Date(),
+                        },
+                    })
+                );
+            } else {
+                operations.push(
+                    prisma.user_credit_purchase.update({
+                        where: { id: existing.id },
+                        data: { status: "completed", completed_at: new Date() },
+                    })
+                );
+            }
+
+            operations.push(applyCreditsToUser(userId, credits));
+            await prisma.$transaction(operations);
+
+            const user = await prisma.user.findUnique({ where: { id: userId } });
+            userEmail = user?.email;
+            userName = user?.name || undefined;
+        }
 
         if (config.type === "subscription") {
             const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
@@ -529,34 +551,58 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                 });
             }
         }
-        return;
-    }
-
-    const existingPayment = await prisma.payment.findFirst({
-        where: { stripe_session_id: session.id },
-    });
-
-    if (existingPayment?.status === "PAID") {
-        return;
-    }
-
-    if (!existingPayment) {
-        await prisma.payment.create({
-            data: {
-                user_id: userId,
-                amount: (session.amount_total || 0) / 100,
-                currency: "usd",
-                status: "PAID",
-                stripe_session_id: session.id,
-            },
+    } else {
+        const existingPayment = await prisma.payment.findFirst({
+            where: { stripe_session_id: session.id },
         });
-        return;
+
+        if (existingPayment?.status === "PAID") {
+            const user = await prisma.user.findUnique({ where: { id: userId } });
+            userEmail = user?.email;
+            userName = user?.name || undefined;
+        } else if (!existingPayment) {
+            await prisma.payment.create({
+                data: {
+                    user_id: userId,
+                    amount: (session.amount_total || 0) / 100,
+                    currency: "usd",
+                    status: "PAID",
+                    stripe_session_id: session.id,
+                },
+            });
+            const user = await prisma.user.findUnique({ where: { id: userId } });
+            userEmail = user?.email;
+            userName = user?.name || undefined;
+        } else {
+            await prisma.payment.update({
+                where: { id: existingPayment.id },
+                data: { status: "PAID" },
+            });
+            const user = await prisma.user.findUnique({ where: { id: userId } });
+            userEmail = user?.email;
+            userName = user?.name || undefined;
+        }
     }
 
-    await prisma.payment.update({
-        where: { id: existingPayment.id },
-        data: { status: "PAID" },
-    });
+    // Send receipt email after successful payment processing
+    if (userEmail) {
+        try {
+            console.log(`[EMAIL-DEBUG] User and email found, preparing to send receipt to ${userEmail}`);
+            await sendEmail({
+                from: "hello@elevatespacesai.com",
+                senderName: "Elevated Spaces",
+                to: userEmail,
+                subject: "Your Payment Receipt - Elevated Spaces",
+                text: `Thank you for your payment!\n\nProduct: ${config.name}\nCredits: ${credits}\nAmount Paid: $${((session.amount_total || 0) / 100).toFixed(2)}\n\nIf you have any questions, contact support@elevatespacesai.com.`,
+                html: `<h2>Thank you for your payment!</h2><p><b>Product:</b> ${config.name}<br/><b>Credits:</b> ${credits}<br/><b>Amount Paid:</b> $${((session.amount_total || 0) / 100).toFixed(2)}</p><p>If you have any questions, contact <a href='mailto:support@elevatespacesai.com'>support@elevatespacesai.com</a>.</p>`,
+            });
+            console.log(`[EMAIL-DEBUG] Payment receipt sent to ${userEmail} successfully.`);
+        } catch (emailErr) {
+            console.error('[EMAIL-DEBUG] sendEmail threw error:', emailErr);
+        }
+    } else {
+        console.error('[EMAIL-DEBUG] No user email found for receipt. userId:', userId);
+    }
 }
 
 export async function handleInvoicePaid(invoice: Stripe.Invoice) {
@@ -656,7 +702,7 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
 export async function getSessionDetails(sessionId: string) {
     try {
         const session = await stripe.checkout.sessions.retrieve(sessionId);
-        
+
         return {
             id: session.id,
             status: session.status,
@@ -684,7 +730,7 @@ export function constructStripeEvent(rawBody: Buffer, signature: string) {
 
 export async function processPendingPurchases() {
     console.log("[PENDING-PROCESSOR] Starting pending purchase processing");
-    
+
     try {
         // Find all pending user credit purchases
         const pendingPurchases = await prisma.user_credit_purchase.findMany({
@@ -703,7 +749,7 @@ export async function processPendingPurchases() {
 
                 // Fetch session from Stripe
                 const session = await stripe.checkout.sessions.retrieve(purchase.stripe_session_id);
-                
+
                 console.log(`[PENDING-PROCESSOR] Checking session ${session.id}:`, {
                     paymentStatus: session.payment_status,
                     userId: purchase.user_id
@@ -721,7 +767,7 @@ export async function processPendingPurchases() {
 
                     // Apply credits
                     await applyCreditsToUser(purchase.user_id, purchase.amount);
-                    
+
                     console.log(`[PENDING-PROCESSOR] ✓ Processed purchase ${purchase.id}:`, {
                         userId: purchase.user_id,
                         credits: purchase.amount
