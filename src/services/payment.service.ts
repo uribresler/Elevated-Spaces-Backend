@@ -2,6 +2,7 @@ import Stripe from "stripe";
 import { Prisma } from "@prisma/client";
 import prisma from "../dbConnection";
 import { sendEmail } from "../config/mail.config";
+import { DEMO_LIMIT, isNewMonth } from "../utils/demoTracking";
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
@@ -29,7 +30,8 @@ export type ProductKey =
     | "furnishing_addon"
     | "extra_credits_50"
     | "extra_credits_100"
-    | "pay_per_image";
+    | "pay_per_image"
+    | "subscription_topup";
 
 const PRODUCT_CATALOG: Record<ProductKey, {
     name: string;
@@ -47,6 +49,7 @@ const PRODUCT_CATALOG: Record<ProductKey, {
     extra_credits_50: { name: "Extra Credits (50)", type: "one_time", unitAmountUsd: 22, credits: 50 },
     extra_credits_100: { name: "Extra Credits (100)", type: "one_time", unitAmountUsd: 40, credits: 100 },
     pay_per_image: { name: "Pay Per Image", type: "one_time", unitAmountUsd: 1.5, creditsPerUnit: 1 },
+    subscription_topup: { name: "Subscription Top-Up Credits", type: "one_time", unitAmountUsd: 0, creditsPerUnit: 1 },
 };
 
 function getProductConfig(productKey: string) {
@@ -231,13 +234,14 @@ export async function createCheckoutSession({
     quantity?: number;
     confirmPlanChange?: boolean;
 }) {
-    const config = getProductConfig(productKey);
+    const isSubscriptionTopUp = productKey === "subscription_topup";
+    const config = isSubscriptionTopUp ? null : getProductConfig(productKey);
     if (purchaseFor !== "individual" && purchaseFor !== "team") {
         throw new Error("Invalid purchase type");
     }
     const safeQuantity = Math.max(1, Math.min(quantity || 1, 1000));
 
-    if (config.type === "subscription" && safeQuantity !== 1) {
+    if (!isSubscriptionTopUp && config!.type === "subscription" && safeQuantity !== 1) {
         throw new Error("Subscriptions must have quantity of 1");
     }
 
@@ -250,7 +254,7 @@ export async function createCheckoutSession({
 
     const { customerId } = await ensureStripeCustomer(userId);
 
-    const existingSubscriptions = config.type === "subscription"
+    const existingSubscriptions = !isSubscriptionTopUp && config!.type === "subscription"
         ? await listActiveSubscriptionsForScope({
             customerId,
             purchaseFor,
@@ -260,7 +264,7 @@ export async function createCheckoutSession({
         : [];
     const replacingSubscriptionId = existingSubscriptions[0]?.id;
 
-    if (config.type === "subscription" && existingSubscriptions.length > 0 && !confirmPlanChange) {
+    if (!isSubscriptionTopUp && config!.type === "subscription" && existingSubscriptions.length > 0 && !confirmPlanChange) {
         const error: any = new Error(
             "You already have an active subscription. Changing plans will cancel the current plan and transfer any unused credits to your wallet. Confirm to proceed."
         );
@@ -268,18 +272,60 @@ export async function createCheckoutSession({
         throw error;
     }
 
-    const credits = calcCredits(config, safeQuantity);
-    const unitAmount = toCents(config.unitAmountUsd);
-    const totalAmount = unitAmount * safeQuantity;
+    let credits = 0;
+    let unitAmount = 0;
+    let totalAmount = 0;
+    let productName = "";
 
     const metadata: Record<string, string> = {
         productKey,
         purchaseFor,
         userId,
-        credits: String(credits),
-        unitAmount: String(unitAmount),
         quantity: String(safeQuantity),
     };
+
+    if (isSubscriptionTopUp) {
+        const activeSubscriptions = await listActiveSubscriptionsForScope({
+            customerId,
+            purchaseFor,
+            teamId,
+            userId,
+        });
+
+        if (activeSubscriptions.length === 0) {
+            throw new Error("An active subscription is required to buy credits at your plan rate");
+        }
+
+        const activeSubscription = activeSubscriptions[0];
+        const subscriptionProductKey = activeSubscription.metadata?.productKey as ProductKey | undefined;
+        const subscriptionConfig = subscriptionProductKey ? PRODUCT_CATALOG[subscriptionProductKey] : undefined;
+
+        if (!subscriptionConfig || subscriptionConfig.type !== "subscription" || !subscriptionConfig.credits) {
+            throw new Error("Unable to determine subscription credit rate for top-up");
+        }
+
+        const subscriptionUnitCents = toCents(subscriptionConfig.unitAmountUsd);
+        const perCreditCents = Math.max(1, Math.round(subscriptionUnitCents / subscriptionConfig.credits));
+
+        credits = safeQuantity;
+        unitAmount = perCreditCents;
+        totalAmount = unitAmount * safeQuantity;
+        productName = `${subscriptionConfig.name} Top-Up Credits`;
+
+        if (subscriptionProductKey) {
+            metadata.subscriptionProductKey = subscriptionProductKey;
+        }
+        metadata.perCreditUsd = (unitAmount / 100).toFixed(2);
+        metadata.topUp = "true";
+    } else {
+        credits = calcCredits(config!, safeQuantity);
+        unitAmount = toCents(config!.unitAmountUsd);
+        totalAmount = unitAmount * safeQuantity;
+        productName = config!.name;
+    }
+
+    metadata.credits = String(credits);
+    metadata.unitAmount = String(unitAmount);
 
     if (teamId) {
         metadata.teamId = teamId;
@@ -290,7 +336,7 @@ export async function createCheckoutSession({
     }
 
     const session = await stripe.checkout.sessions.create({
-        mode: config.type === "subscription" ? "subscription" : "payment",
+        mode: !isSubscriptionTopUp && config!.type === "subscription" ? "subscription" : "payment",
         customer: customerId,
         line_items: [
             {
@@ -299,14 +345,14 @@ export async function createCheckoutSession({
                     currency: "usd",
                     unit_amount: unitAmount,
                     product_data: {
-                        name: config.name,
+                        name: productName,
                     },
-                    recurring: config.type === "subscription" ? { interval: config.interval || "month" } : undefined,
+                    recurring: !isSubscriptionTopUp && config!.type === "subscription" ? { interval: config!.interval || "month" } : undefined,
                 },
             },
         ],
         metadata,
-        subscription_data: config.type === "subscription" ? { metadata } : undefined,
+        subscription_data: !isSubscriptionTopUp && config!.type === "subscription" ? { metadata } : undefined,
         success_url: `${FRONTEND_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${FRONTEND_URL}/payment/error?type=cancelled`,
     });
@@ -324,7 +370,7 @@ export async function createCheckoutSession({
     } else {
         if (credits > 0) {
             const packageRecord = await ensureCreditPackage({
-                name: `plan_${productKey}`,
+                name: isSubscriptionTopUp ? "plan_subscription_topup" : `plan_${productKey}`,
                 credits,
                 price: totalAmount / 100,
             });
@@ -370,6 +416,55 @@ function applyCreditsToTeam(teamId: string, credits: number) {
     });
 }
 
+const SUBSCRIPTION_PLAN_PACKAGE_NAMES = ["plan_starter", "plan_pro", "plan_team"];
+
+async function getRemainingSignupDemoCredits(userId: string) {
+    const tracking = await prisma.user_demo_tracking.findUnique({ where: { user_id: userId } });
+    if (!tracking) {
+        return DEMO_LIMIT;
+    }
+
+    const now = new Date();
+    const usageCount = isNewMonth(tracking.last_reset_at, now) ? 0 : tracking.uploads_count;
+    return Math.max(0, DEMO_LIMIT - usageCount);
+}
+
+async function getOneTimeDemoTransferCredits({
+    userId,
+    productKey,
+    purchaseFor,
+}: {
+    userId: string;
+    productKey: string;
+    purchaseFor: PurchaseFor;
+}) {
+    if (purchaseFor !== "individual") {
+        return 0;
+    }
+
+    if (!["starter", "pro", "team"].includes(productKey)) {
+        return 0;
+    }
+
+    const completedSubscriptionPurchases = await prisma.user_credit_purchase.count({
+        where: {
+            user_id: userId,
+            status: "completed",
+            package: {
+                name: {
+                    in: SUBSCRIPTION_PLAN_PACKAGE_NAMES,
+                },
+            },
+        },
+    });
+
+    if (completedSubscriptionPurchases > 0) {
+        return 0;
+    }
+
+    return getRemainingSignupDemoCredits(userId);
+}
+
 export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
     const metadata = session.metadata || {};
     const productKey = metadata.productKey;
@@ -393,11 +488,22 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
     // Extra debug log
     console.log('[DEBUG] Entered handleCheckoutCompleted, about to process payment logic');
 
-    // Send receipt email to user (team purchase)
-    const config = getProductConfig(productKey);
+    let credits = 0;
+    let expectedAmount = 0;
+    let productName = "";
 
-    const credits = calcCredits(config, quantity);
-    const expectedAmount = toCents(config.unitAmountUsd) * quantity;
+    if (productKey === "subscription_topup") {
+        credits = Number(metadata.credits || 0);
+        expectedAmount = Number(metadata.unitAmount || 0) * quantity;
+        productName = metadata.subscriptionProductKey
+            ? `${metadata.subscriptionProductKey.toUpperCase()} Top-Up Credits`
+            : "Subscription Top-Up Credits";
+    } else {
+        const config = getProductConfig(productKey);
+        credits = calcCredits(config, quantity);
+        expectedAmount = toCents(config.unitAmountUsd) * quantity;
+        productName = config.name;
+    }
 
 
     if (!productKey || !purchaseFor || !userId) {
@@ -472,7 +578,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
             userName = user?.name || undefined;
         }
 
-        if (config.type === "subscription") {
+        if (session.mode === "subscription") {
             const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
             const newSubscriptionId = typeof session.subscription === "string"
                 ? session.subscription
@@ -504,6 +610,11 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
             userEmail = user?.email;
             userName = user?.name || undefined;
         } else {
+            const demoTransferCredits = await getOneTimeDemoTransferCredits({
+                userId,
+                productKey,
+                purchaseFor,
+            });
             const operations: Prisma.PrismaPromise<any>[] = [];
 
             if (!existing) {
@@ -529,7 +640,25 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                 );
             }
 
-            operations.push(applyCreditsToUser(userId, credits));
+            operations.push(applyCreditsToUser(userId, credits + demoTransferCredits));
+
+            if (demoTransferCredits > 0) {
+                operations.push(
+                    prisma.user_demo_tracking.upsert({
+                        where: { user_id: userId },
+                        create: {
+                            user_id: userId,
+                            uploads_count: DEMO_LIMIT,
+                            last_reset_at: new Date(),
+                        },
+                        update: {
+                            uploads_count: DEMO_LIMIT,
+                            last_reset_at: new Date(),
+                        },
+                    })
+                );
+            }
+
             await prisma.$transaction(operations);
 
             const user = await prisma.user.findUnique({ where: { id: userId } });
@@ -537,7 +666,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
             userName = user?.name || undefined;
         }
 
-        if (config.type === "subscription") {
+        if (session.mode === "subscription") {
             const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
             const newSubscriptionId = typeof session.subscription === "string"
                 ? session.subscription
@@ -593,8 +722,8 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                 senderName: "Elevated Spaces",
                 to: userEmail,
                 subject: "Your Payment Receipt - Elevated Spaces",
-                text: `Thank you for your payment!\n\nProduct: ${config.name}\nCredits: ${credits}\nAmount Paid: $${((session.amount_total || 0) / 100).toFixed(2)}\n\nIf you have any questions, contact support@elevatespacesai.com.`,
-                html: `<h2>Thank you for your payment!</h2><p><b>Product:</b> ${config.name}<br/><b>Credits:</b> ${credits}<br/><b>Amount Paid:</b> $${((session.amount_total || 0) / 100).toFixed(2)}</p><p>If you have any questions, contact <a href='mailto:support@elevatespacesai.com'>support@elevatespacesai.com</a>.</p>`,
+                text: `Thank you for your payment!\n\nProduct: ${productName}\nCredits: ${credits}\nAmount Paid: $${((session.amount_total || 0) / 100).toFixed(2)}\n\nIf you have any questions, contact support@elevatespacesai.com.`,
+                html: `<h2>Thank you for your payment!</h2><p><b>Product:</b> ${productName}<br/><b>Credits:</b> ${credits}<br/><b>Amount Paid:</b> $${((session.amount_total || 0) / 100).toFixed(2)}</p><p>If you have any questions, contact <a href='mailto:support@elevatespacesai.com'>support@elevatespacesai.com</a>.</p>`,
             });
             console.log(`[EMAIL-DEBUG] Payment receipt sent to ${userEmail} successfully.`);
         } catch (emailErr) {
@@ -756,21 +885,50 @@ export async function processPendingPurchases() {
                 });
 
                 if (session.payment_status === "paid") {
-                    // Update purchase to completed
-                    await prisma.user_credit_purchase.update({
-                        where: { id: purchase.id },
-                        data: {
-                            status: "completed",
-                            completed_at: new Date()
-                        }
+                    const metadata = session.metadata || {};
+                    const productKey = metadata.productKey || "";
+                    const purchaseFor = (metadata.purchaseFor as PurchaseFor | undefined) || "individual";
+
+                    const demoTransferCredits = await getOneTimeDemoTransferCredits({
+                        userId: purchase.user_id,
+                        productKey,
+                        purchaseFor,
                     });
 
-                    // Apply credits
-                    await applyCreditsToUser(purchase.user_id, purchase.amount);
+                    const operations: Prisma.PrismaPromise<any>[] = [
+                        prisma.user_credit_purchase.update({
+                            where: { id: purchase.id },
+                            data: {
+                                status: "completed",
+                                completed_at: new Date()
+                            }
+                        }),
+                        applyCreditsToUser(purchase.user_id, purchase.amount + demoTransferCredits),
+                    ];
+
+                    if (demoTransferCredits > 0) {
+                        operations.push(
+                            prisma.user_demo_tracking.upsert({
+                                where: { user_id: purchase.user_id },
+                                create: {
+                                    user_id: purchase.user_id,
+                                    uploads_count: DEMO_LIMIT,
+                                    last_reset_at: new Date(),
+                                },
+                                update: {
+                                    uploads_count: DEMO_LIMIT,
+                                    last_reset_at: new Date(),
+                                },
+                            })
+                        );
+                    }
+
+                    await prisma.$transaction(operations);
 
                     console.log(`[PENDING-PROCESSOR] ✓ Processed purchase ${purchase.id}:`, {
                         userId: purchase.user_id,
-                        credits: purchase.amount
+                        credits: purchase.amount,
+                        transferredDemoCredits: demoTransferCredits,
                     });
                 }
             } catch (error: any) {

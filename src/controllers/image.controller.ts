@@ -18,6 +18,13 @@ import prisma from "../dbConnection";
 import { image_status } from "@prisma/client";
 import { AuthUser } from "../types/auth";
 import { addWatermark } from "../utils/watermark";
+import { 
+  DEMO_LIMIT, 
+  getUserDemoTracking, 
+  getGuestDemoTracking,
+  incrementUserDemoUsage,
+  incrementGuestDemoUsage
+} from "../utils/demoTracking";
 
 // TypeScript: declare global property for demo upload counts
 declare global {
@@ -31,20 +38,6 @@ function getDeviceTypeFromUserAgent(userAgent: string | string[] | undefined): s
   if (/mobile/i.test(ua)) return "mobile";
   if (/tablet/i.test(ua)) return "tablet";
   return "desktop";
-}
-
-async function getDemoLimitForUser(userId: string): Promise<number> {
-  const demoBonus = await prisma.analytics_event.findFirst({
-    where: { user_id: userId, event_type: "demo_bonus_granted" },
-    select: { id: true },
-  });
-  return demoBonus ? 15 : 10;
-}
-
-async function getDemoUsageCountForUser(userId: string): Promise<number> {
-  return prisma.analytics_event.count({
-    where: { user_id: userId, event_type: "demo_credit_used" },
-  });
 }
 
 /**
@@ -102,18 +95,18 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
   }
   try {
     const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false, removeFurniture = false } = req.body;
-    // DEMO LIMIT & ABUSE TRACKING (DB-backed)
+    
+    // Determine if user is in demo mode (for watermarking, NOT for blocking)
+    // Restaging is FREE and doesn't consume demo credits
     let isDemo = !userId;
     let hasPurchasedCredits = false;
-    let guestTracking = null;
-    let demoCount = 0;
-    let demoLimit = 10;
-    let demoLimitReached = false;
-    const now = new Date();
-    // Always use device fingerprint for demo tracking (from header/cookie or fallback to session)
-    const deviceFingerprint = req.headers['x-fingerprint'] || req.cookies?.device_id || req.cookies?.session_id || req.ip;
-
+    
     if (userId) {
+      const personalCredits = await prisma.user_credit_balance.findUnique({
+        where: { user_id: userId }
+      });
+      const hasPersonalCredits = personalCredits && personalCredits.balance > 0;
+      
       const purchaseCount = await prisma.user_credit_purchase.count({
         where: {
           user_id: userId,
@@ -121,68 +114,18 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
         },
       });
       hasPurchasedCredits = purchaseCount > 0;
-      if (!hasPurchasedCredits) {
+      
+      // User is in demo mode if they have no personal credits and never purchased
+      if (!hasPersonalCredits && !hasPurchasedCredits) {
         isDemo = true;
+      } else {
+        isDemo = false;
       }
     }
-
-    if (userId && isDemo) {
-      demoLimit = await getDemoLimitForUser(userId);
-      demoCount = await getDemoUsageCountForUser(userId);
-    }
-
-    if (!userId) {
-      guestTracking = await prisma.guest_tracking.findFirst({
-        where: { fingerprint: deviceFingerprint },
-      });
-      if (!guestTracking) {
-        guestTracking = await prisma.guest_tracking.create({
-          data: {
-            fingerprint: deviceFingerprint,
-            ip: req.ip || '',
-            uploads_count: 0,
-            blocked: false,
-            last_used_at: now,
-          },
-        });
-      }
-      // Check if 30 days have passed since last_used_at
-      const lastUsed = new Date(guestTracking.last_used_at);
-      const daysSinceLast = Math.floor((now.getTime() - lastUsed.getTime()) / (1000 * 60 * 60 * 24));
-      let uploads_count = guestTracking.uploads_count;
-      if (daysSinceLast >= 30) {
-        // Log a reset event
-        await prisma.analytics_event.create({
-          data: {
-            event_type: 'demo_limit_reset',
-            ip: req.ip || '',
-            source: 'demo',
-            timestamp: now,
-          },
-        });
-        // Reset uploads_count and update last_used_at
-        uploads_count = 0;
-        await prisma.guest_tracking.update({
-          where: { id: guestTracking.id },
-          data: { uploads_count: 0, last_used_at: now },
-        });
-      }
-      demoCount = uploads_count;
-      if (demoCount >= 10) {
-        demoLimitReached = true;
-      }
-    }
-
-    if (!userId && demoLimitReached) {
-      res.status(429).json({
-        success: false,
-        error: {
-          code: 'DEMO_LIMIT_REACHED',
-          message: 'Demo limit reached for this device. Please sign up or purchase credits to continue. The limit resets every 30 days.',
-        },
-      });
-      return;
-    }
+    
+    // NO DEMO LIMIT CHECK FOR RESTAGING - It's free!
+    // We only use isDemo to determine if we should add watermark
+    
     if (!stagedId) {
       res.status(400).json({
         success: false,
@@ -310,55 +253,10 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
     }
     // CLEANUP: Remove temp file
     await fs.promises.unlink(tempPath);
-    // Track demo upload for session/IP/fingerprint (restage counts as a demo use)
-    if (isDemo && userId) {
-      const ip = req.ip || '';
-      const language = req.headers['accept-language'] || null;
-      const deviceType = getDeviceTypeFromUserAgent(req.headers['user-agent']);
-      const location = ip || null;
-      await prisma.analytics_event.create({
-        data: {
-          event_type: 'demo_credit_used',
-          user_id: userId,
-          ip,
-          language: typeof language === 'string' ? language.split(',')[0] : null,
-          device_type: deviceType,
-          location,
-          source: 'demo',
-        },
-      });
-      demoCount += 1;
-    }
-    if (isDemo && guestTracking) {
-      await prisma.guest_tracking.update({
-        where: { id: guestTracking.id },
-        data: {
-          uploads_count: { increment: 1 },
-          last_used_at: now,
-        },
-      });
-      demoCount += 1;
-      // --- Analytics event logging ---
-      const ip = req.ip || '';
-      const language = req.headers['accept-language'] || null;
-      const deviceType = getDeviceTypeFromUserAgent(req.headers['user-agent']);
-      const location = ip;
-      // Check if this guest is a repeat demo user (3+ resets)
-      const resetEvents = await prisma.analytics_event.count({
-        where: { event_type: 'demo_limit_reset', ip },
-      });
-      const isRepeatDemoUser = resetEvents >= 2;
-      await prisma.analytics_event.create({
-        data: {
-          event_type: isRepeatDemoUser ? 'repeat_demo_upload' : 'demo_upload',
-          ip,
-          language: typeof language === 'string' ? language.split(',')[0] : null,
-          device_type: deviceType,
-          location,
-          source: 'demo',
-        },
-      });
-    }
+    
+    // NO CREDIT TRACKING FOR RESTAGING - It's free!
+    // Restaging doesn't consume demo credits or increment usage counters
+    
     // SUCCESS: Return the result
     res.status(200).json({
       success: true,
@@ -370,9 +268,7 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
         stagingStyle,
         prompt: prompt || null,
         storage: "supabase",
-        demoCount: isDemo ? demoCount : undefined,
-        demoLimit: isDemo ? demoLimit : undefined,
-        isDemo,
+        isDemo, // Still return demo status for frontend
       },
     });
   } catch (error) {
@@ -560,32 +456,55 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
       }
     }
   } else if (userId && !teamId) {
-    // Logged in but no teamId provided - check personal credits
+    // Logged in but no teamId provided - check personal credits first
     const personalCredits = await prisma.user_credit_balance.findUnique({
       where: { user_id: userId }
     });
 
     logger(`Personal credits check - userId: ${userId}, balance: ${personalCredits?.balance || 0}`);
 
-    if (!personalCredits || personalCredits.balance <= 0) {
-      res.status(403).json({
-        success: false,
-        error: {
-          code: 'INSUFFICIENT_CREDITS',
-          message: 'You have no remaining credits. Please purchase more credits to continue.',
+    // If user has personal credits, they're not in demo mode
+    // If they don't have credits, we'll check demo eligibility below
+    const hasPersonalCredits = personalCredits && personalCredits.balance > 0;
+    
+    if (!hasPersonalCredits) {
+      // No personal credits - check if they have purchased credits before
+      const purchaseCount = await prisma.user_credit_purchase.count({
+        where: {
+          user_id: userId,
+          status: 'completed',
         },
       });
-      return;
+      const hasPurchasedCredits = purchaseCount > 0;
+      
+      // If they've purchased credits before but ran out, show error
+      // If they've never purchased credits, they can use demo credits
+      if (hasPurchasedCredits) {
+        res.status(403).json({
+          success: false,
+          error: {
+            code: 'INSUFFICIENT_CREDITS',
+            message: 'You have no remaining credits. Please purchase more credits to continue.',
+          },
+        });
+        return;
+      }
+      // If they've never purchased, they fall through to demo credit logic below
     }
   }
 
   let inputImagePath: string | null = null;
-  // Demo mode: guests OR logged-in users who haven't purchased credits (bonus credits only)
+  // Demo mode: guests OR logged-in users who haven't purchased credits
   let isDemo = !userId;
   let hasPurchasedCredits = false;
   
-  // If logged in, check if they have purchased credits
+  // If logged in, check if they have purchased credits or personal credit balance
   if (userId) {
+    const personalCredits = await prisma.user_credit_balance.findUnique({
+      where: { user_id: userId }
+    });
+    const hasPersonalCredits = personalCredits && personalCredits.balance > 0;
+    
     const purchaseCount = await prisma.user_credit_purchase.count({
       where: {
         user_id: userId,
@@ -593,97 +512,41 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
       },
     });
     hasPurchasedCredits = purchaseCount > 0;
-    // If they haven't purchased credits, treat them as demo users (bonus credits)
-    if (!hasPurchasedCredits) {
+    
+    // User is NOT in demo mode if they have personal credits OR have purchased before
+    // User IS in demo mode if they have never purchased and no personal credits
+    if (!hasPersonalCredits && !hasPurchasedCredits) {
       isDemo = true;
+    } else {
+      isDemo = false;
     }
   }
   
   const sessionId = req.cookies?.session_id || req.headers['x-fingerprint'] || req.ip;
+  let userDemoTracking = null;
   let guestTracking = null;
   let demoCount = 0;
-  let demoLimit = 10;
+  let demoLimit = DEMO_LIMIT;
   let demoLimitReached = false;
   let blocked = false;
   const now = new Date();
 
+  // Handle demo tracking for logged-in users
   if (userId && isDemo) {
-    demoLimit = await getDemoLimitForUser(userId);
-    demoCount = await getDemoUsageCountForUser(userId);
+    userDemoTracking = await getUserDemoTracking(userId);
+    demoCount = userDemoTracking.uploads_count;
+    demoLimitReached = demoCount >= demoLimit;
   }
   
   // Only apply guest tracking for actual guests (not logged in)
   if (!userId) {
-    // Find or create guest_tracking record
     const ipStr = req.ip || '';
-    guestTracking = await prisma.guest_tracking.findFirst({
-      where: {
-        OR: [
-          { fingerprint: sessionId },
-          { ip: ipStr },
-        ],
-      },
-    });
-    if (!guestTracking) {
-      guestTracking = await prisma.guest_tracking.create({
-        data: {
-          fingerprint: sessionId,
-          ip: ipStr,
-          uploads_count: 0,
-          blocked: false,
-          last_used_at: now,
-        },
-      });
-    }
-    // Check if blocked
-    if (guestTracking.blocked) {
-      blocked = true;
-    }
-    // Check if 30 days have passed since last_used_at
-    const lastUsed = new Date(guestTracking.last_used_at);
-    const daysSinceLast = Math.floor((now.getTime() - lastUsed.getTime()) / (1000 * 60 * 60 * 24));
-    let uploads_count = guestTracking.uploads_count;
-    if (daysSinceLast >= 30) {
-      // Abuse logic: track resets in a custom field or analytics (for now, use a resets_count variable in memory, or add a resets_count field in DB for production)
-      // For now, use analytics_event to count resets for this guest
-      // Count previous resets for this guest (event_type: 'demo_limit_reset')
-      const resetEvents = await prisma.analytics_event.count({
-        where: {
-          event_type: 'demo_limit_reset',
-          ip: ipStr,
-          // Optionally, add fingerprint/sessionId if needed
-        },
-      });
-      // If 2+ resets, block this guest
-      if (resetEvents >= 2) {
-        await prisma.guest_tracking.update({
-          where: { id: guestTracking.id },
-          data: { blocked: true },
-        });
-        blocked = true;
-      } else {
-        // Log a reset event
-        await prisma.analytics_event.create({
-          data: {
-            event_type: 'demo_limit_reset',
-            ip: ipStr,
-            source: 'demo',
-            timestamp: now,
-          },
-        });
-        // Reset uploads_count and update last_used_at
-        uploads_count = 0;
-        await prisma.guest_tracking.update({
-          where: { id: guestTracking.id },
-          data: { uploads_count: 0, last_used_at: now },
-        });
-      }
-    }
-    demoCount = uploads_count;
-    if (demoCount >= 10) {
-      demoLimitReached = true;
-    }
+    guestTracking = await getGuestDemoTracking(sessionId, ipStr);
+    demoCount = guestTracking.uploads_count;
+    demoLimitReached = demoCount >= demoLimit;
+    blocked = guestTracking.blocked;
   }
+  
   if (blocked && !isAdmin) {
     res.status(403).json({
       success: false,
@@ -695,11 +558,15 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     return;
   }
   if (demoLimitReached && !isAdmin) {
+    const message = userId 
+      ? 'Demo limit reached. Please purchase credits to continue. The limit resets on the 1st of each month.'
+      : 'Demo limit reached. Please sign up or purchase credits to continue. The limit resets on the 1st of each month.';
+      
     res.status(429).json({
       success: false,
       error: {
         code: 'DEMO_LIMIT_REACHED',
-        message: 'Demo limit reached. Please sign up or purchase credits to continue.',
+        message,
       },
     });
     return;
@@ -718,39 +585,20 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     }
 
     inputImagePath = req.file.path;
-    // Track demo upload for session/IP/fingerprint
-    if (isDemo && userId) {
-      const ip = req.ip || '';
-      const language = req.headers['accept-language'] || null;
-      const deviceType = getDeviceTypeFromUserAgent(req.headers['user-agent']);
-      const location = ip || null;
-      await prisma.analytics_event.create({
-        data: {
-          event_type: 'demo_credit_used',
-          user_id: userId,
-          ip,
-          language: typeof language === 'string' ? language.split(',')[0] : null,
-          device_type: deviceType,
-          location,
-          source: 'demo',
-        },
-      });
+    
+    // Track demo upload - increment usage count
+    if (isDemo && userDemoTracking) {
+      await incrementUserDemoUsage(userId!);
       demoCount += 1;
     }
     if (isDemo && guestTracking) {
-      await prisma.guest_tracking.update({
-        where: { id: guestTracking.id },
-        data: {
-          uploads_count: { increment: 1 },
-          last_used_at: now,
-        },
-      });
+      await incrementGuestDemoUsage(guestTracking.id);
       demoCount += 1;
-      // --- Analytics event logging ---
+      
+      // Analytics event logging
       const ip = req.ip || '';
       const language = req.headers['accept-language'] || null;
       const deviceType = getDeviceTypeFromUserAgent(req.headers['user-agent']);
-      // Basic location: use IP as placeholder (for real use, integrate geoip)
       const location = ip;
       // Check if this guest is a repeat demo user (3+ resets)
       const resetEvents = await prisma.analytics_event.count({

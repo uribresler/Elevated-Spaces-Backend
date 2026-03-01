@@ -1,9 +1,11 @@
 import express from "express";
 import * as path from "path";
+import cookieParser from "cookie-parser";
 import passport from "./config/passport";
 import healthRoute from "./api/health.route";
 import authRoute from "./api/auth.route";
 import imageRoute from "./api/image.route";
+import guestRoute from "./api/guest.route";
 import teamsRoute from './api/teams.route'
 import teamsCreditRoute from './api/teams.credits.route'
 import projectsRoute from './api/projects.route'
@@ -49,10 +51,6 @@ app.use(
     })
 );
 
-// 🔥 REQUIRED FOR PREFLIGHT
-// app.options("*", cors());
-app.use(cors())
-
 /* =======================
    MIDDLEWARES
 ======================= */
@@ -62,6 +60,7 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }),
     stripeWebhookHandler);
 
 app.use(express.json());
+app.use(cookieParser());
 
 // Initialize Passport
 app.use(passport.initialize());
@@ -84,6 +83,7 @@ app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 app.use("/api", healthRoute);
 app.use("/api/auth", authRoute);
+app.use("/api/guest", guestRoute);
 app.use("/api/images", imageRoute);
 app.use('/api/teams', teamsRoute)
 app.use('/api/teams/credits', teamsCreditRoute)

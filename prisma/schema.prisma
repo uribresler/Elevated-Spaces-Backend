@@ -41,6 +41,7 @@ model user {
   credit_balance        user_credit_balance?
   credit_purchases      user_credit_purchase[] @relation("CreditPurchases")
   credit_usage          user_credit_usage[]
+  demo_tracking         user_demo_tracking?
 
   @@map("user")
 }
@@ -245,6 +246,19 @@ model guest_tracking {
   images        image[]
 
   @@map("guest_tracking")
+}
+
+model user_demo_tracking {
+  id            String   @id @default(uuid()) @map("id")
+  user_id       String   @unique @map("user_id")
+  uploads_count Int      @default(0) @map("uploads_count")
+  last_reset_at DateTime @default(now()) @map("last_reset_at")
+  created_at    DateTime @default(now()) @map("created_at")
+  updated_at    DateTime @updatedAt @map("updated_at")
+  user          user     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id, last_reset_at])
+  @@map("user_demo_tracking")
 }
 
 model image {
