@@ -418,15 +418,39 @@ function applyCreditsToTeam(teamId: string, credits: number) {
 
 const SUBSCRIPTION_PLAN_PACKAGE_NAMES = ["plan_starter", "plan_pro", "plan_team"];
 
+/**
+ * Get remaining demo credits using unified tracking
+ * Checks both user_demo_tracking AND linked guest_tracking
+ * Returns the max(guest_count, user_count) to reflect actual unified usage
+ */
 async function getRemainingSignupDemoCredits(userId: string) {
-    const tracking = await prisma.user_demo_tracking.findUnique({ where: { user_id: userId } });
-    if (!tracking) {
-        return DEMO_LIMIT;
-    }
-
     const now = new Date();
-    const usageCount = isNewMonth(tracking.last_reset_at, now) ? 0 : tracking.uploads_count;
-    return Math.max(0, DEMO_LIMIT - usageCount);
+    
+    // Get user demo tracking
+    const userTracking = await prisma.user_demo_tracking.findUnique({ 
+        where: { user_id: userId } 
+    });
+    
+    // Get linked guest tracking
+    const guestTracking = await prisma.guest_tracking.findFirst({
+        where: { userId }
+    });
+    
+    // Calculate usage counts with monthly reset logic
+    let userCount = 0;
+    if (userTracking) {
+        userCount = isNewMonth(userTracking.last_reset_at, now) ? 0 : userTracking.uploads_count;
+    }
+    
+    let guestCount = 0;
+    if (guestTracking) {
+        guestCount = isNewMonth(guestTracking.last_used_at, now) ? 0 : guestTracking.uploads_count;
+    }
+    
+    // Use the MAX of both counts (unified tracking)
+    const unifiedCount = Math.max(userCount, guestCount);
+    
+    return Math.max(0, DEMO_LIMIT - unifiedCount);
 }
 
 async function getOneTimeDemoTransferCredits({

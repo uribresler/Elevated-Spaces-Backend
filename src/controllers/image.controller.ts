@@ -20,10 +20,10 @@ import { AuthUser } from "../types/auth";
 import { addWatermark } from "../utils/watermark";
 import { 
   DEMO_LIMIT, 
-  getUserDemoTracking, 
-  getGuestDemoTracking,
-  incrementUserDemoUsage,
-  incrementGuestDemoUsage
+  getUnifiedDemoTracking,
+  incrementUnifiedDemoUsage,
+  linkGuestToUser,
+  resolveDemoFingerprint
 } from "../utils/demoTracking";
 
 // TypeScript: declare global property for demo upload counts
@@ -522,29 +522,28 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     }
   }
   
-  const sessionId = req.cookies?.session_id || req.headers['x-fingerprint'] || req.ip;
-  let userDemoTracking = null;
-  let guestTracking = null;
-  let demoCount = 0;
-  let demoLimit = DEMO_LIMIT;
+  const fingerprint = resolveDemoFingerprint({
+    cookieDeviceId: req.cookies?.device_id,
+    headerFingerprint: req.headers['x-fingerprint'] as string | undefined,
+    ip: req.ip,
+  });
   let demoLimitReached = false;
   let blocked = false;
-  const now = new Date();
+  let guestId = null;
+  let unifiedCount = 0;
 
-  // Handle demo tracking for logged-in users
-  if (userId && isDemo) {
-    userDemoTracking = await getUserDemoTracking(userId);
-    demoCount = userDemoTracking.uploads_count;
-    demoLimitReached = demoCount >= demoLimit;
-  }
-  
-  // Only apply guest tracking for actual guests (not logged in)
-  if (!userId) {
-    const ipStr = req.ip || '';
-    guestTracking = await getGuestDemoTracking(sessionId, ipStr);
-    demoCount = guestTracking.uploads_count;
-    demoLimitReached = demoCount >= demoLimit;
-    blocked = guestTracking.blocked;
+  // Use unified demo tracking if in demo mode
+  if (isDemo) {
+    const tracking = await getUnifiedDemoTracking(userId, fingerprint, req.ip || '');
+    unifiedCount = tracking.unifiedCount;
+    demoLimitReached = tracking.limitReached;
+    blocked = tracking.blocked;
+    guestId = tracking.guestTracking?.id || null;
+    
+    // Link guest session to user if not already linked
+    if (userId) {
+      await linkGuestToUser(fingerprint, userId);
+    }
   }
   
   if (blocked && !isAdmin) {
@@ -586,21 +585,18 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
 
     inputImagePath = req.file.path;
     
-    // Track demo upload - increment usage count
-    if (isDemo && userDemoTracking) {
-      await incrementUserDemoUsage(userId!);
-      demoCount += 1;
-    }
-    if (isDemo && guestTracking) {
-      await incrementGuestDemoUsage(guestTracking.id);
-      demoCount += 1;
+    // Track demo upload - increment unified usage count
+    if (isDemo) {
+      await incrementUnifiedDemoUsage(userId, guestId);
+      unifiedCount += 1;
       
-      // Analytics event logging
+      // Analytics event logging for demo uploads
       const ip = req.ip || '';
       const language = req.headers['accept-language'] || null;
       const deviceType = getDeviceTypeFromUserAgent(req.headers['user-agent']);
       const location = ip;
-      // Check if this guest is a repeat demo user (3+ resets)
+      
+      // Check if this is a repeat demo user (3+ resets)
       const resetEvents = await prisma.analytics_event.count({
         where: {
           event_type: 'demo_limit_reset',
@@ -608,15 +604,16 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
         },
       });
       const isRepeatDemoUser = resetEvents >= 2;
+      
       await prisma.analytics_event.create({
         data: {
           event_type: isRepeatDemoUser ? 'repeat_demo_upload' : 'demo_upload',
+          user_id: userId || null,
           ip,
           language: typeof language === 'string' ? language.split(',')[0] : null,
           device_type: deviceType,
           location,
           source: 'demo',
-          // Optionally, add a flag for outreach/notification
         },
       });
     }
@@ -770,8 +767,8 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
           stagingStyle,
           prompt: prompt || null,
           storage: "supabase",
-          demoCount: isDemo ? demoCount : undefined,
-          demoLimit: isDemo ? demoLimit : undefined,
+          demoCount: isDemo ? unifiedCount : undefined,
+          demoLimit: isDemo ? DEMO_LIMIT : undefined,
         })}\n\n`);
       } catch (err) {
         res.write(`event: error\ndata: ${JSON.stringify({ message: 'Failed to generate or upload image', error: String(err) })}\n\n`);

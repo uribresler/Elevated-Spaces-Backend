@@ -7,6 +7,7 @@ import { logger } from "../utils/logger";
 import { OAuthResult } from "../types/auth";
 import jwt from 'jsonwebtoken'
 import prisma from "../dbConnection";
+import { linkGuestToUser } from "../utils/demoTracking";
 
 // FRONTEND_URL - prioritize env var (REQUIRED in production), default to localhost for development
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
@@ -22,6 +23,13 @@ export async function signup(req: Request, res: Response) {
     const data = signupSchema.parse(req.body);
     const fromDemoBonus = req.body.fromDemoBonus === true;
     const result = await signupService({ ...data, fromDemoBonus });
+    
+    // Link guest session to user after successful signup
+    const deviceId = req.cookies?.device_id || req.headers["x-fingerprint"] as string;
+    if (deviceId && result?.user?.id) {
+      await linkGuestToUser(deviceId, result.user.id);
+    }
+    
     if (fromDemoBonus && result?.user?.id) {
       const userAgent = req.headers['user-agent'];
       const ua = Array.isArray(userAgent) ? userAgent[0] : userAgent || '';
@@ -64,6 +72,13 @@ export async function login(req: Request, res: Response) {
   try {
     const data = loginSchema.parse(req.body);
     const result = await loginService(data);
+    
+    // Link guest session to user after successful login
+    const deviceId = req.cookies?.device_id || req.headers["x-fingerprint"] as string;
+    if (deviceId && result.user?.id) {
+      await linkGuestToUser(deviceId, result.user.id);
+    }
+    
     return res.status(200).json(result);
   } catch (err: unknown) {
     if (err instanceof ZodError) {
@@ -107,6 +122,12 @@ export async function oauthCallback(req: Request, res: Response) {
     }
 
     logger(`OAuth callback success: userId=${authResult.user.id}, email=${authResult.user.email}, isNewUser=${authResult.isNewUser}`);
+
+    // Link guest session to user after successful OAuth login
+    const deviceId = req.cookies?.device_id || req.headers["x-fingerprint"] as string;
+    if (deviceId && authResult.user.id) {
+      await linkGuestToUser(deviceId, authResult.user.id);
+    }
 
     // Now you have everything: token, isNewUser, avatarUrl, etc.
     // Always fetch the latest user from DB to get the latest role
