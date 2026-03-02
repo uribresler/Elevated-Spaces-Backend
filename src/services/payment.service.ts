@@ -2,6 +2,7 @@ import Stripe from "stripe";
 import { Prisma } from "@prisma/client";
 import prisma from "../dbConnection";
 import { sendEmail } from "../config/mail.config";
+import { loggingService } from "./logging.service";
 import { DEMO_LIMIT, isNewMonth } from "../utils/demoTracking";
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
@@ -490,6 +491,8 @@ async function getOneTimeDemoTransferCredits({
 }
 
 export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
+    console.log('🔥🔥🔥 [PAYMENT] handleCheckoutCompleted - NEW CODE VERSION WITH MONGODB LOGGING 🔥🔥🔥');
+    
     const metadata = session.metadata || {};
     const productKey = metadata.productKey;
     const purchaseFor = metadata.purchaseFor as PurchaseFor | undefined;
@@ -537,13 +540,17 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
             userId: !!userId,
             metadata
         });
+        console.log('[PAYMENT] Early return: Missing required metadata');
         return;
     }
 
     if (session.payment_status !== "paid") {
         // Not a successful payment, do not process further
+        console.log('[PAYMENT] Early return: Payment status is not "paid", status:', session.payment_status);
         return;
     }
+
+    console.log('[PAYMENT] ✅ Passed validation checks, proceeding with payment processing...');
 
 
     if (session.amount_total !== null && session.amount_total !== expectedAmount) {
@@ -739,6 +746,15 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
 
     // Send receipt email after successful payment processing
     if (userEmail) {
+        let emailSent = false;
+        let emailError: string | undefined = undefined;
+        let emailSentAt: Date | undefined = undefined;
+
+        console.log('[PAYMENT] ===== ENTERING EMAIL SECTION =====');
+        console.log('[PAYMENT] userEmail:', userEmail);
+        console.log('[PAYMENT] credits:', credits);
+        console.log('[PAYMENT] sessionId:', session.id);
+
         try {
             console.log(`[EMAIL-DEBUG] User and email found, preparing to send receipt to ${userEmail}`);
             await sendEmail({
@@ -750,11 +766,76 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                 html: `<h2>Thank you for your payment!</h2><p><b>Product:</b> ${productName}<br/><b>Credits:</b> ${credits}<br/><b>Amount Paid:</b> $${((session.amount_total || 0) / 100).toFixed(2)}</p><p>If you have any questions, contact <a href='mailto:support@elevatespacesai.com'>support@elevatespacesai.com</a>.</p>`,
             });
             console.log(`[EMAIL-DEBUG] Payment receipt sent to ${userEmail} successfully.`);
+            emailSent = true;
+            emailSentAt = new Date();
         } catch (emailErr) {
             console.error('[EMAIL-DEBUG] sendEmail threw error:', emailErr);
+            emailError = emailErr instanceof Error ? emailErr.message : String(emailErr);
+        }
+
+        // Log payment to MongoDB
+        try {
+            console.log('[PAYMENT] Logging payment to MongoDB for session:', session.id);
+            await loggingService.logPayment({
+                transactionId: session.id,
+                userId,
+                userEmail,
+                teamId,
+                amount: (session.amount_total || 0) / 100,
+                currency: session.currency || 'usd',
+                credits,
+                status: 'completed',
+                paymentMethod: session.payment_method_types?.[0] || 'unknown',
+                provider: 'stripe',
+                providerResponse: {
+                    sessionId: session.id,
+                    customer: session.customer,
+                    subscription: session.subscription,
+                    mode: session.mode,
+                },
+                emailSent,
+                emailSentAt,
+                emailError,
+                metadata: {
+                    productKey,
+                    productName,
+                    purchaseFor,
+                    quantity,
+                },
+            });
+            console.log('[PAYMENT] Payment logged successfully to MongoDB');
+        } catch (logErr) {
+            console.error('[PAYMENT] Error logging payment to MongoDB:', logErr);
         }
     } else {
         console.error('[EMAIL-DEBUG] No user email found for receipt. userId:', userId);
+        
+        // Log payment even without email
+        try {
+            console.log('[PAYMENT] Logging payment to MongoDB (no email) for session:', session.id);
+            await loggingService.logPayment({
+                transactionId: session.id,
+                userId,
+                teamId,
+                amount: (session.amount_total || 0) / 100,
+                currency: session.currency || 'usd',
+                credits,
+                status: 'completed',
+                paymentMethod: session.payment_method_types?.[0] || 'unknown',
+                provider: 'stripe',
+                emailSent: false,
+                emailError: 'No user email found',
+                metadata: {
+                    productKey,
+                    productName,
+                    purchaseFor,
+                    quantity,
+                },
+            });
+            console.log('[PAYMENT] Payment logged successfully to MongoDB (no email)');
+        } catch (logErr) {
+            console.error('[PAYMENT] Error logging payment to MongoDB:', logErr);
+        }
     }
 }
 
@@ -816,6 +897,44 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
         }
 
         await prisma.$transaction(operations);
+
+        // Get user email for logging
+        const user = await prisma.user.findUnique({ where: { id: userId } });
+        
+        // Log subscription renewal payment to MongoDB
+        try {
+            console.log('[PAYMENT] Logging subscription renewal (team) to MongoDB for invoice:', invoice.id);
+            await loggingService.logPayment({
+                transactionId: invoice.id,
+                userId,
+                userEmail: user?.email,
+                teamId,
+                amount: invoice.amount_paid / 100,
+                currency: invoice.currency || 'usd',
+                credits,
+                status: 'completed',
+                paymentMethod: 'subscription',
+                provider: 'stripe',
+                providerResponse: {
+                    invoiceId: invoice.id,
+                    subscriptionId,
+                    customer: invoice.customer,
+                    hostedInvoiceUrl: invoice.hosted_invoice_url,
+                },
+                emailSent: false,
+                metadata: {
+                    productKey,
+                    productName: config.name,
+                    purchaseFor,
+                    quantity,
+                    billingReason: invoice.billing_reason,
+                },
+            });
+            console.log('[PAYMENT] Subscription renewal (team) logged successfully to MongoDB');
+        } catch (logErr) {
+            console.error('[PAYMENT] Error logging subscription renewal (team) to MongoDB:', logErr);
+        }
+        
         return;
     }
 
@@ -848,6 +967,43 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
             }),
             applyCreditsToUser(userId, credits),
         ]);
+
+        // Get user email for logging
+        const user = await prisma.user.findUnique({ where: { id: userId } });
+        
+        // Log subscription renewal payment to MongoDB
+        try {
+            console.log('[PAYMENT] Logging subscription renewal (personal) to MongoDB for invoice:', invoice.id);
+            await loggingService.logPayment({
+                transactionId: invoice.id,
+                userId,
+                userEmail: user?.email,
+                amount: invoice.amount_paid / 100,
+                currency: invoice.currency || 'usd',
+                credits,
+                status: 'completed',
+                paymentMethod: 'subscription',
+                provider: 'stripe',
+                providerResponse: {
+                    invoiceId: invoice.id,
+                    subscriptionId,
+                    customer: invoice.customer,
+                    hostedInvoiceUrl: invoice.hosted_invoice_url,
+                },
+                emailSent: false,
+                metadata: {
+                    productKey,
+                    productName: config.name,
+                    purchaseFor,
+                    quantity,
+                    billingReason: invoice.billing_reason,
+                },
+            });
+            console.log('[PAYMENT] Subscription renewal (personal) logged successfully to MongoDB');
+        } catch (logErr) {
+            console.error('[PAYMENT] Error logging subscription renewal (personal) to MongoDB:', logErr);
+        }
+        
         return;
     }
 }

@@ -3,6 +3,7 @@ import * as fs from "fs";
 import { promises as fsPromises } from "fs";
 import * as path from "path";
 import { logger } from "../utils/logger";
+import { RateLimiter } from "../utils/rateLimiter";
 import { DEFAULT_STAGING_PROMPT, STAGING_STYLE_PROMPTS } from "../utils/stagingPrompts";
 import {
   ImageProcessingError,
@@ -11,9 +12,23 @@ import {
   parseGeminiError,
 } from "../utils/imageErrors";
 
-const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 1000;
-const MAX_DELAY_MS = 5000;
+const MAX_RETRIES = Number(process.env.GEMINI_MAX_RETRIES || "1");
+const BASE_DELAY_MS = Number(process.env.GEMINI_RETRY_BASE_DELAY_MS || "300");
+const MAX_DELAY_MS = Number(process.env.GEMINI_RETRY_MAX_DELAY_MS || "1200");
+
+// Gemini API rate limiter: 18 requests/minute (safety buffer below 20/min limit)
+const GEMINI_RATE_LIMIT = Number(process.env.GEMINI_RATE_LIMIT_PER_MINUTE || "18");
+const geminiRateLimiter = new RateLimiter(GEMINI_RATE_LIMIT, 60000);
+
+function isQuotaExhaustedMessage(message: string): boolean {
+  const normalized = (message || "").toLowerCase();
+  return (
+    normalized.includes("quota exceeded") ||
+    normalized.includes("resource_exhausted") ||
+    normalized.includes("generate_requests_per_model_per_day") ||
+    normalized.includes("limit: 0")
+  );
+}
 
 class GeminiService {
   private apiKey: string;
@@ -53,6 +68,10 @@ class GeminiService {
     const errorMessage = error?.message?.toLowerCase() || "";
     const errorStatus = error?.status || error?.code;
 
+    if (isQuotaExhaustedMessage(errorMessage)) {
+      return false;
+    }
+
     // Rate limits, server errors, timeouts - retryable
     if (errorStatus === 429 || (errorStatus >= 500 && errorStatus < 600)) {
       return true;
@@ -78,27 +97,33 @@ class GeminiService {
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        logger(`${operationName}: Attempt ${attempt}/${MAX_RETRIES}`);
         return await operation();
       } catch (error) {
         lastError = error;
         const errorMsg = error instanceof Error ? error.message : String(error);
-        logger(`${operationName}: Attempt ${attempt} failed: ${errorMsg}`);
+        
+        // Check for daily quota exhaustion
+        const isDailyQuota = errorMsg.toLowerCase().includes('per_day') || errorMsg.toLowerCase().includes('per day');
+        
+        if (isDailyQuota) {
+          logger(`[GEMINI] DAILY QUOTA EXHAUSTED - Please wait 24 hours or upgrade API plan`);
+          throw error instanceof ImageProcessingError ? error : parseGeminiError(error);
+        }
+
+        logger(`[GEMINI] Attempt ${attempt}/${MAX_RETRIES} failed: ${errorMsg.substring(0, 100)}...`);
 
         if (!this.isRetryableError(error)) {
-          logger(`${operationName}: Non-retryable error, stopping`);
           throw error instanceof ImageProcessingError ? error : parseGeminiError(error);
         }
 
         if (attempt < MAX_RETRIES) {
           const delay = this.calculateDelay(attempt);
-          logger(`${operationName}: Waiting ${Math.round(delay)}ms before retry...`);
+          logger(`[GEMINI] Retrying in ${Math.round(delay / 1000)}s...`);
           await new Promise((resolve) => setTimeout(resolve, delay));
         }
       }
     }
 
-    logger(`${operationName}: All ${MAX_RETRIES} attempts failed`);
     throw lastError instanceof ImageProcessingError ? lastError : parseGeminiError(lastError);
   }
 
@@ -149,10 +174,10 @@ class GeminiService {
     }
 
     return this.executeWithRetry(async () => {
+      // Apply rate limiting BEFORE making the API call
+      const rateLimitDelay = await geminiRateLimiter.acquire(`stageImage`);
+      
       const startTime = Date.now();
-      logger(
-        `Staging image: ${inputImagePath}, Room: ${roomType}, Style: ${stagingStyle}`
-      );
 
       let stagedImageData: Buffer | null = null;
 
@@ -205,7 +230,6 @@ class GeminiService {
         );
       }
 
-      logger(`Staged image generated successfully for: ${inputImagePath}`);
       return stagedImageData;
     }, "stageImage");
   }

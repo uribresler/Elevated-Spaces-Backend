@@ -12,18 +12,31 @@ interface BatchStageJob {
     customPrompt?: string;
 }
 
-const VARIATIONS_PER_IMAGE = 5;
-const MAX_ATTEMPTS_PER_VARIATION = 4;
+const VARIATIONS_PER_IMAGE = Number(process.env.MULTI_STAGE_VARIATIONS || "5");
+const MAX_ATTEMPTS_PER_VARIATION = Number(process.env.MULTI_STAGE_MAX_ATTEMPTS || "2");
+const RETRY_BACKOFF_BASE_MS = Number(process.env.MULTI_STAGE_RETRY_BACKOFF_MS || "120");
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const isQuotaExhaustedError = (error: unknown): boolean => {
+    const message = String(error || "").toLowerCase();
+    return (
+        message.includes("quota exceeded") ||
+        message.includes("resource_exhausted") ||
+        message.includes("generate_requests_per_model_per_day") ||
+        message.includes("limit: 0")
+    );
+};
 
 export async function processBatchImage(job: BatchStageJob): Promise<void> {
     const { imageId, originalPath, roomType, stagingStyle, customPrompt } = job;
+    const jobStartTime = Date.now();
+    const fileName = originalPath.split('/').pop() || originalPath.split('\\').pop() || 'unknown';
+    logger(`[JOB][${imageId.slice(0, 8)}] START ${fileName.substring(0, 30)}`);
 
     try {
         const baseImage = await prisma.image.findUnique({ where: { id: imageId } });
         if (!baseImage) {
-            logger(`Batch image ${imageId} not found`);
+            logger(`[JOB][${imageId.slice(0, 8)}] ERROR: Image not found in database`);
             return;
         }
 
@@ -56,17 +69,20 @@ export async function processBatchImage(job: BatchStageJob): Promise<void> {
                         stagedUrl,
                     };
                 } catch (attemptError) {
-                    logger(
-                        `Image ${imageId} variation ${variationIndex + 1} attempt ${attempt}/${MAX_ATTEMPTS_PER_VARIATION} failed: ${attemptError}`
-                    );
+                    const errorStr = String(attemptError);
+                    if (isQuotaExhaustedError(attemptError)) {
+                        logger(
+                            `[JOB][${imageId.slice(0, 8)}] Variation ${variationIndex + 1}: QUOTA EXHAUSTED`
+                        );
+                        break;
+                    }
 
                     if (attempt < MAX_ATTEMPTS_PER_VARIATION) {
-                        await delay(250 * attempt);
+                        await delay(RETRY_BACKOFF_BASE_MS * attempt);
                     }
                 }
             }
 
-            logger(`Image ${imageId} variation ${variationIndex + 1} failed after retries`);
             return null;
         });
 
@@ -130,9 +146,11 @@ export async function processBatchImage(job: BatchStageJob): Promise<void> {
             },
         });
 
-        logger(`Image ${imageId} staged successfully with ${completedCount}/${VARIATIONS_PER_IMAGE} variations`);
+        const jobElapsed = Math.round((Date.now() - jobStartTime) / 1000);
+        logger(`[JOB][${imageId.slice(0, 8)}] DONE ${completedCount}/${VARIATIONS_PER_IMAGE} in ${jobElapsed}s`);
     } catch (error) {
-        logger(`Image ${imageId} failed staging: ${error}`);
+        const jobElapsed = Math.round((Date.now() - jobStartTime) / 1000);
+        logger(`[JOB][${imageId.slice(0, 8)}] FAILED after ${jobElapsed}s`);
 
         await prisma.image.update({
             where: { id: imageId },

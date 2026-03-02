@@ -2,9 +2,43 @@ import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import { Strategy as FacebookStrategy } from "passport-facebook";
 import AppleStrategy from "passport-apple";
+import { Strategy as JWTStrategy, ExtractJwt } from "passport-jwt";
 import { oauthService } from "../services/oauth.service";
 import { getOAuthConfig, OAuthUserProfile } from "./oauth.config";
 import { logger } from "../utils/logger";
+
+// JWT STRATEGY
+const jwtSecret = process.env.JWT_SECRET;
+if (jwtSecret) {
+  passport.use(
+    new JWTStrategy(
+      {
+        jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+        secretOrKey: jwtSecret,
+      },
+      async (jwtPayload: any, done: (error: any, user?: any) => void) => {
+        try {
+          logger(`JWT Strategy: Received JWT with payload: ${JSON.stringify(jwtPayload)}`);
+          
+          // The JWT payload contains the user information
+          const user = {
+            id: jwtPayload.id,
+            role: jwtPayload.role,
+          };
+
+          logger(`JWT Strategy: User authenticated successfully. userId=${user.id}`);
+          return done(null, user);
+        } catch (error) {
+          logger(`JWT Strategy error: ${error instanceof Error ? error.message : String(error)}`);
+          return done(error as Error);
+        }
+      }
+    )
+  );
+  logger("JWT strategy configured");
+} else {
+  logger("JWT not configured (missing JWT_SECRET)");
+}
 
 // GOOGLE STRATEGY
 const googleConfig = getOAuthConfig("google");

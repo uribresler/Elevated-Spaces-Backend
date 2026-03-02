@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { constructStripeEvent, createCheckoutSession, handleCheckoutCompleted, handleInvoicePaid, getSessionDetails, processPendingPurchases } from "../services/payment.service";
 import Stripe from "stripe";
 import prisma from "../dbConnection";
+import { loggingService } from "../services/logging.service";
 
 export async function createCheckoutSessionHandler(req: Request, res: Response) {
     try {
@@ -274,6 +275,48 @@ export async function processPendingPurchasesHandler(req: Request, res: Response
         return res.status(400).json({
             success: false,
             message: error.message || "Failed to process pending purchases"
+        });
+    }
+}
+
+export async function testPaymentLogHandler(req: Request, res: Response) {
+    try {
+        console.log('[TEST-PAYMENT-LOG] Testing payment logging to MongoDB...');
+        
+        const testPaymentData = {
+            transactionId: `test_${Date.now()}`,
+            userId: req.user?.id || 'test-user-123',
+            userEmail: req.user?.email || 'test@example.com',
+            amount: 99.99,
+            currency: 'usd',
+            credits: 100,
+            status: 'completed' as const,
+            paymentMethod: 'test',
+            provider: 'stripe',
+            emailSent: true,
+            metadata: {
+                productKey: 'test-product',
+                productName: 'Test Product',
+                purchaseFor: 'individual',
+                test: true
+            }
+        };
+        
+        console.log('[TEST-PAYMENT-LOG] Attempting to log:', testPaymentData);
+        await loggingService.logPayment(testPaymentData);
+        console.log('[TEST-PAYMENT-LOG] ✅ Payment logged successfully');
+        
+        return res.status(200).json({
+            success: true,
+            message: "Test payment logged to MongoDB successfully",
+            data: testPaymentData
+        });
+    } catch (error: any) {
+        console.error('[TEST-PAYMENT-LOG] ❌ Error:', error);
+        return res.status(500).json({
+            success: false,
+            message: error.message || "Failed to log test payment",
+            error: error.toString()
         });
     }
 }

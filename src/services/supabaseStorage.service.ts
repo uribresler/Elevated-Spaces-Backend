@@ -182,7 +182,6 @@ class SupabaseStorageService {
         .from(this.bucketName)
         .getPublicUrl(storagePath);
 
-      logger(`Staged image uploaded: ${publicUrl.publicUrl}`);
       return publicUrl.publicUrl;
     } catch (error) {
       logger(`Error uploading staged image: ${error}`);

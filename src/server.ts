@@ -1,6 +1,7 @@
 import dotenv from 'dotenv'
 import app from './app';
 import prisma from './dbConnection';
+import { mongoDb } from './config/mongodb.config';
 import { supabaseStorage } from './services/supabaseStorage.service';
 import { startCleanupCron } from './cron/cleanupExpiredInvitations';
 import { processPendingPurchases } from './services/payment.service';
@@ -18,6 +19,16 @@ app.get("/", (_req, res) => {
 
 app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
+
+  // Initialize MongoDB for logging
+  try {
+    await mongoDb.connect();
+    if (mongoDb.isReady()) {
+      console.log('MongoDB logging system initialized');
+    }
+  } catch (err) {
+    console.warn('MongoDB logging unavailable:', err);
+  }
 
   // Initialize Supabase bucket
   try {
