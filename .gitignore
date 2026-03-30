@@ -19,3 +19,5 @@ dist/
 logs/
 MONGODB_LOGGING.md
 config.bat
+temp_auto_push.bat
+temp_interactive_push.bat
