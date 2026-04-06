@@ -10,26 +10,36 @@ import {
   ErrorMessages,
   parseGeminiError,
 } from "../utils/imageErrors";
+import {
+  FALLBACK_PRIMARY_MODEL,
+  FALLBACK_BACKUP_MODEL,
+  FALLBACK_PRIMARY_MAX_INPUT_EDGE,
+  FALLBACK_PRIMARY_JPEG_QUALITY,
+  FALLBACK_PRIMARY_TEMPERATURE,
+  FALLBACK_VARIANT_MAX_INPUT_EDGE,
+  FALLBACK_VARIANT_JPEG_QUALITY,
+  FALLBACK_VARIANT_TEMPERATURE,
+  GEMINI_STAGE_MAX_RETRIES,
+  GEMINI_VARIANT_MAX_RETRIES,
+  GEMINI_ANALYSIS_MODEL,
+  GEMINI_ANALYSIS_MAX_RETRIES,
+  GEMINI_ANALYSIS_MAX_IMAGE_EDGE,
+  GEMINI_ANALYSIS_JPEG_QUALITY,
+} from "../config/fallback.config";
 
-const GEMINI_STAGING_MAX_RETRIES = Number(process.env.GEMINI_STAGING_MAX_RETRIES || "1");
 const GEMINI_RETRY_BASE_DELAY_MS = Number(process.env.GEMINI_RETRY_BASE_DELAY_MS || "300");
 const GEMINI_RETRY_MAX_DELAY_MS = Number(process.env.GEMINI_RETRY_MAX_DELAY_MS || "1800");
 const GEMINI_STAGING_RATE_LIMIT = Number(process.env.GEMINI_STAGING_RATE_LIMIT_PER_MINUTE || "10");
-// MARK: Set GEMINI_STAGING_MODEL=gemini-3-pro-image-preview to use Gemini 3 Pro image preview.
-const GEMINI_STAGING_MODEL = String(process.env.GEMINI_STAGING_MODEL).trim();
+const GEMINI_STAGING_MODEL = FALLBACK_PRIMARY_MODEL;
 const GEMINI_STAGING_STRICT_STRUCTURE =
   String(process.env.GEMINI_STAGING_STRICT_STRUCTURE || "true").toLowerCase() === "true";
 const GEMINI_STAGING_FORCE_VISIBLE =
   String(process.env.GEMINI_STAGING_FORCE_VISIBLE || "true").toLowerCase() === "true";
 const GEMINI_STAGING_VERBOSE_LOGS =
   String(process.env.GEMINI_STAGING_VERBOSE_LOGS || "true").toLowerCase() === "true";
-const GEMINI_MAX_VARIATIONS = Number(process.env.GEMINI_MAX_VARIATIONS || "1");
-const GEMINI_STAGING_MAX_INPUT_EDGE = Number(process.env.GEMINI_STAGING_MAX_INPUT_EDGE || "2048");
-const GEMINI_STAGING_JPEG_QUALITY = Number(process.env.GEMINI_STAGING_JPEG_QUALITY || "88");
-
-const GEMINI_ANALYSIS_MODEL = String(process.env.GEMINI_ANALYSIS_MODEL || "gemini-2.0-flash").trim();
-const GEMINI_ANALYSIS_MAX_IMAGE_EDGE = Number(process.env.GEMINI_ANALYSIS_MAX_IMAGE_EDGE || "1024");
-const GEMINI_ANALYSIS_MAX_RETRIES = Number(process.env.GEMINI_ANALYSIS_MAX_RETRIES || "1");
+const GEMINI_MAX_VARIATIONS = 1;
+const GEMINI_STAGING_MAX_INPUT_EDGE = FALLBACK_PRIMARY_MAX_INPUT_EDGE;
+const GEMINI_STAGING_JPEG_QUALITY = FALLBACK_PRIMARY_JPEG_QUALITY;
 
 const geminiStagingRateLimiter = new RateLimiter(GEMINI_STAGING_RATE_LIMIT, 60000);
 
@@ -70,6 +80,16 @@ async function downscaleForApi(
 
   return { buffer: out, mimeType: "image/jpeg", didResize: true };
 }
+
+type StageImageOptions = {
+  model?: string;
+  maxInputEdge?: number;
+  jpegQuality?: number;
+  temperature?: number;
+  maxAttempts?: number;
+  requestLabel?: string;
+  variantStyleHint?: string;
+};
 
 class GeminiService {
   private geminiClient: GeminiClientLike | null = null;
@@ -130,6 +150,23 @@ class GeminiService {
     return `${groundingRules}\n\n${stagingPrompt}\n\nReturn one photorealistic staged output with high detail and clean materials.`;
   }
 
+  private buildVariantPrompt(roomType: string, stagingStyle: string, prompt?: string): string {
+    const userPromptBlock = prompt ? `User prompt: ${prompt}` : "";
+    const stylePrompt = STAGING_STYLE_PROMPTS[stagingStyle?.toLowerCase()]?.(roomType) || DEFAULT_STAGING_PROMPT(roomType, stagingStyle);
+
+    return [
+      "Use the provided Gemini-staged image as the exact visual reference.",
+      "Preserve the same room structure, camera angle, lighting direction, window and door placement, floor pattern, wall color, and architectural layout.",
+      `Room type: ${roomType}.`,
+      `Staging style: ${stagingStyle}.`,
+      "Keep the scene consistent with the reference image and only refine furniture, decor, and styling details.",
+      stylePrompt,
+      userPromptBlock,
+      "Do not redesign the room or introduce a contradictory style.",
+      "Return a single photorealistic image that feels like the same staged room, not a new composition.",
+    ].filter(Boolean).join(" ");
+  }
+
   private calculateDelay(attempt: number): number {
     const exponentialDelay = GEMINI_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
     const jitter = Math.random() * 400;
@@ -173,7 +210,7 @@ class GeminiService {
     options?: { maxAttempts?: number; logTag?: string }
   ): Promise<T> {
     let lastError: any = null;
-    const attempts = Math.max(1, options?.maxAttempts ?? GEMINI_STAGING_MAX_RETRIES);
+    const attempts = Math.max(1, options?.maxAttempts ?? GEMINI_STAGE_MAX_RETRIES);
     const logTag = options?.logTag ?? "[GEMINI]";
 
     for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -223,37 +260,36 @@ class GeminiService {
 
   private async requestOneStagedImage(
     inputImagePath: string,
-    roomType: string,
-    stagingStyle: string,
-    prompt?: string
+    promptText: string,
+    options?: StageImageOptions
   ): Promise<Buffer> {
     const requestId = this.shortRequestId();
     const startedAt = Date.now();
 
     const rawBuffer = await fsPromises.readFile(inputImagePath);
     const pathMime = this.getMimeType(inputImagePath);
-    const scaled = await downscaleForApi(
-      rawBuffer,
-      GEMINI_STAGING_MAX_INPUT_EDGE,
-      pathMime,
-      GEMINI_STAGING_JPEG_QUALITY
-    );
+        const scaled = await downscaleForApi(
+          rawBuffer,
+          options?.maxInputEdge || GEMINI_STAGING_MAX_INPUT_EDGE,
+          pathMime,
+          options?.jpegQuality || FALLBACK_PRIMARY_JPEG_QUALITY
+        );
     const imageBuffer = scaled.buffer;
     const mimeType = scaled.mimeType;
 
     if (scaled.didResize) {
       logger(
-        `[GEMINI][${requestId}] STAGING_INPUT_DOWNSCALE maxEdge=${GEMINI_STAGING_MAX_INPUT_EDGE} rawBytes=${rawBuffer.length} sendBytes=${imageBuffer.length} mime=${mimeType}`
+        `[GEMINI][${requestId}] STAGING_INPUT_DOWNSCALE maxEdge=${options?.maxInputEdge || GEMINI_STAGING_MAX_INPUT_EDGE} rawBytes=${rawBuffer.length} sendBytes=${imageBuffer.length} mime=${mimeType}`
       );
     }
 
-    const stagingPrompt = this.buildStagingPrompt(roomType, stagingStyle, prompt);
+    const stagingPrompt = promptText;
     const base64Image = imageBuffer.toString("base64");
 
     await geminiStagingRateLimiter.acquire("gemini-stage-image");
 
     logger(
-      `[GEMINI][${requestId}] STAGING_REQUEST model=${GEMINI_STAGING_MODEL} roomType=${roomType} style=${stagingStyle} imageBytes=${imageBuffer.length} mime=${mimeType}`
+      `[GEMINI][${requestId}] STAGING_REQUEST model=${options?.model || GEMINI_STAGING_MODEL} imageBytes=${imageBuffer.length} mime=${mimeType}`
     );
     if (GEMINI_STAGING_VERBOSE_LOGS) {
       logger(
@@ -263,7 +299,7 @@ class GeminiService {
 
     const geminiClient = await this.ensureGeminiClient();
     const response = await geminiClient.models.generateContent({
-      model: GEMINI_STAGING_MODEL,
+      model: options?.model || GEMINI_STAGING_MODEL,
       contents: [
         {
           role: "user",
@@ -275,7 +311,7 @@ class GeminiService {
       ],
       config: {
         responseModalities: ["IMAGE"],
-        temperature: 0.4,
+        temperature: options?.temperature ?? FALLBACK_PRIMARY_TEMPERATURE,
       },
     });
 
@@ -308,9 +344,52 @@ class GeminiService {
         prompt ? "yes" : "no"
       }`
     );
+    const promptText = this.buildStagingPrompt(roomType, stagingStyle, prompt);
     return this.executeWithRetry(
-      () => this.requestOneStagedImage(inputImagePath, roomType, stagingStyle, prompt),
-      "stageImage"
+      () => this.requestOneStagedImage(inputImagePath, promptText, {
+        model: FALLBACK_PRIMARY_MODEL,
+        maxInputEdge: FALLBACK_PRIMARY_MAX_INPUT_EDGE,
+        jpegQuality: FALLBACK_PRIMARY_JPEG_QUALITY,
+        temperature: FALLBACK_PRIMARY_TEMPERATURE,
+        maxAttempts: GEMINI_STAGE_MAX_RETRIES,
+      }),
+      "stageImage",
+      { maxAttempts: GEMINI_STAGE_MAX_RETRIES, logTag: "[GEMINI]" }
+    );
+  }
+
+  async stageImageWithModel(
+    inputImagePath: string,
+    roomType: string,
+    stagingStyle: string,
+    prompt?: string,
+    modelOverride: string = FALLBACK_PRIMARY_MODEL,
+    options?: {
+      maxInputEdge?: number;
+      jpegQuality?: number;
+      temperature?: number;
+      maxAttempts?: number;
+      promptMode?: "primary" | "variant";
+      requestLabel?: string;
+    }
+  ): Promise<Buffer> {
+    const promptText = options?.promptMode === "variant"
+      ? this.buildVariantPrompt(roomType, stagingStyle, prompt)
+      : this.buildStagingPrompt(roomType, stagingStyle, prompt);
+
+    const effectiveOptions: StageImageOptions = {
+      model: modelOverride,
+      maxInputEdge: options?.maxInputEdge,
+      jpegQuality: options?.jpegQuality,
+      temperature: options?.temperature,
+      maxAttempts: options?.maxAttempts,
+      requestLabel: options?.requestLabel,
+    };
+
+    return this.executeWithRetry(
+      () => this.requestOneStagedImage(inputImagePath, promptText, effectiveOptions),
+      options?.requestLabel || `stageImageWithModel:${modelOverride}`,
+      { maxAttempts: options?.maxAttempts || GEMINI_VARIANT_MAX_RETRIES, logTag: "[GEMINI]" }
     );
   }
 
@@ -339,7 +418,17 @@ class GeminiService {
           : prompt;
 
       const image = await this.executeWithRetry(
-        () => this.requestOneStagedImage(inputImagePath, roomType, stagingStyle, variationPrompt),
+        () => this.requestOneStagedImage(
+          inputImagePath,
+          this.buildVariantPrompt(roomType, stagingStyle, variationPrompt),
+          {
+            model: FALLBACK_BACKUP_MODEL,
+            maxInputEdge: FALLBACK_VARIANT_MAX_INPUT_EDGE,
+            jpegQuality: FALLBACK_VARIANT_JPEG_QUALITY,
+            temperature: FALLBACK_VARIANT_TEMPERATURE,
+            maxAttempts: GEMINI_VARIANT_MAX_RETRIES,
+          }
+        ),
         `stageImageVariations#${index + 1}`
       );
       images.push(image);
@@ -353,12 +442,12 @@ class GeminiService {
   async analyzeImage(imagePath: string): Promise<any> {
     const rawBuffer = await fsPromises.readFile(imagePath);
     const pathMime = this.getMimeType(imagePath);
-    const scaled = await downscaleForApi(
-      rawBuffer,
-      GEMINI_ANALYSIS_MAX_IMAGE_EDGE,
-      pathMime,
-      GEMINI_STAGING_JPEG_QUALITY
-    );
+        const scaled = await downscaleForApi(
+          rawBuffer,
+          GEMINI_ANALYSIS_MAX_IMAGE_EDGE,
+          pathMime,
+          GEMINI_ANALYSIS_JPEG_QUALITY
+        );
     const imageBuffer = scaled.buffer;
     const mimeType = scaled.mimeType;
 
