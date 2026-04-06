@@ -12,7 +12,7 @@ router.get("/recent", requireAuth, getRecentUploads);
 // Backward-compatible alias: keep /generate pointed to dual-model flow so older frontend builds still receive variants
 router.post("/generate", optionalAuth, uploadImage, stageSingleImageWithFallback);
 
-// NEW: Dual-model flow (Gemini + Replicate variants) - optimized for cost
+// NEW: Dual-model flow (Gemini 3 Pro + Gemini 2.5 Flash variants) - optimized for cost
 router.post("/stage-with-variants", optionalAuth, uploadImage, stageSingleImageWithFallback);
 
 // Restage a previously staged image (variation/edit)

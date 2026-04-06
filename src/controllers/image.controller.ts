@@ -3,7 +3,6 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { geminiService } from "../services/gemini.service";
-import { fallbackImageService } from "../services/fallbackImage.service";
 import { FALLBACK_VARIANT_COUNT } from "../config/fallback.config";
 import { supabaseStorage } from "../services/supabaseStorage.service";
 import { loggingService } from "../services/logging.service";
@@ -30,6 +29,31 @@ import {
   resolveDemoFingerprint
 } from "../utils/demoTracking";
 import { createSingleImageTrace, getRelativeTracePath, SingleImageTrace } from "../utils/singleImageTrace";
+import {
+  FALLBACK_MODEL,
+  FALLBACK_PRIMARY_MODEL,
+  FALLBACK_BACKUP_MODEL,
+} from "../config/fallback.config";
+
+const { fallbackImageService } = require("../services/fallbackImage.service") as {
+  fallbackImageService: {
+    generateStyledVariants: (
+      inputImagePath: string,
+      baseImageBuffer: Buffer,
+      roomType: string,
+      baseStyle: string,
+      userPrompt?: string,
+      traceHook?: (step: string, details?: Record<string, unknown>) => Promise<void> | void,
+      onVariantReady?: (details: {
+        index: number;
+        variantId: string;
+        style: string;
+        modelSlug: string;
+        buffer: Buffer;
+      }) => Promise<void> | void
+    ) => Promise<Buffer[]>;
+  };
+};
 
 // TypeScript: declare global property for demo upload counts
 declare global {
@@ -1083,12 +1107,12 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
       contentType: req.file?.mimetype || null,
       fileSizeBytes: req.file?.size || null,
       isDemo,
-      fallbackModel: process.env.FALLBACK_IMAGE_MODEL || "replicate",
-      fallbackPrimaryModel: process.env.REPLICATE_FALLBACK_PRIMARY_MODEL || process.env.FALLBACK_PRIMARY_MODEL || null,
-      fallbackBackupModel: process.env.REPLICATE_FALLBACK_BACKUP_MODEL || process.env.FALLBACK_BACKUP_MODEL || null,
-      fallbackRateLimitPerMinute: Number(process.env.FALLBACK_RATE_LIMIT_PER_MINUTE || "20"),
-      fallbackVariantConcurrency: Number(process.env.FALLBACK_VARIANT_CONCURRENCY || "1"),
-      fallbackVariantCount: Number(process.env.FALLBACK_VARIANT_COUNT || "4"),
+      fallbackModel: FALLBACK_MODEL,
+      fallbackPrimaryModel: FALLBACK_PRIMARY_MODEL,
+      fallbackBackupModel: FALLBACK_BACKUP_MODEL,
+      fallbackRateLimitPerMinute: 10,
+      fallbackVariantConcurrency: 2,
+      fallbackVariantCount: 2,
     });
     await stagingTrace.append("request.start", {
       query: req.query,
@@ -1267,7 +1291,7 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
       return;
     }
 
-    // ===== PHASE 2: Generate 4 VARIANTS with Fallback Model (parallel) =====
+    // ===== PHASE 2: Generate 2 VARIANTS with Gemini Fallback Model (parallel) =====
     if (primaryImageBuffer && primaryImageBuffer.length > 0) {
       let responseClosed = false;
       const handleResponseError = () => {
@@ -1275,117 +1299,122 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
       };
       res.on('error', handleResponseError);
       res.on('close', handleResponseError);
+      try {
+        const variantsStartTime = Date.now();
+        logger(`[DUAL_MODEL] PHASE2_START parallel variant generation with fallback model=${FALLBACK_MODEL}`);
+        let streamedVariantCount = 0;
+        const variants = await fallbackImageService.generateStyledVariants(
+          inputImagePath,
+          primaryImageBuffer,
+          roomType.toLowerCase(),
+          stagingStyle.toLowerCase(),
+          prompt,
+          async (step: string, details?: Record<string, unknown>) => {
+            await stagingTrace?.append(step, details || {});
+          },
+          async ({ index, variantId, modelSlug, buffer }: {
+            index: number;
+            variantId: string;
+            modelSlug: string;
+            buffer: Buffer;
+          }) => {
+            if (responseClosed) return;
 
-      (async () => {
-        try {
-          const variantsStartTime = Date.now();
-          logger(`[DUAL_MODEL] PHASE2_START parallel variant generation with fallback model=${process.env.FALLBACK_IMAGE_MODEL || 'replicate'}`);
-          let streamedVariantCount = 0;
-          const variants = await fallbackImageService.generateStyledVariants(
-            inputImagePath,
-            primaryImageBuffer,
-            roomType.toLowerCase(),
-            stagingStyle.toLowerCase(),
-            prompt,
-            async (step, details) => {
-              await stagingTrace?.append(step, details || {});
-            },
-            async ({ index, variantId, modelSlug, buffer }) => {
-              if (responseClosed) return;
-
-              try {
-                let watermarked = buffer;
-                if (isDemo) {
-                  watermarked = await addWatermark(buffer, "DEMO PREVIEW");
-                }
-
-                const variantFileName = `staged-variant-${Date.now()}-${index + 1}.png`;
-                const variantUrl = await supabaseStorage.uploadStagedFromBuffer(
-                  watermarked,
-                  variantFileName,
-                  "image/png"
-                );
-
-                await prisma.image.create({
-                  data: {
-                    user_id: userId,
-                    project_id: projectId,
-                    original_image_url: originalUrl || '',
-                    staged_image_url: variantUrl,
-                    watermarked_preview_url: isDemo ? variantUrl : null,
-                    status: 'COMPLETED',
-                    is_demo: isDemo,
-                    room_type: roomType,
-                    staging_style: stagingStyle,
-                    prompt: prompt || null,
-                    source: isDemo ? 'demo' : 'user',
-                  }
-                });
-
-                streamedVariantCount++;
-                logger(`[DUAL_MODEL] VARIANT_${index + 1}_STREAMED model=${modelSlug} | sizeBytes=${buffer.length}`);
-                await stagingTrace?.append("phase2.variant.streamed", {
-                  index: index + 1,
-                  bytes: buffer.length,
-                  variantUrl,
-                  modelSlug,
-                  variantId,
-                });
-
-                if (!responseClosed) {
-                  res.write(`event: image\ndata: ${JSON.stringify({
-                    stagedImageUrl: variantUrl,
-                    stagedId: variantFileName,
-                    index: index + 1,
-                    isDemo,
-                    roomType,
-                    stagingStyle,
-                    prompt: prompt || null,
-                    isVariant: true,
-                    model: modelSlug,
-                    storage: "supabase",
-                  })}\n\n`);
-                }
-              } catch (err) {
-                logger(`[DUAL_MODEL] VARIANT_${index + 1}_ERROR upload failed: ${err}`);
-                await stagingTrace?.append("phase2.variant.upload.error", {
-                  index: index + 1,
-                  error: String(err),
-                  modelSlug,
-                  variantId,
-                });
+            try {
+              let watermarked = buffer;
+              if (isDemo) {
+                watermarked = await addWatermark(buffer, "DEMO PREVIEW");
               }
+
+              const variantFileName = `staged-variant-${Date.now()}-${index + 1}.png`;
+              const variantUrl = await supabaseStorage.uploadStagedFromBuffer(
+                watermarked,
+                variantFileName,
+                "image/png"
+              );
+
+              await prisma.image.create({
+                data: {
+                  user_id: userId,
+                  project_id: projectId,
+                  original_image_url: originalUrl || '',
+                  staged_image_url: variantUrl,
+                  watermarked_preview_url: isDemo ? variantUrl : null,
+                  status: 'COMPLETED',
+                  is_demo: isDemo,
+                  room_type: roomType,
+                  staging_style: stagingStyle,
+                  prompt: prompt || null,
+                  source: isDemo ? 'demo' : 'user',
+                }
+              });
+
+              streamedVariantCount++;
+              logger(`[DUAL_MODEL] VARIANT_${index + 1}_STREAMED model=${modelSlug} | sizeBytes=${buffer.length}`);
+              await stagingTrace?.append("phase2.variant.streamed", {
+                index: index + 1,
+                bytes: buffer.length,
+                variantUrl,
+                modelSlug,
+                variantId,
+              });
+
+              if (!responseClosed) {
+                res.write(`event: image\ndata: ${JSON.stringify({
+                  stagedImageUrl: variantUrl,
+                  stagedId: variantFileName,
+                  index: index + 1,
+                  isDemo,
+                  roomType,
+                  stagingStyle,
+                  prompt: prompt || null,
+                  isVariant: true,
+                  model: modelSlug,
+                  storage: "supabase",
+                })}\n\n`);
+              }
+            } catch (err) {
+              logger(`[DUAL_MODEL] VARIANT_${index + 1}_ERROR upload failed: ${err}`);
+              await stagingTrace?.append("phase2.variant.upload.error", {
+                index: index + 1,
+                error: String(err),
+                modelSlug,
+                variantId,
+              });
             }
-          );
-          const variantsDuration = Date.now() - variantsStartTime;
-
-          logger(`[DUAL_MODEL] PHASE2_SUCCESS generated ${variants.length}/${FALLBACK_VARIANT_COUNT} variants | streamed=${streamedVariantCount} | totalDurationMs=${variantsDuration}`);
-          await stagingTrace?.append("phase2.fallback.success", {
-            generatedVariants: variants.length,
-            streamedVariants: streamedVariantCount,
-            durationMs: variantsDuration,
-          });
-
-          logger(`[DUAL_MODEL] PHASE2_COMPLETE all variants processed`);
-          await stagingTrace?.append("phase2.complete", {
-            responseClosed,
-            totalVariantsProcessed: variants.length,
-          });
-          if (!responseClosed) {
-            res.write(`event: complete\ndata: ${JSON.stringify({ status: 'all_variants_completed', totalVariants: variants.length })}\n\n`);
-            res.end();
           }
-        } catch (err) {
-          logger(`[DUAL_MODEL] PHASE2_ERROR variant generation error: ${err}`);
-          await stagingTrace?.append("phase2.error", {
-            error: String(err),
-          });
-          if (!responseClosed) {
-            res.write(`event: variant_error\ndata: ${JSON.stringify({ message: 'Variant generation encountered an error', error: String(err) })}\n\n`);
-            res.end();
-          }
+        );
+        const variantsDuration = Date.now() - variantsStartTime;
+
+        logger(`[DUAL_MODEL] PHASE2_SUCCESS generated ${variants.length}/${FALLBACK_VARIANT_COUNT} variants | streamed=${streamedVariantCount} | totalDurationMs=${variantsDuration}`);
+        await stagingTrace?.append("phase2.fallback.success", {
+          generatedVariants: variants.length,
+          streamedVariants: streamedVariantCount,
+          durationMs: variantsDuration,
+        });
+
+        logger(`[DUAL_MODEL] PHASE2_COMPLETE all variants processed`);
+        await stagingTrace?.append("phase2.complete", {
+          responseClosed,
+          totalVariantsProcessed: variants.length,
+        });
+        if (!responseClosed) {
+          res.write(`event: complete\ndata: ${JSON.stringify({ status: 'all_variants_completed', totalVariants: variants.length })}\n\n`);
+          res.end();
         }
-      })();
+      } catch (err) {
+        logger(`[DUAL_MODEL] PHASE2_ERROR variant generation error: ${err}`);
+        await stagingTrace?.append("phase2.error", {
+          error: String(err),
+        });
+        if (!responseClosed) {
+          res.write(`event: variant_error\ndata: ${JSON.stringify({ message: 'Variant generation encountered an error', error: String(err) })}\n\n`);
+          res.end();
+        }
+      } finally {
+        res.off('error', handleResponseError);
+        res.off('close', handleResponseError);
+      }
     } else {
       logger(`[DUAL_MODEL] PHASE2_SKIPPED no primary image buffer`);
       await stagingTrace?.append("phase2.skipped", {
