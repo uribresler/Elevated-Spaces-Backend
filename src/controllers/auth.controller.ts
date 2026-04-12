@@ -22,7 +22,11 @@ export async function signup(req: Request, res: Response) {
   try {
     const data = signupSchema.parse(req.body);
     const fromDemoBonus = req.body.fromDemoBonus === true;
-    const result = await signupService({ ...data, fromDemoBonus });
+    const requestedRole = typeof req.body.requestedRole === "string" ? req.body.requestedRole.toUpperCase() : "USER";
+    const photographerProfile = req.body.photographerProfile && typeof req.body.photographerProfile === "object"
+      ? req.body.photographerProfile
+      : undefined;
+    const result = await signupService({ ...data, fromDemoBonus, requestedRole, photographerProfile });
     
     // Link guest session to user after successful signup
     const deviceId = req.cookies?.device_id || req.headers["x-fingerprint"] as string;

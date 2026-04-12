@@ -9,11 +9,27 @@ export async function signupService({
   password,
   name,
   fromDemoBonus = false,
+  requestedRole = "USER",
+  photographerProfile,
 }: {
   email: string;
   password: string;
   name?: string;
   fromDemoBonus?: boolean;
+  requestedRole?: string;
+  photographerProfile?: {
+    bio?: string;
+    availability?: string;
+    photographerType?: string;
+    yearsExperience?: string;
+    serviceArea?: string;
+    portfolioUrl?: string;
+    instagramUrl?: string;
+    websiteUrl?: string;
+    gearDescription?: string;
+    businessName?: string;
+    shortPitch?: string;
+  };
 }) {
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing) {
@@ -37,6 +53,37 @@ export async function signupService({
     }
   })
 
+  if (requestedRole === "PHOTOGRAPHER") {
+    const photographerRole = await prisma.roles.findUnique({ where: { name: "PHOTOGRAPHER" } });
+    if (photographerRole) {
+      await prisma.user_roles.create({
+        data: {
+          user_id: user.id,
+          role_id: photographerRole.id,
+        },
+      });
+      await prisma.photographer_profile.create({
+        data: {
+          user_id: user.id,
+          bio: photographerProfile?.bio || null,
+          availability: photographerProfile?.availability || null,
+          photographer_type: photographerProfile?.photographerType || null,
+          years_experience: photographerProfile?.yearsExperience || null,
+          service_area: photographerProfile?.serviceArea || null,
+          portfolio_url: photographerProfile?.portfolioUrl || null,
+          instagram_url: photographerProfile?.instagramUrl || null,
+          website_url: photographerProfile?.websiteUrl || null,
+          gear_description: photographerProfile?.gearDescription || null,
+          business_name: photographerProfile?.businessName || null,
+          short_pitch: photographerProfile?.shortPitch || null,
+          application_status: "SUBMITTED",
+          approved: false,
+          documents_url: null,
+        },
+      });
+    }
+  }
+
   // Add 5 bonus credits if signing up from demo bonus offer
   if (fromDemoBonus) {
     await prisma.user_credit_balance.upsert({
@@ -56,7 +103,7 @@ export async function signupService({
   const token = jwt.sign({ userId: user.id, role: defaultRole.name }, JWT_SECRET, { expiresIn: "7d" });
   return {
     token,
-    user: { id: user.id, email: user.email, name: user.name, role: defaultRole.name },
+    user: { id: user.id, email: user.email, name: user.name, role: requestedRole === "PHOTOGRAPHER" ? "PHOTOGRAPHER" : defaultRole.name },
     success: true,
   };
 }

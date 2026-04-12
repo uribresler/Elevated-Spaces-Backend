@@ -234,7 +234,17 @@ model photographer_profile {
   bio                         String?   @map("bio")
   documents_url               String?   @map("documents_url")
   approved                    Boolean   @default(false) @map("approved")
+  application_status          photographer_application_status @default(SUBMITTED) @map("application_status")
   availability                String?   @map("availability")
+  photographer_type           String?   @map("photographer_type")
+  years_experience            String?   @map("years_experience")
+  service_area                String?   @map("service_area")
+  portfolio_url               String?   @map("portfolio_url")
+  instagram_url               String?   @map("instagram_url")
+  website_url                 String?   @map("website_url")
+  gear_description            String?   @map("gear_description")
+  business_name               String?   @map("business_name")
+  short_pitch                 String?   @map("short_pitch")
   stripe_connected_account_id String?   @map("stripe_connected_account_id")
   created_at                  DateTime  @default(now()) @map("created_at")
   updated_at                  DateTime  @updatedAt @map("updated_at")
@@ -532,4 +542,15 @@ enum invite_status {
   FAILED
 
   @@map("invite_status")
+}
+
+enum photographer_application_status {
+  SUBMITTED
+  UNDER_REVIEW
+  NEEDS_MORE_INFO
+  INTERVIEW_SCHEDULED
+  APPROVED
+  REJECTED
+
+  @@map("photographer_application_status")
 }
