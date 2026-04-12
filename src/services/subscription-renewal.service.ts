@@ -12,6 +12,12 @@ if (!STRIPE_SECRET_KEY) {
 
 const stripe = new Stripe(STRIPE_SECRET_KEY, { apiVersion: STRIPE_API_VERSION });
 
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
+function calculateNextRenewalDateFrom(baseDate: Date): Date {
+    return new Date(baseDate.getTime() + THIRTY_DAYS_MS);
+}
+
 export interface RenewalResult {
     success: boolean;
     message: string;
@@ -119,14 +125,59 @@ export class SubscriptionRenewalService {
                 await Promise.all(
                     invalidRenewalDateSubscriptions.map((subscription) => {
                         const baseDate = subscription.completed_at || new Date();
-                        const nextRenewalDate = new Date(baseDate);
-                        nextRenewalDate.setMinutes(nextRenewalDate.getMinutes() + 1);
+                        const nextRenewalDate = calculateNextRenewalDateFrom(baseDate);
 
                         return prisma.user_credit_purchase.update({
                             where: { id: subscription.id },
                             data: { nextRenewalDate },
                         });
                     })
+                );
+            }
+
+            const legacyMinuteRenewalSubscriptions = await prisma.user_credit_purchase.findMany({
+                where: {
+                    autoRenewEnabled: true,
+                    cancelledAt: null,
+                    status: "completed",
+                    renewalCount: 0,
+                    completed_at: { not: null },
+                    nextRenewalDate: { not: null },
+                },
+                select: {
+                    id: true,
+                    completed_at: true,
+                    nextRenewalDate: true,
+                },
+            });
+
+            const legacyFixes = legacyMinuteRenewalSubscriptions
+                .map((subscription) => {
+                    if (!subscription.completed_at || !subscription.nextRenewalDate) {
+                        return null;
+                    }
+
+                    const expected = calculateNextRenewalDateFrom(subscription.completed_at);
+                    if (subscription.nextRenewalDate < expected) {
+                        return { id: subscription.id, expected };
+                    }
+
+                    return null;
+                })
+                .filter((entry): entry is { id: string; expected: Date } => Boolean(entry));
+
+            if (legacyFixes.length > 0) {
+                console.warn(
+                    `[processPendingRenewals] Correcting ${legacyFixes.length} legacy minute-based nextRenewalDate values.`
+                );
+
+                await Promise.all(
+                    legacyFixes.map((entry) =>
+                        prisma.user_credit_purchase.update({
+                            where: { id: entry.id },
+                            data: { nextRenewalDate: entry.expected },
+                        })
+                    )
                 );
             }
 
@@ -277,12 +328,11 @@ export class SubscriptionRenewalService {
                 };
             }
 
-            // Update subscription record
-            // const nextRenewalDate = new Date();
-            // nextRenewalDate.setMonth(nextRenewalDate.getMonth() + 1);
-
-            const nextRenewalDate = new Date();
-            nextRenewalDate.setMinutes(nextRenewalDate.getMinutes() + 1);
+            // Set next renewal exactly 30 days after this successful payment time.
+            const paidAt = paymentIntent.created
+                ? new Date(paymentIntent.created * 1000)
+                : new Date();
+            const nextRenewalDate = calculateNextRenewalDateFrom(paidAt);
 
             await prisma.$transaction([
                 prisma.user_credit_purchase.update({
@@ -369,7 +419,7 @@ export class SubscriptionRenewalService {
         try {
             const targetSubscription = await prisma.user_credit_purchase.findUnique({
                 where: { id: subscriptionId },
-                select: { user_id: true },
+                select: { user_id: true, completed_at: true, created_at: true },
             });
 
             if (!targetSubscription) {
@@ -396,12 +446,9 @@ export class SubscriptionRenewalService {
                 },
             });
 
-            // Calculate next renewal date (1 month from now)
-            // const nextRenewalDate = new Date();
-            // nextRenewalDate.setMonth(nextRenewalDate.getMonth() + 1);
-
-            const nextRenewalDate = new Date();
-            nextRenewalDate.setMinutes(nextRenewalDate.getMinutes() + 1);
+            // Calculate next renewal exactly 30 days from the user's last successful payment.
+            const lastPaymentDate = targetSubscription.completed_at || targetSubscription.created_at;
+            const nextRenewalDate = calculateNextRenewalDateFrom(lastPaymentDate);
 
             await prisma.user_credit_purchase.update({
                 where: { id: subscriptionId },
