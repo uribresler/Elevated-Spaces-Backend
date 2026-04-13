@@ -33,12 +33,21 @@ const app = express();
 const corsOriginsEnv = process.env.CORS_ORIGINS;
 const allowedOrigins = corsOriginsEnv
     ? corsOriginsEnv.split(',').map(origin => origin.trim())
-    : ["http://localhost:3000"]; // Default to localhost only if not set
+    : [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:3002",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+        "http://127.0.0.1:3002",
+      ];
 
-// Always include localhost for development
-if (!allowedOrigins.includes("http://localhost:3000")) {
-    allowedOrigins.push("http://localhost:3000");
-}
+// Always include common localhost ports for development
+["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000", "http://127.0.0.1:3001"].forEach(origin => {
+    if (!allowedOrigins.includes(origin)) {
+        allowedOrigins.push(origin);
+    }
+});
 
 app.use(
     cors({
@@ -66,7 +75,10 @@ app.use(
 app.post("/api/payment/webhook", express.raw({ type: "application/json" }),
     stripeWebhookHandler);
 
-app.use(express.json());
+const requestBodyLimit = process.env.REQUEST_BODY_LIMIT || "15mb";
+
+app.use(express.json({ limit: requestBodyLimit }));
+app.use(express.urlencoded({ limit: requestBodyLimit, extended: true }));
 app.use(cookieParser());
 
 // Initialize Passport

@@ -3,6 +3,7 @@ import { requireAuth } from "../middlewares/auth";
 import { uploadPhotographerDocument } from "../middlewares/uploadPhotographerDocuments";
 import {
   createBookingRequestPlaceholder,
+  getPhotographerApplicationById,
   getMyPhotographerProfile,
   listApprovedPhotographers,
   listBookingsForPhotographer,
@@ -12,8 +13,10 @@ import {
   setMyAvailabilityPlaceholder,
   submitPhotographerApplication,
   updateBookingStatusPlaceholder,
+  withdrawBookingRequestByClient,
   updateMyPhotographerProfile,
   uploadPhotographerVerificationDocument,
+  submitPhotographerResponse,
 } from "../controllers/photographer.controller";
 
 const router = Router();
@@ -27,15 +30,18 @@ router.post("/onboarding/document", requireAuth, uploadPhotographerDocument, upl
 router.get("/me", requireAuth, getMyPhotographerProfile);
 router.patch("/me", requireAuth, updateMyPhotographerProfile);
 router.patch("/me/availability", requireAuth, setMyAvailabilityPlaceholder);
+router.post("/me/response", requireAuth, submitPhotographerResponse);
 
 // Admin approval flow
 router.get("/admin/applications", requireAuth, listPendingPhotographerApplications);
+router.get("/admin/applications/:profileId", requireAuth, getPhotographerApplicationById);
 router.patch("/admin/applications/:profileId/review", requireAuth, reviewPhotographerApplication);
 
 // Booking placeholders
 router.post("/bookings/request", requireAuth, createBookingRequestPlaceholder);
 router.get("/bookings/mine", requireAuth, listMyBookingRequests);
 router.get("/bookings/received", requireAuth, listBookingsForPhotographer);
+router.patch("/bookings/:bookingId/withdraw", requireAuth, withdrawBookingRequestByClient);
 router.patch("/bookings/:bookingId/status", requireAuth, updateBookingStatusPlaceholder);
 
 export default router;

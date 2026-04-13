@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { booking_status } from "@prisma/client";
+import { booking_actor, booking_status } from "@prisma/client";
 import prisma from "../dbConnection";
 import { logger } from "../utils/logger";
 
@@ -66,6 +66,22 @@ function normalizeApplicationStatus(status: unknown): PhotographerApplicationSta
 function getHostUrl(req: Request): string {
   const host = req.get("host") || "localhost:3003";
   return `${req.protocol}://${host}`;
+}
+
+function normalizeAttachments(rawAttachments: unknown): Array<{ name: string; type: string; dataUrl: string }> {
+  const parsedAttachments = Array.isArray(rawAttachments)
+    ? rawAttachments
+    : typeof rawAttachments === "string"
+      ? JSON.parse(rawAttachments)
+      : [];
+
+  return Array.isArray(parsedAttachments)
+    ? parsedAttachments.map((attachment) => ({
+        name: typeof attachment?.name === "string" ? attachment.name : "attachment",
+        type: typeof attachment?.type === "string" ? attachment.type : "unknown",
+        dataUrl: typeof attachment?.dataUrl === "string" ? attachment.dataUrl : "",
+      }))
+    : [];
 }
 
 export async function submitPhotographerApplication(req: Request, res: Response): Promise<void> {
@@ -139,7 +155,7 @@ export async function submitPhotographerApplication(req: Request, res: Response)
       message: "Photographer application submitted for admin review",
       data: {
         profileId: profile.id,
-        status: profile.application_status,
+        status: (profile as any).application_status ?? (profile.approved ? "APPROVED" : "SUBMITTED"),
         approved: profile.approved,
       },
     });
@@ -332,12 +348,15 @@ export async function listPendingPhotographerApplications(req: Request, res: Res
       return;
     }
 
+    const rawStatus = typeof req.query.status === "string" ? req.query.status.trim().toUpperCase() : "";
+    const selectedStatus = rawStatus ? normalizeApplicationStatus(rawStatus) : null;
+
     const pending = await prisma.photographer_profile.findMany({
-      where: {
-        application_status: {
-          in: ["SUBMITTED", "UNDER_REVIEW", "NEEDS_MORE_INFO", "INTERVIEW_SCHEDULED"],
-        },
-      },
+      where: (selectedStatus
+        ? {
+            application_status: selectedStatus,
+          }
+        : undefined) as any,
       include: {
         user: {
           select: {
@@ -361,6 +380,50 @@ export async function listPendingPhotographerApplications(req: Request, res: Res
   } catch (error) {
     logger(`[PHOTOGRAPHER] list pending applications failed: ${String(error)}`);
     res.status(500).json({ success: false, message: "Failed to list applications" });
+  }
+}
+
+export async function getPhotographerApplicationById(req: Request, res: Response): Promise<void> {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
+    const admin = await isAdminUser(userId);
+    if (!admin) {
+      res.status(403).json({ success: false, message: "Admin access required" });
+      return;
+    }
+
+    const profileId = req.params.profileId;
+    const application = await prisma.photographer_profile.findUnique({
+      where: { id: profileId },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            created_at: true,
+          },
+        },
+      },
+    });
+
+    if (!application) {
+      res.status(404).json({ success: false, message: "Photographer application not found" });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: application,
+    });
+  } catch (error) {
+    logger(`[PHOTOGRAPHER] get application details failed: ${String(error)}`);
+    res.status(500).json({ success: false, message: "Failed to load application" });
   }
 }
 
@@ -394,12 +457,32 @@ export async function reviewPhotographerApplication(req: Request, res: Response)
 
     const approved = status === "APPROVED";
 
+    if (status === "NEEDS_MORE_INFO") {
+      const adminFeedback = typeof req.body.adminFeedback === "string" ? req.body.adminFeedback.trim() : "";
+      if (!adminFeedback) {
+        res.status(400).json({ success: false, message: "Admin feedback is required when status is 'Needs More Info'" });
+        return;
+      }
+    }
+
+    const updateData: Record<string, unknown> = {
+      approved,
+      application_status: status,
+      has_new_photographer_response: false,
+    };
+
+    if (status === "NEEDS_MORE_INFO") {
+      updateData.admin_feedback = typeof req.body.adminFeedback === "string" ? req.body.adminFeedback.trim() : "";
+      updateData.feedback_provided_at = new Date();
+    }
+
+    if (status === "REJECTED") {
+      updateData.submission_count = (profile.submission_count || 0) + 1;
+    }
+
     const updated = await prisma.photographer_profile.update({
       where: { id: profileId },
-      data: {
-        approved,
-        application_status: status,
-      },
+      data: updateData as any,
       include: {
         user: {
           select: {
@@ -429,7 +512,7 @@ export async function reviewPhotographerApplication(req: Request, res: Response)
 export async function listApprovedPhotographers(req: Request, res: Response): Promise<void> {
   try {
     const photographers = await prisma.photographer_profile.findMany({
-      where: { application_status: "APPROVED" },
+      where: { approved: true },
       include: {
         user: {
           select: {
@@ -466,6 +549,8 @@ export async function createBookingRequestPlaceholder(req: Request, res: Respons
 
     const photographerId = typeof req.body.photographerId === "string" ? req.body.photographerId.trim() : "";
     const dateInput = typeof req.body.date === "string" ? req.body.date.trim() : "";
+    const clientNoteHtml = typeof req.body.clientNoteHtml === "string" ? req.body.clientNoteHtml.trim() : "";
+    const clientNoteAttachments = normalizeAttachments(req.body.clientNoteAttachments);
 
     if (!photographerId || !dateInput) {
       res.status(400).json({
@@ -483,10 +568,10 @@ export async function createBookingRequestPlaceholder(req: Request, res: Respons
 
     const photographer = await prisma.photographer_profile.findUnique({
       where: { id: photographerId },
-      select: { id: true, approved: true, application_status: true, user_id: true },
+      select: { id: true, approved: true, user_id: true },
     });
 
-    if (!photographer || photographer.application_status !== "APPROVED") {
+    if (!photographer || !photographer.approved) {
       res.status(404).json({ success: false, message: "Approved photographer not found" });
       return;
     }
@@ -496,12 +581,33 @@ export async function createBookingRequestPlaceholder(req: Request, res: Respons
       return;
     }
 
+    const existingPending = await prisma.booking.findFirst({
+      where: {
+        user_id: userId,
+        photographer_id: photographerId,
+        status: booking_status.PENDING,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (existingPending) {
+      res.status(409).json({
+        success: false,
+        message: "You already have a pending request with this photographer. Wait for confirm/decline before sending another.",
+      });
+      return;
+    }
+
     const booking = await prisma.booking.create({
       data: {
         user_id: userId,
         photographer_id: photographerId,
         date,
         status: booking_status.PENDING,
+        client_note_html: clientNoteHtml || null,
+        client_note_attachments: clientNoteAttachments,
       },
       include: {
         photographer: {
@@ -526,6 +632,47 @@ export async function createBookingRequestPlaceholder(req: Request, res: Respons
   } catch (error) {
     logger(`[PHOTOGRAPHER] create booking placeholder failed: ${String(error)}`);
     res.status(500).json({ success: false, message: "Failed to create booking request" });
+  }
+}
+
+export async function withdrawBookingRequestByClient(req: Request, res: Response): Promise<void> {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
+    const bookingId = req.params.bookingId;
+    const booking = await prisma.booking.findUnique({ where: { id: bookingId } });
+
+    if (!booking || booking.user_id !== userId) {
+      res.status(404).json({ success: false, message: "Booking not found for this client" });
+      return;
+    }
+
+    if (booking.status !== booking_status.PENDING) {
+      res.status(400).json({ success: false, message: "Only pending requests can be withdrawn" });
+      return;
+    }
+
+    const updated = await prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        status: booking_status.CANCELLED,
+        cancelled_by: booking_actor.CLIENT,
+        status_updated_at: new Date(),
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Booking request withdrawn",
+      data: updated,
+    });
+  } catch (error) {
+    logger(`[PHOTOGRAPHER] withdraw booking request failed: ${String(error)}`);
+    res.status(500).json({ success: false, message: "Failed to withdraw booking request" });
   }
 }
 
@@ -607,6 +754,8 @@ export async function updateBookingStatusPlaceholder(req: Request, res: Response
 
     const bookingId = req.params.bookingId;
     const statusInput = typeof req.body.status === "string" ? req.body.status.trim().toUpperCase() : "";
+    const photographerNoteHtml = typeof req.body.photographerNoteHtml === "string" ? req.body.photographerNoteHtml.trim() : "";
+    const photographerNoteAttachments = normalizeAttachments(req.body.photographerNoteAttachments);
 
     if (statusInput !== booking_status.CONFIRMED && statusInput !== booking_status.CANCELLED) {
       res.status(400).json({ success: false, message: "status must be CONFIRMED or CANCELLED" });
@@ -627,7 +776,13 @@ export async function updateBookingStatusPlaceholder(req: Request, res: Response
 
     const updated = await prisma.booking.update({
       where: { id: bookingId },
-      data: { status: statusInput as booking_status },
+      data: {
+        status: statusInput as booking_status,
+        photographer_note_html: photographerNoteHtml || null,
+        photographer_note_attachments: photographerNoteAttachments,
+        cancelled_by: statusInput === booking_status.CANCELLED ? booking_actor.PHOTOGRAPHER : null,
+        status_updated_at: new Date(),
+      },
     });
 
     res.status(200).json({
@@ -638,5 +793,80 @@ export async function updateBookingStatusPlaceholder(req: Request, res: Response
   } catch (error) {
     logger(`[PHOTOGRAPHER] update booking status failed: ${String(error)}`);
     res.status(500).json({ success: false, message: "Failed to update booking status" });
+  }
+}
+
+export async function submitPhotographerResponse(req: Request, res: Response): Promise<void> {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
+    const profile = await prisma.photographer_profile.findUnique({ where: { user_id: userId } });
+    if (!profile) {
+      res.status(404).json({ success: false, message: "Photographer profile not found" });
+      return;
+    }
+
+    // Only allow response if status is NEEDS_MORE_INFO
+    if (profile.application_status !== "NEEDS_MORE_INFO") {
+      res.status(400).json({ success: false, message: "Profile is not in NEEDS_MORE_INFO status" });
+      return;
+    }
+
+    const responseContent = typeof req.body.responseContent === "string" ? req.body.responseContent.trim() : "";
+    if (!responseContent) {
+      res.status(400).json({ success: false, message: "Response content is required" });
+      return;
+    }
+
+    const rawAttachments = req.body.attachments;
+    const parsedAttachments = Array.isArray(rawAttachments)
+      ? rawAttachments
+      : typeof rawAttachments === "string"
+        ? JSON.parse(rawAttachments)
+        : [];
+
+    const normalizedAttachments = Array.isArray(parsedAttachments)
+      ? parsedAttachments.map((attachment) => ({
+          name: typeof attachment?.name === "string" ? attachment.name : "attachment",
+          type: typeof attachment?.type === "string" ? attachment.type : "unknown",
+          dataUrl: typeof attachment?.dataUrl === "string" ? attachment.dataUrl : "",
+        }))
+      : [];
+
+    const existingResponses = Array.isArray(profile.photographer_responses) ? profile.photographer_responses : [];
+    const newResponses = [
+      ...existingResponses,
+      {
+        contentHtml: responseContent,
+        attachments: normalizedAttachments,
+        submittedAt: new Date().toISOString(),
+      },
+    ];
+
+    const updated = await prisma.photographer_profile.update({
+      where: { user_id: userId },
+      data: {
+        photographer_responses: newResponses,
+        has_new_photographer_response: true,
+        application_status: "SUBMITTED",
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Response submitted successfully. Admin will review your submission.",
+      data: {
+        profileId: updated.id,
+        status: updated.application_status,
+        responseCount: newResponses.length,
+      },
+    });
+  } catch (error) {
+    logger(`[PHOTOGRAPHER] submit response failed: ${String(error)}`);
+    res.status(500).json({ success: false, message: "Failed to submit response" });
   }
 }
