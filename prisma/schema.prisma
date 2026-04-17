@@ -246,6 +246,11 @@ model photographer_profile {
   business_name               String?   @map("business_name")
   short_pitch                 String?   @map("short_pitch")
   stripe_connected_account_id String?   @map("stripe_connected_account_id")
+  admin_feedback              String?   @map("admin_feedback")
+  feedback_provided_at        DateTime? @map("feedback_provided_at")
+  photographer_responses      Json?     @map("photographer_responses")
+  has_new_photographer_response Boolean  @default(false) @map("has_new_photographer_response")
+  submission_count            Int       @default(1) @map("submission_count")
   created_at                  DateTime  @default(now()) @map("created_at")
   updated_at                  DateTime  @updatedAt @map("updated_at")
   bookings                    booking[] @relation("PhotographerBookings")
@@ -375,6 +380,12 @@ model booking {
   photographer_id  String               @map("photographer_id")
   date             DateTime             @map("date")
   status           booking_status       @default(PENDING) @map("status")
+  client_note_html String?              @map("client_note_html")
+  client_note_attachments Json?         @map("client_note_attachments")
+  photographer_note_html String?        @map("photographer_note_html")
+  photographer_note_attachments Json?   @map("photographer_note_attachments")
+  cancelled_by     booking_actor?       @map("cancelled_by")
+  status_updated_at DateTime?           @map("status_updated_at")
   payment_id       String?              @unique @map("payment_id")
   payment_status   payment_status       @default(PENDING) @map("payment_status")
   transaction_id   String?              @map("transaction_id")
@@ -504,6 +515,18 @@ model invoice {
   @@map("invoice")
 }
 
+model gemini_api_key_state {
+  id                     String    @id @default(uuid()) @map("id")
+  key_name               String    @unique @map("key_name")
+  last_quota_exceeded_at DateTime? @map("last_quota_exceeded_at")
+  blocked_until          DateTime? @map("blocked_until")
+  created_at             DateTime  @default(now()) @map("created_at")
+  updated_at             DateTime  @updatedAt @map("updated_at")
+
+  @@map("gemini_api_key_state")
+}
+
+
 enum image_status {
   PROCESSING
   COMPLETED
@@ -526,6 +549,14 @@ enum booking_status {
   CANCELLED
 
   @@map("booking_status")
+}
+
+enum booking_actor {
+  CLIENT
+  PHOTOGRAPHER
+  SYSTEM
+
+  @@map("booking_actor")
 }
 
 enum project_member_role {
