@@ -4,6 +4,7 @@ import * as path from "path";
 import { logger } from "../utils/logger";
 import { RateLimiter } from "../utils/rateLimiter";
 import { DEFAULT_STAGING_PROMPT, STAGING_STYLE_PROMPTS } from "../utils/stagingPrompts";
+import { geminiKeyRotationService } from "./gemini-key-rotation.service";
 import {
   ImageProcessingError,
   ImageErrorCode,
@@ -34,18 +35,65 @@ function isQuotaExhaustedMessage(message: string): boolean {
 }
 
 class GeminiService {
-  private apiKey: string;
-  private client: GoogleGenAI;
+  private clientsByKeyName = new Map<string, GoogleGenAI>();
   private singleCallFailureUntil = 0;
 
   constructor() {
-    this.apiKey = process.env.GEMINI_API_KEY || "";
-    if (!this.apiKey) {
-      throw new Error("GEMINI_API_KEY is not set in environment variables");
+    // Key availability is validated in gemini-key-rotation service.
+  }
+
+  private getClientForKey(keyName: string, keyValue: string): GoogleGenAI {
+    const existing = this.clientsByKeyName.get(keyName);
+    if (existing) {
+      return existing;
     }
 
-    // Initialize Gemini client
-    this.client = new GoogleGenAI({ apiKey: this.apiKey });
+    const client = new GoogleGenAI({ apiKey: keyValue });
+    this.clientsByKeyName.set(keyName, client);
+    return client;
+  }
+
+  private async executeWithKeyFailover<T>(
+    operationName: string,
+    operation: (client: GoogleGenAI, keyName: string) => Promise<T>
+  ): Promise<T> {
+    const availableKeys = await geminiKeyRotationService.getAvailableKeys();
+
+    if (!availableKeys.length) {
+      const nextAvailableAt = await geminiKeyRotationService.getNextAvailableAt();
+      throw new ImageProcessingError(
+        ImageErrorCode.AI_QUOTA_EXCEEDED,
+        ErrorMessages[ImageErrorCode.AI_QUOTA_EXCEEDED],
+        429,
+        nextAvailableAt
+          ? `All configured Gemini keys are temporarily exhausted. Next key becomes available at ${nextAvailableAt.toISOString()}.`
+          : "All configured Gemini keys are temporarily exhausted."
+      );
+    }
+
+    let lastError: unknown;
+
+    for (const keyConfig of availableKeys) {
+      const client = this.getClientForKey(keyConfig.keyName, keyConfig.keyValue);
+      try {
+        return await operation(client, keyConfig.keyName);
+      } catch (error) {
+        lastError = error;
+
+        const errorMessage = String(error || "").toLowerCase();
+        const status = (error as any)?.status || (error as any)?.code || (error as any)?.response?.status;
+        const quotaHit = isQuotaExhaustedMessage(errorMessage) || status === 429;
+
+        if (!quotaHit) {
+          throw error;
+        }
+
+        await geminiKeyRotationService.markQuotaExceeded(keyConfig.keyName);
+        logger(`[GEMINI_KEYS] ${keyConfig.keyName} hit quota during ${operationName}. Switching to next configured key.`);
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(`All Gemini keys failed for ${operationName}.`);
   }
 
   private extractImagesFromResponse(response: any, maxImages: number): Buffer[] {
@@ -170,29 +218,33 @@ class GeminiService {
           logger(`[GEMINI] Starting single-call staging generation with ${safeVariationCount} variations`);
           geminiCallCount += 1;
 
-          const response = await this.client.models.generateContent({
-            model: "gemini-3-pro-image-preview",
-            contents: [
-              {
-                role: "user",
-                parts: [
+          const response = await this.executeWithKeyFailover(
+            "stage-single-call",
+            (client) =>
+              client.models.generateContent({
+                model: "gemini-3-pro-image-preview",
+                contents: [
                   {
-                    inlineData: {
-                      mimeType,
-                      data: base64Image,
-                    },
-                  },
-                  {
-                    text: singleCallPrompt,
+                    role: "user",
+                    parts: [
+                      {
+                        inlineData: {
+                          mimeType,
+                          data: base64Image,
+                        },
+                      },
+                      {
+                        text: singleCallPrompt,
+                      },
+                    ],
                   },
                 ],
-              },
-            ],
-            config: {
-              responseModalities: ["IMAGE"],
-              temperature: 0.7,
-            },
-          } as any);
+                config: {
+                  responseModalities: ["IMAGE"],
+                  temperature: 0.7,
+                },
+              } as any)
+          );
 
           const images = this.extractImagesFromResponse(response, safeVariationCount);
           if (images.length >= safeVariationCount) {
@@ -234,29 +286,33 @@ class GeminiService {
 
         const perVariationPrompt = this.buildStagingPrompt(roomType, stagingStyle, variationPrompt, 1);
 
-        const variationResponse = await this.client.models.generateContent({
-          model: "gemini-3-pro-image-preview",
-          contents: [
-            {
-              role: "user",
-              parts: [
+        const variationResponse = await this.executeWithKeyFailover(
+          `stage-variation-${index + 1}`,
+          (client) =>
+            client.models.generateContent({
+              model: "gemini-3-pro-image-preview",
+              contents: [
                 {
-                  inlineData: {
-                    mimeType,
-                    data: base64Image,
-                  },
-                },
-                {
-                  text: perVariationPrompt,
+                  role: "user",
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType,
+                        data: base64Image,
+                      },
+                    },
+                    {
+                      text: perVariationPrompt,
+                    },
+                  ],
                 },
               ],
-            },
-          ],
-          config: {
-            responseModalities: ["IMAGE"],
-            temperature: 0.75,
-          },
-        } as any);
+              config: {
+                responseModalities: ["IMAGE"],
+                temperature: 0.75,
+              },
+            } as any)
+        );
 
         const nextImage = this.extractImagesFromResponse(variationResponse, 1)[0];
         if (!nextImage) {
@@ -423,20 +479,23 @@ class GeminiService {
 
       let analysisText = "";
 
-      const stream = await this.client.models.generateContentStream({
-        model: "gemini-3-pro-image-preview",
-        contents: [
-          {
-            role: "user",
-            parts: [
+      const stream = await this.executeWithKeyFailover(
+        "analyze-image",
+        (client) =>
+          client.models.generateContentStream({
+            model: "gemini-3-pro-image-preview",
+            contents: [
               {
-                inlineData: {
-                  mimeType: mimeType,
-                  data: base64Image,
-                },
-              },
-              {
-                text: `Analyze this interior/property image and provide JSON response with:
+                role: "user",
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: mimeType,
+                      data: base64Image,
+                    },
+                  },
+                  {
+                    text: `Analyze this interior/property image and provide JSON response with:
               {
                 "roomType": "bedroom/kitchen/living-room/etc",
                 "features": ["array", "of", "features"],
@@ -446,15 +505,16 @@ class GeminiService {
               }
               
               Only respond with valid JSON, no other text.`,
+                  },
+                ],
               },
             ],
-          },
-        ],
-        config: {
-          responseModalities: ["TEXT"],
-          temperature: 0.7,
-        },
-      });
+            config: {
+              responseModalities: ["TEXT"],
+              temperature: 0.7,
+            },
+          })
+      );
 
       for await (const chunk of stream) {
         if (chunk.candidates) {
