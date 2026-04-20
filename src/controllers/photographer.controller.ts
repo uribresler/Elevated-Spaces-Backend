@@ -84,6 +84,53 @@ function normalizeAttachments(rawAttachments: unknown): Array<{ name: string; ty
     : [];
 }
 
+function parseStringArray(raw: unknown): string[] {
+  const parsed = Array.isArray(raw)
+    ? raw
+    : typeof raw === "string"
+      ? JSON.parse(raw)
+      : [];
+
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter(Boolean);
+}
+
+function parseRefundPolicy(raw: unknown): Array<{ hoursBefore: number; refundPercent: number }> {
+  const parsed = Array.isArray(raw)
+    ? raw
+    : typeof raw === "string"
+      ? JSON.parse(raw)
+      : [];
+
+  if (!Array.isArray(parsed)) return [];
+
+  return parsed
+    .map((item) => ({
+      hoursBefore: Number(item?.hoursBefore),
+      refundPercent: Number(item?.refundPercent),
+    }))
+    .filter((item) => Number.isFinite(item.hoursBefore) && item.hoursBefore >= 0 && Number.isFinite(item.refundPercent) && item.refundPercent >= 0 && item.refundPercent <= 100);
+}
+
+function isValidUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function validatePlatformUrl(url: string | null, platformHosts: string[]): boolean {
+  if (!url) return true;
+  if (!isValidUrl(url)) return false;
+
+  const hostname = new URL(url).hostname.toLowerCase();
+  return platformHosts.some((host) => hostname === host || hostname.endsWith(`.${host}`));
+}
+
 export async function submitPhotographerApplication(req: Request, res: Response): Promise<void> {
   try {
     const userId = req.user?.id;
@@ -99,15 +146,105 @@ export async function submitPhotographerApplication(req: Request, res: Response)
     const serviceArea = typeof req.body.serviceArea === "string" ? req.body.serviceArea.trim() : null;
     const portfolioUrl = typeof req.body.portfolioUrl === "string" ? req.body.portfolioUrl.trim() : null;
     const instagramUrl = typeof req.body.instagramUrl === "string" ? req.body.instagramUrl.trim() : null;
+    const facebookUrl = typeof req.body.facebookUrl === "string" ? req.body.facebookUrl.trim() : null;
+    const linkedinUrl = typeof req.body.linkedinUrl === "string" ? req.body.linkedinUrl.trim() : null;
+    const xUrl = typeof req.body.xUrl === "string" ? req.body.xUrl.trim() : null;
     const websiteUrl = typeof req.body.websiteUrl === "string" ? req.body.websiteUrl.trim() : null;
+    const phoneNumber = typeof req.body.phoneNumber === "string" ? req.body.phoneNumber.trim() : null;
     const yearsExperience = typeof req.body.yearsExperience === "string" ? req.body.yearsExperience.trim() : null;
     const gearDescription = typeof req.body.gearDescription === "string" ? req.body.gearDescription.trim() : null;
     const businessName = typeof req.body.businessName === "string" ? req.body.businessName.trim() : null;
     const shortPitch = typeof req.body.shortPitch === "string" ? req.body.shortPitch.trim() : null;
-    const documentUrl = req.file ? `${req.protocol}://${req.get("host") || "localhost:3003"}/uploads/documents/${req.file.filename}` : (typeof req.body.documentsUrl === "string" ? req.body.documentsUrl.trim() : null);
+    const serviceAreas = parseStringArray(req.body.serviceAreas);
+    const serviceKeywords = parseStringArray(req.body.serviceKeywords);
+    const refundPolicy = parseRefundPolicy(req.body.refundPolicy);
+    const priceMin = Number(req.body.priceMin);
+    const priceMax = Number(req.body.priceMax);
+
+    const files = (req.files as Record<string, Express.Multer.File[]> | undefined) || {};
+    const drivingLicense = files.drivingLicense?.[0];
+    const utilityBill = files.utilityBill?.[0];
+    const portfolioImages = files.portfolioImages || [];
+    const portfolioServiceTypes = parseStringArray(req.body.portfolioServiceTypes);
+
+    const baseHost = `${req.protocol}://${req.get("host") || "localhost:3003"}`;
+    const drivingLicenseUrl = drivingLicense ? `${baseHost}/uploads/documents/${drivingLicense.filename}` : null;
+    const utilityBillUrl = utilityBill ? `${baseHost}/uploads/documents/${utilityBill.filename}` : null;
+    const portfolioItems = portfolioImages.map((file, index) => ({
+      imageUrl: `${baseHost}/uploads/photographer-portfolio/${file.filename}`,
+      serviceType: portfolioServiceTypes[index] || "General",
+    }));
 
     if (!bio) {
       res.status(400).json({ success: false, message: "Bio is required" });
+      return;
+    }
+
+    if (!validatePlatformUrl(instagramUrl, ["instagram.com", "www.instagram.com"])) {
+      res.status(400).json({ success: false, message: "Instagram URL must be an instagram.com link" });
+      return;
+    }
+
+    if (!validatePlatformUrl(facebookUrl, ["facebook.com", "www.facebook.com", "fb.com"])) {
+      res.status(400).json({ success: false, message: "Facebook URL must be a facebook.com link" });
+      return;
+    }
+
+    if (!validatePlatformUrl(linkedinUrl, ["linkedin.com", "www.linkedin.com"])) {
+      res.status(400).json({ success: false, message: "LinkedIn URL must be a linkedin.com link" });
+      return;
+    }
+
+    if (!validatePlatformUrl(xUrl, ["x.com", "www.x.com", "twitter.com", "www.twitter.com"])) {
+      res.status(400).json({ success: false, message: "X URL must be an x.com or twitter.com link" });
+      return;
+    }
+
+    if (websiteUrl && !isValidUrl(websiteUrl)) {
+      res.status(400).json({ success: false, message: "Website URL must be a valid http/https link" });
+      return;
+    }
+
+    if (portfolioUrl && !isValidUrl(portfolioUrl)) {
+      res.status(400).json({ success: false, message: "Portfolio URL must be a valid http/https link" });
+      return;
+    }
+
+    if (phoneNumber && !/^\+?[0-9\s()-]{7,20}$/.test(phoneNumber)) {
+      res.status(400).json({ success: false, message: "Phone number format is invalid" });
+      return;
+    }
+
+    if (Number.isFinite(priceMin) && Number.isFinite(priceMax) && priceMin > priceMax) {
+      res.status(400).json({ success: false, message: "Minimum price cannot be greater than maximum price" });
+      return;
+    }
+
+    const existingProfile = (await prisma.photographer_profile.findUnique({
+      where: { user_id: userId },
+    })) as (typeof prisma.photographer_profile extends { findUnique: (...args: any[]) => Promise<infer T> } ? T : unknown) & {
+      driving_license_url?: string | null;
+      utility_bill_url?: string | null;
+      portfolio_items?: unknown;
+    } | null;
+
+    if (!drivingLicenseUrl && !existingProfile?.driving_license_url) {
+      res.status(400).json({ success: false, message: "Driving license document is required" });
+      return;
+    }
+
+    if (!utilityBillUrl && !existingProfile?.utility_bill_url) {
+      res.status(400).json({ success: false, message: "Latest utility bill document is required" });
+      return;
+    }
+
+    const existingPortfolioItems = Array.isArray(existingProfile?.portfolio_items)
+      ? (existingProfile?.portfolio_items as Array<{ imageUrl: string; serviceType?: string }>)
+      : [];
+
+    const mergedPortfolioItems = portfolioItems.length > 0 ? portfolioItems : existingPortfolioItems;
+    if (mergedPortfolioItems.length < 3 || mergedPortfolioItems.length > 5) {
+      res.status(400).json({ success: false, message: "Please provide between 3 and 5 portfolio images" });
       return;
     }
 
@@ -118,16 +255,28 @@ export async function submitPhotographerApplication(req: Request, res: Response)
         availability,
         photographer_type: photographerType,
         years_experience: yearsExperience,
-        service_area: serviceArea,
+        service_area: serviceAreas.join(", ") || serviceArea,
+        service_areas: serviceAreas,
         portfolio_url: portfolioUrl,
         instagram_url: instagramUrl,
+        facebook_url: facebookUrl,
+        linkedin_url: linkedinUrl,
+        x_url: xUrl,
         website_url: websiteUrl,
+        phone_number: phoneNumber,
+        portfolio_items: mergedPortfolioItems,
+        service_keywords: serviceKeywords.join(", "),
+        price_min: Number.isFinite(priceMin) ? Math.max(0, Math.floor(priceMin)) : undefined,
+        price_max: Number.isFinite(priceMax) ? Math.max(0, Math.floor(priceMax)) : undefined,
+        refund_policy: refundPolicy,
         gear_description: gearDescription,
         business_name: businessName,
         short_pitch: shortPitch,
         approved: false,
         application_status: "SUBMITTED",
-        documents_url: documentUrl || undefined,
+        documents_url: drivingLicenseUrl || existingProfile?.driving_license_url || undefined,
+        driving_license_url: drivingLicenseUrl || existingProfile?.driving_license_url || undefined,
+        utility_bill_url: utilityBillUrl || existingProfile?.utility_bill_url || undefined,
       },
       create: {
         user_id: userId,
@@ -135,16 +284,28 @@ export async function submitPhotographerApplication(req: Request, res: Response)
         availability,
         photographer_type: photographerType,
         years_experience: yearsExperience,
-        service_area: serviceArea,
+        service_area: serviceAreas.join(", ") || serviceArea,
+        service_areas: serviceAreas,
         portfolio_url: portfolioUrl,
         instagram_url: instagramUrl,
+        facebook_url: facebookUrl,
+        linkedin_url: linkedinUrl,
+        x_url: xUrl,
         website_url: websiteUrl,
+        phone_number: phoneNumber,
+        portfolio_items: mergedPortfolioItems,
+        service_keywords: serviceKeywords.join(", "),
+        price_min: Number.isFinite(priceMin) ? Math.max(0, Math.floor(priceMin)) : undefined,
+        price_max: Number.isFinite(priceMax) ? Math.max(0, Math.floor(priceMax)) : undefined,
+        refund_policy: refundPolicy,
         gear_description: gearDescription,
         business_name: businessName,
         short_pitch: shortPitch,
         approved: false,
         application_status: "SUBMITTED",
-        documents_url: documentUrl || undefined,
+        documents_url: drivingLicenseUrl || undefined,
+        driving_license_url: drivingLicenseUrl || undefined,
+        utility_bill_url: utilityBillUrl || undefined,
       },
     });
 
@@ -221,7 +382,30 @@ export async function getMyPhotographerProfile(req: Request, res: Response): Pro
 
     const profile = await prisma.photographer_profile.findUnique({
       where: { user_id: userId },
-      include: {
+      select: {
+        id: true,
+        user_id: true,
+        bio: true,
+        documents_url: true,
+        approved: true,
+        application_status: true,
+        availability: true,
+        photographer_type: true,
+        years_experience: true,
+        service_area: true,
+        portfolio_url: true,
+        instagram_url: true,
+        website_url: true,
+        gear_description: true,
+        business_name: true,
+        short_pitch: true,
+        admin_feedback: true,
+        feedback_provided_at: true,
+        photographer_responses: true,
+        has_new_photographer_response: true,
+        submission_count: true,
+        created_at: true,
+        updated_at: true,
         user: {
           select: {
             id: true,
@@ -273,7 +457,10 @@ export async function updateMyPhotographerProfile(req: Request, res: Response): 
       return;
     }
 
-    const profile = await prisma.photographer_profile.findUnique({ where: { user_id: userId } });
+    const profile = await prisma.photographer_profile.findUnique({
+      where: { user_id: userId },
+      select: { id: true },
+    });
     if (!profile) {
       res.status(404).json({ success: false, message: "Photographer profile not found" });
       return;
@@ -309,7 +496,10 @@ export async function setMyAvailabilityPlaceholder(req: Request, res: Response):
       return;
     }
 
-    const profile = await prisma.photographer_profile.findUnique({ where: { user_id: userId } });
+    const profile = await prisma.photographer_profile.findUnique({
+      where: { user_id: userId },
+      select: { id: true },
+    });
     if (!profile) {
       res.status(404).json({ success: false, message: "Photographer profile not found" });
       return;
@@ -513,7 +703,30 @@ export async function listApprovedPhotographers(req: Request, res: Response): Pr
   try {
     const photographers = await prisma.photographer_profile.findMany({
       where: { approved: true },
-      include: {
+      select: {
+        id: true,
+        user_id: true,
+        bio: true,
+        documents_url: true,
+        approved: true,
+        application_status: true,
+        availability: true,
+        photographer_type: true,
+        years_experience: true,
+        service_area: true,
+        portfolio_url: true,
+        instagram_url: true,
+        website_url: true,
+        gear_description: true,
+        business_name: true,
+        short_pitch: true,
+        admin_feedback: true,
+        feedback_provided_at: true,
+        photographer_responses: true,
+        has_new_photographer_response: true,
+        submission_count: true,
+        created_at: true,
+        updated_at: true,
         user: {
           select: {
             id: true,
@@ -551,6 +764,8 @@ export async function createBookingRequestPlaceholder(req: Request, res: Respons
     const dateInput = typeof req.body.date === "string" ? req.body.date.trim() : "";
     const clientNoteHtml = typeof req.body.clientNoteHtml === "string" ? req.body.clientNoteHtml.trim() : "";
     const clientNoteAttachments = normalizeAttachments(req.body.clientNoteAttachments);
+    const paymentConfirmed = Boolean(req.body.paymentConfirmed);
+    const transactionId = typeof req.body.transactionId === "string" ? req.body.transactionId.trim() : "";
 
     if (!photographerId || !dateInput) {
       res.status(400).json({
@@ -611,7 +826,9 @@ export async function createBookingRequestPlaceholder(req: Request, res: Respons
       },
       include: {
         photographer: {
-          include: {
+          select: {
+            id: true,
+            user_id: true,
             user: {
               select: {
                 id: true,
@@ -686,9 +903,22 @@ export async function listMyBookingRequests(req: Request, res: Response): Promis
 
     const bookings = await prisma.booking.findMany({
       where: { user_id: userId },
-      include: {
+      select: {
+        id: true,
+        user_id: true,
+        photographer_id: true,
+        date: true,
+        status: true,
+        client_note_html: true,
+        client_note_attachments: true,
+        photographer_note_html: true,
+        photographer_note_attachments: true,
+        cancelled_by: true,
+        created_at: true,
+        updated_at: true,
         photographer: {
-          include: {
+          select: {
+            id: true,
             user: {
               select: {
                 id: true,
@@ -717,7 +947,10 @@ export async function listBookingsForPhotographer(req: Request, res: Response): 
       return;
     }
 
-    const profile = await prisma.photographer_profile.findUnique({ where: { user_id: userId } });
+    const profile = await prisma.photographer_profile.findUnique({
+      where: { user_id: userId },
+      select: { id: true },
+    });
     if (!profile) {
       res.status(404).json({ success: false, message: "Photographer profile not found" });
       return;
@@ -725,7 +958,19 @@ export async function listBookingsForPhotographer(req: Request, res: Response): 
 
     const bookings = await prisma.booking.findMany({
       where: { photographer_id: profile.id },
-      include: {
+      select: {
+        id: true,
+        user_id: true,
+        photographer_id: true,
+        date: true,
+        status: true,
+        client_note_html: true,
+        client_note_attachments: true,
+        photographer_note_html: true,
+        photographer_note_attachments: true,
+        cancelled_by: true,
+        created_at: true,
+        updated_at: true,
         user: {
           select: {
             id: true,
@@ -762,7 +1007,10 @@ export async function updateBookingStatusPlaceholder(req: Request, res: Response
       return;
     }
 
-    const profile = await prisma.photographer_profile.findUnique({ where: { user_id: userId } });
+    const profile = await prisma.photographer_profile.findUnique({
+      where: { user_id: userId },
+      select: { id: true },
+    });
     if (!profile) {
       res.status(404).json({ success: false, message: "Photographer profile not found" });
       return;
@@ -804,7 +1052,14 @@ export async function submitPhotographerResponse(req: Request, res: Response): P
       return;
     }
 
-    const profile = await prisma.photographer_profile.findUnique({ where: { user_id: userId } });
+    const profile = await prisma.photographer_profile.findUnique({
+      where: { user_id: userId },
+      select: {
+        id: true,
+        application_status: true,
+        photographer_responses: true,
+      },
+    });
     if (!profile) {
       res.status(404).json({ success: false, message: "Photographer profile not found" });
       return;
