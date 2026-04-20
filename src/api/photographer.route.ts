@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { requireAuth } from "../middlewares/auth";
-import { uploadPhotographerDocument } from "../middlewares/uploadPhotographerDocuments";
+import { uploadPhotographerDocument, uploadPhotographerOnboardingFiles } from "../middlewares/uploadPhotographerDocuments";
 import {
   createBookingRequestPlaceholder,
   getPhotographerApplicationById,
@@ -25,7 +25,7 @@ const router = Router();
 router.get("/directory", listApprovedPhotographers);
 
 // Photographer onboarding and profile
-router.post("/onboarding/apply", requireAuth, uploadPhotographerDocument, submitPhotographerApplication);
+router.post("/onboarding/apply", requireAuth, uploadPhotographerOnboardingFiles, submitPhotographerApplication);
 router.post("/onboarding/document", requireAuth, uploadPhotographerDocument, uploadPhotographerVerificationDocument);
 router.get("/me", requireAuth, getMyPhotographerProfile);
 router.patch("/me", requireAuth, updateMyPhotographerProfile);
