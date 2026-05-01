@@ -1,10 +1,11 @@
 import { Router } from "express";
 import { requireAuth } from "../middlewares/auth";
-import { createCheckoutSessionHandler, getSessionDetailsHandler, getCreditsHandler, getWebhookLogsHandler, simulateWebhookHandler, processPendingPurchasesHandler, testPaymentLogHandler } from "../controllers/payment.controller";
+import { createCheckoutSessionHandler, getSessionDetailsHandler, getCreditsHandler, getWebhookLogsHandler, simulateWebhookHandler, processPendingPurchasesHandler, testPaymentLogHandler, contactSalesHandler } from "../controllers/payment.controller";
 
 const router = Router();
 
 router.post("/checkout-session", requireAuth, createCheckoutSessionHandler);
+router.post("/contact-sales", contactSalesHandler);
 router.get("/session/:sessionId", getSessionDetailsHandler);
 router.get("/credits", requireAuth, getCreditsHandler);
 router.get("/webhook-logs", getWebhookLogsHandler);

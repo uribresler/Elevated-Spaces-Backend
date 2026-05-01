@@ -7,6 +7,14 @@ import { oauthService } from "../services/oauth.service";
 import { getOAuthConfig, OAuthUserProfile } from "./oauth.config";
 import { logger } from "../utils/logger";
 
+const PASSPORT_VERBOSE_LOGS = String(process.env.PASSPORT_VERBOSE_LOGS || "false").toLowerCase() === "true";
+
+const passportVerboseLog = (message: string): void => {
+  if (PASSPORT_VERBOSE_LOGS) {
+    logger(message);
+  }
+};
+
 const parseOAuthState = (rawState: unknown): { intent: "signin" | "signup"; agreementsAccepted: boolean } | null => {
   if (typeof rawState !== "string" || !rawState) {
     return null;
@@ -71,16 +79,16 @@ if (jwtSecret) {
       {
         jwtFromRequest: (req) => {
           const authHeader = req.headers.authorization;
-          logger(`[JWT Extract] Auth header: ${authHeader ? authHeader.substring(0, 50) + '...' : 'none'}`);
+          passportVerboseLog(`[JWT Extract] Auth header: ${authHeader ? authHeader.substring(0, 50) + '...' : 'none'}`);
           const token = ExtractJwt.fromAuthHeaderAsBearerToken()(req);
-          logger(`[JWT Extract] Extracted token: ${token ? token.substring(0, 20) + '...' : 'failed'}`);
+          passportVerboseLog(`[JWT Extract] Extracted token: ${token ? token.substring(0, 20) + '...' : 'failed'}`);
           return token;
         },
         secretOrKey: jwtSecret,
       },
       async (jwtPayload: any, done: (error: any, user?: any) => void) => {
         try {
-          logger(`[JWT Strategy] Callback invoked with payload: ${JSON.stringify(jwtPayload)}`);
+          passportVerboseLog(`[JWT Strategy] Callback invoked with payload: ${JSON.stringify(jwtPayload)}`);
           
           // The JWT payload contains the user information (use userId or id)
           const user = {
@@ -88,18 +96,18 @@ if (jwtSecret) {
             role: jwtPayload.role,
           };
 
-          logger(`[JWT Strategy] User authenticated successfully. userId=${user.id}, role=${user.role}`);
+          passportVerboseLog(`[JWT Strategy] User authenticated successfully. userId=${user.id}, role=${user.role}`);
           return done(null, user);
         } catch (error) {
-          logger(`[JWT Strategy] Error: ${error instanceof Error ? error.message : String(error)}`);
+          passportVerboseLog(`[JWT Strategy] Error: ${error instanceof Error ? error.message : String(error)}`);
           return done(error as Error);
         }
       }
     )
   );
-  logger("[Passport] JWT strategy configured with secret length: " + jwtSecret.length);
+  passportVerboseLog("[Passport] JWT strategy configured with secret length: " + jwtSecret.length);
 } else {
-  logger("[Passport] JWT not configured (missing JWT_SECRET)");
+  passportVerboseLog("[Passport] JWT not configured (missing JWT_SECRET)");
 }
 
 // GOOGLE STRATEGY

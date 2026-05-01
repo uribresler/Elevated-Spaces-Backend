@@ -32,7 +32,7 @@ export interface EmailProps {
     senderEmail?: string;
 }
 
-// Send email function with spam prevention
+// Send email function with spam preventions
 export const sendEmail = async ({
     from,
     senderName,
@@ -44,7 +44,7 @@ export const sendEmail = async ({
     senderEmail,
 }: EmailProps) => {
     // SendGrid requires verified sender email
-    const verifiedSender = process.env.SENDGRID_VERIFIED_SENDER || "saifullahahmed380@gmail.com";
+    const verifiedSender = process.env.SENDGRID_VERIFIED_SENDER || "noreply@elevatespacesai.com";
     
     const msg = {
         to,

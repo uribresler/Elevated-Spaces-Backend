@@ -22,19 +22,62 @@ const ACTIVE_SUBSCRIPTION_STATUSES = new Set([
     "unpaid",
 ]);
 
-const PLAN_PRODUCT_KEYS = new Set(["starter", "pro", "team"]);
+function getSubscriptionStatusPriority(status: string): number {
+    switch (status) {
+        case "active":
+            return 4;
+        case "trialing":
+            return 3;
+        case "past_due":
+            return 2;
+        case "unpaid":
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+const PLAN_PRODUCT_KEYS = new Set([
+    "starter",
+    "pro",
+    "team",
+    "starter_annual",
+    "pro_annual",
+    "team_annual",
+]);
+
+function getPlanTierPriority(productKey?: string | null): number {
+    switch (productKey) {
+        case "starter":
+        case "starter_annual":
+            return 1;
+        case "pro":
+        case "pro_annual":
+            return 2;
+        case "team":
+        case "team_annual":
+            return 3;
+        default:
+            return 0;
+    }
+}
 
 export type PurchaseFor = "individual" | "team";
 export type ProductKey =
     | "starter"
     | "pro"
     | "team"
+    | "starter_annual"
+    | "pro_annual"
+    | "team_annual"
     | "virtual_staging"
     | "furnishing_addon"
     | "extra_credits_50"
     | "extra_credits_100"
     | "pay_per_image"
-    | "subscription_topup";
+    | "subscription_topup"
+    | "pro_extra_user_seat"
+    | "team_extra_user_seat";
 
 const PRODUCT_CATALOG: Record<ProductKey, {
     name: string;
@@ -42,17 +85,22 @@ const PRODUCT_CATALOG: Record<ProductKey, {
     unitAmountUsd: number;
     credits?: number;
     creditsPerUnit?: number;
-    interval?: "month";
+    interval?: "month" | "year";
 }> = {
-    starter: { name: "Starter", type: "subscription", unitAmountUsd: 25, credits: 60, interval: "month" },
-    pro: { name: "Pro", type: "subscription", unitAmountUsd: 59, credits: 160, interval: "month" },
-    team: { name: "Team", type: "subscription", unitAmountUsd: 119, credits: 360, interval: "month" },
+    starter: { name: "Starter", type: "subscription", unitAmountUsd: 29, credits: 60, interval: "month" },
+    pro: { name: "Pro", type: "subscription", unitAmountUsd: 69, credits: 160, interval: "month" },
+    team: { name: "Team", type: "subscription", unitAmountUsd: 139, credits: 360, interval: "month" },
+    starter_annual: { name: "Starter Annual", type: "subscription", unitAmountUsd: 300, credits: 720, interval: "year" },
+    pro_annual: { name: "Pro Annual", type: "subscription", unitAmountUsd: 744, credits: 1920, interval: "year" },
+    team_annual: { name: "Team Annual", type: "subscription", unitAmountUsd: 1500, credits: 4320, interval: "year" },
     virtual_staging: { name: "Full Home Virtual Staging", type: "one_time", unitAmountUsd: 99.99 },
     furnishing_addon: { name: "Physical Furnishing Add-On", type: "one_time", unitAmountUsd: 39.99 },
     extra_credits_50: { name: "Extra Credits (50)", type: "one_time", unitAmountUsd: 22, credits: 50 },
     extra_credits_100: { name: "Extra Credits (100)", type: "one_time", unitAmountUsd: 40, credits: 100 },
     pay_per_image: { name: "Pay Per Image", type: "one_time", unitAmountUsd: 1.5, creditsPerUnit: 1 },
     subscription_topup: { name: "Subscription Top-Up Credits", type: "one_time", unitAmountUsd: 0, creditsPerUnit: 1 },
+    pro_extra_user_seat: { name: "Pro Extra User Seat", type: "subscription", unitAmountUsd: 20, interval: "month" },
+    team_extra_user_seat: { name: "Team Extra User Seat", type: "subscription", unitAmountUsd: 15, interval: "month" },
 };
 
 function getProductConfig(productKey: string) {
@@ -142,22 +190,100 @@ async function listActiveSubscriptionsForScope({
         limit: 100,
     });
 
-    return subscriptions.data.filter((subscription) => {
-        if (!ACTIVE_SUBSCRIPTION_STATUSES.has(subscription.status)) {
-            return false;
-        }
+    return subscriptions.data
+        .filter((subscription) => {
+            if (!ACTIVE_SUBSCRIPTION_STATUSES.has(subscription.status)) {
+                return false;
+            }
 
-        const metadata = subscription.metadata || {};
-        if (metadata.purchaseFor !== purchaseFor || metadata.userId !== userId) {
-            return false;
-        }
+            const metadata = subscription.metadata || {};
+            if (metadata.purchaseFor !== purchaseFor || metadata.userId !== userId) {
+                return false;
+            }
 
-        if (purchaseFor === "team") {
-            return metadata.teamId === teamId;
-        }
+            if (purchaseFor === "team") {
+                return metadata.teamId === teamId;
+            }
 
-        return !metadata.teamId;
+            return !metadata.teamId;
+        })
+        .sort((a, b) => {
+            const priorityDiff = getSubscriptionStatusPriority(b.status) - getSubscriptionStatusPriority(a.status);
+            if (priorityDiff !== 0) {
+                return priorityDiff;
+            }
+
+            const aPeriodStart = typeof (a as any).current_period_start === "number" ? (a as any).current_period_start : 0;
+            const bPeriodStart = typeof (b as any).current_period_start === "number" ? (b as any).current_period_start : 0;
+            const periodDiff = bPeriodStart - aPeriodStart;
+            if (periodDiff !== 0) {
+                return periodDiff;
+            }
+
+            const aCreated = typeof a.created === "number" ? a.created : 0;
+            const bCreated = typeof b.created === "number" ? b.created : 0;
+            return bCreated - aCreated;
+        });
+}
+
+async function listActivePlanSubscriptionsForTeamOwnership({
+    customerId,
+    teamId,
+    userId,
+}: {
+    customerId: string;
+    teamId: string;
+    userId: string;
+}) {
+    const subscriptions = await stripe.subscriptions.list({
+        customer: customerId,
+        status: "all",
+        limit: 100,
     });
+
+    return subscriptions.data
+        .filter((subscription) => {
+            if (!ACTIVE_SUBSCRIPTION_STATUSES.has(subscription.status)) {
+                return false;
+            }
+
+            const metadata = subscription.metadata || {};
+            if (metadata.userId !== userId) {
+                return false;
+            }
+
+            if (metadata.purchaseFor === "team") {
+                return metadata.teamId === teamId;
+            }
+
+            if (metadata.purchaseFor === "individual") {
+                return !metadata.teamId;
+            }
+
+            return false;
+        })
+        .sort((a, b) => {
+            const planPriorityDiff = getPlanTierPriority(b.metadata?.productKey) - getPlanTierPriority(a.metadata?.productKey);
+            if (planPriorityDiff !== 0) {
+                return planPriorityDiff;
+            }
+
+            const statusPriorityDiff = getSubscriptionStatusPriority(b.status) - getSubscriptionStatusPriority(a.status);
+            if (statusPriorityDiff !== 0) {
+                return statusPriorityDiff;
+            }
+
+            const aPeriodStart = typeof (a as any).current_period_start === "number" ? (a as any).current_period_start : 0;
+            const bPeriodStart = typeof (b as any).current_period_start === "number" ? (b as any).current_period_start : 0;
+            const periodDiff = bPeriodStart - aPeriodStart;
+            if (periodDiff !== 0) {
+                return periodDiff;
+            }
+
+            const aCreated = typeof a.created === "number" ? a.created : 0;
+            const bCreated = typeof b.created === "number" ? b.created : 0;
+            return bCreated - aCreated;
+        });
 }
 
 async function hasAnyPlanSubscriptionHistoryForScope({
@@ -317,6 +443,7 @@ export async function createCheckoutSession({
     teamId,
     quantity,
     confirmPlanChange,
+    seatAutoRenew,
 }: {
     userId: string;
     productKey: string;
@@ -324,6 +451,7 @@ export async function createCheckoutSession({
     teamId?: string;
     quantity?: number;
     confirmPlanChange?: boolean;
+    seatAutoRenew?: boolean;
 }) {
     const isSubscriptionTopUp = productKey === "subscription_topup";
     const config = isSubscriptionTopUp ? null : getProductConfig(productKey);
@@ -331,9 +459,13 @@ export async function createCheckoutSession({
         throw new Error("Invalid purchase type");
     }
     const safeQuantity = Math.max(1, Math.min(quantity || 1, 1000));
+    const isSeatAddon = productKey === "pro_extra_user_seat" || productKey === "team_extra_user_seat";
+    const shouldAutoRenewSeat = seatAutoRenew !== false;
 
     if (!isSubscriptionTopUp && config!.type === "subscription" && safeQuantity !== 1) {
-        throw new Error("Subscriptions must have quantity of 1");
+        if (!isSeatAddon) {
+            throw new Error("Subscriptions must have quantity of 1");
+        }
     }
 
     if (purchaseFor === "team") {
@@ -344,6 +476,40 @@ export async function createCheckoutSession({
     }
 
     const { customerId } = await ensureStripeCustomer(userId);
+
+    if (isSeatAddon) {
+        if (purchaseFor !== "team") {
+            throw new Error("Extra user seats are only available for team plans");
+        }
+
+        if (!teamId) {
+            throw new Error("Team ID is required for extra user seats");
+        }
+
+        const activePlanSubscriptions = await listActivePlanSubscriptionsForTeamOwnership({
+            customerId,
+            teamId,
+            userId,
+        });
+
+        const activePlan = activePlanSubscriptions.find((subscription) => {
+            const key = subscription.metadata?.productKey;
+            return typeof key === "string" && PLAN_PRODUCT_KEYS.has(key);
+        });
+
+        if (!activePlan) {
+            throw new Error("Active team plan is required before purchasing extra user seats");
+        }
+
+        const activePlanKey = activePlan.metadata?.productKey;
+        const validForPlan =
+            (productKey === "pro_extra_user_seat" && (activePlanKey === "pro" || activePlanKey === "pro_annual")) ||
+            (productKey === "team_extra_user_seat" && (activePlanKey === "team" || activePlanKey === "team_annual"));
+
+        if (!validForPlan) {
+            throw new Error("Selected extra user seat add-on does not match your active team plan");
+        }
+    }
 
     if (productKey === "furnishing_addon") {
         const hasSubscriptionHistory = await hasAnyPlanSubscriptionHistoryForScope({
@@ -362,7 +528,7 @@ export async function createCheckoutSession({
         }
     }
 
-    const existingSubscriptions = !isSubscriptionTopUp && config!.type === "subscription"
+    const existingSubscriptions = !isSubscriptionTopUp && config!.type === "subscription" && !isSeatAddon
         ? await listActiveSubscriptionsForScope({
             customerId,
             purchaseFor,
@@ -372,7 +538,7 @@ export async function createCheckoutSession({
         : [];
     const replacingSubscriptionId = existingSubscriptions[0]?.id;
 
-    if (!isSubscriptionTopUp && config!.type === "subscription" && existingSubscriptions.length > 0 && !confirmPlanChange) {
+    if (!isSubscriptionTopUp && config!.type === "subscription" && !isSeatAddon && existingSubscriptions.length > 0 && !confirmPlanChange) {
         const error: any = new Error(
             "You already have an active subscription. Changing plans will cancel the current plan and transfer any unused credits to your wallet. Confirm to proceed."
         );
@@ -441,6 +607,10 @@ export async function createCheckoutSession({
 
     metadata.credits = String(credits);
     metadata.unitAmount = String(unitAmount);
+    if (isSeatAddon) {
+        metadata.seatUnits = String(safeQuantity);
+        metadata.seatAutoRenew = String(shouldAutoRenewSeat);
+    }
 
     if (teamId) {
         metadata.teamId = teamId;
@@ -450,8 +620,9 @@ export async function createCheckoutSession({
         metadata.replacingSubscriptionId = replacingSubscriptionId;
     }
 
+    const isSubscriptionMode = !isSubscriptionTopUp && config!.type === "subscription";
     const session = await stripe.checkout.sessions.create({
-        mode: !isSubscriptionTopUp && config!.type === "subscription" ? "subscription" : "payment",
+        mode: isSubscriptionMode ? "subscription" : "payment",
         customer: customerId,
         line_items: [
             {
@@ -462,21 +633,24 @@ export async function createCheckoutSession({
                     product_data: {
                         name: productName,
                     },
-                    recurring: !isSubscriptionTopUp && config!.type === "subscription" ? { interval: config!.interval || "month" } : undefined,
+                    recurring: isSubscriptionMode ? { interval: config!.interval || "month" } : undefined,
                 },
             },
         ],
         metadata,
-        subscription_data: !isSubscriptionTopUp && config!.type === "subscription" ? { metadata } : undefined,
+        subscription_data: isSubscriptionMode ? {
+            metadata,
+            ...(isSeatAddon && !shouldAutoRenewSeat ? { cancel_at_period_end: true } : {}),
+        } : undefined,
         success_url: `${FRONTEND_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${FRONTEND_URL}/payment/error?type=cancelled`,
     });
 
     if (purchaseFor === "team" && teamId) {
-        await prisma.team_purchase.create({
+            await prisma.team_purchase.create({
             data: {
                 team_id: teamId,
-                amount: credits,
+                    amount: isSeatAddon ? safeQuantity : credits,
                 price_usd: totalAmount / 100,
                 status: "pending",
                 stripe_session_id: session.id,
@@ -531,7 +705,118 @@ function applyCreditsToTeam(teamId: string, credits: number) {
     });
 }
 
-const SUBSCRIPTION_PLAN_PACKAGE_NAMES = ["plan_starter", "plan_pro", "plan_team"];
+export async function sendContactSalesInquiry({
+    email,
+    message,
+    userId,
+}: {
+    email: string;
+    message?: string;
+    userId?: string;
+}) {
+    const senderEmail = (email || "").trim();
+    if (!senderEmail) {
+        throw new Error("Email is required");
+    }
+
+    const SALES_CONTACT_EMAIL = process.env.SALES_CONTACT_EMAIL || "elevatespacesai@gmail.com";
+    const safeMessage = (message || "").trim();
+    const submittedAt = new Date().toISOString();
+
+    const subject = `Enterprise plan inquiry${userId ? ` (user: ${userId})` : ""}`;
+    const text = [
+        "New Contact Sales request",
+        `Submitted at: ${submittedAt}`,
+        `User ID: ${userId || "N/A"}`,
+        `Email: ${senderEmail}`,
+        "",
+        "Message:",
+        safeMessage || "Please contact me about enterprise pricing.",
+    ].join("\n");
+
+    const html = `
+        <h2>New Contact Sales request</h2>
+        <p><strong>Submitted at:</strong> ${submittedAt}</p>
+        <p><strong>User ID:</strong> ${userId || "N/A"}</p>
+        <p><strong>Email:</strong> ${senderEmail}</p>
+        <p><strong>Message:</strong></p>
+        <p>${(safeMessage || "Please contact me about enterprise pricing.").replace(/\n/g, "<br />")}</p>
+    `;
+
+    await sendEmail({
+        from: senderEmail,
+        senderName: "Elevate Spaces Contact Sales",
+        replyTo: senderEmail,
+        to: SALES_CONTACT_EMAIL,
+        subject,
+        text,
+        html,
+    });
+
+    return { success: true };
+}
+
+const INITIAL_SUBSCRIPTION_LOOKBACK_MS = 12 * 60 * 60 * 1000;
+
+function getInitialSubscriptionCutoff() {
+    return new Date(Date.now() - INITIAL_SUBSCRIPTION_LOOKBACK_MS);
+}
+
+async function findRecentPersonalSubscriptionPurchase({
+    userId,
+    packageId,
+    amount,
+}: {
+    userId: string;
+    packageId: string;
+    amount: number;
+}) {
+    return prisma.user_credit_purchase.findFirst({
+        where: {
+            user_id: userId,
+            package_id: packageId,
+            amount,
+            created_at: {
+                gte: getInitialSubscriptionCutoff(),
+            },
+            status: {
+                in: ["pending", "completed"],
+            },
+        },
+        orderBy: { created_at: "desc" },
+    });
+}
+
+async function findRecentTeamSubscriptionPurchase({
+    teamId,
+    amount,
+}: {
+    teamId: string;
+    amount: number;
+}) {
+    return prisma.team_purchase.findFirst({
+        where: {
+            team_id: teamId,
+            amount,
+            created_at: {
+                gte: getInitialSubscriptionCutoff(),
+            },
+            status: {
+                in: ["pending", "completed"],
+            },
+        },
+        orderBy: { created_at: "desc" },
+    });
+}
+
+const SUBSCRIPTION_PLAN_PACKAGE_NAMES = [
+    "plan_starter",
+    "plan_pro",
+    "plan_team",
+    "plan_starter_annual",
+    "plan_pro_annual",
+    "plan_team_annual",
+];
 
 /**
  * Get remaining demo credits using unified tracking
@@ -581,23 +866,20 @@ async function getOneTimeDemoTransferCredits({
         return 0;
     }
 
-    if (!["starter", "pro", "team"].includes(productKey)) {
+    // Transfer remaining demo credits on the first successful individual credit purchase,
+    // including pay-per-image and top-ups (not only subscription plans).
+    if (!productKey || productKey === "furnishing_addon") {
         return 0;
     }
 
-    const completedSubscriptionPurchases = await prisma.user_credit_purchase.count({
+    const completedCreditPurchases = await prisma.user_credit_purchase.count({
         where: {
             user_id: userId,
             status: "completed",
-            package: {
-                name: {
-                    in: SUBSCRIPTION_PLAN_PACKAGE_NAMES,
-                },
-            },
         },
     });
 
-    if (completedSubscriptionPurchases > 0) {
+    if (completedCreditPurchases > 0) {
         return 0;
     }
 
@@ -609,6 +891,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
 
     const metadata = session.metadata || {};
     const productKey = metadata.productKey;
+    const isSeatAddon = productKey === "pro_extra_user_seat" || productKey === "team_extra_user_seat";
     const purchaseFor = metadata.purchaseFor as PurchaseFor | undefined;
     const userId = metadata.userId;
     const teamId = metadata.teamId;
@@ -678,6 +961,11 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
             throw new Error("Team ID missing in metadata");
         }
 
+        // Extract subscription ID from session for subscription mode
+        const subscriptionId = typeof session.subscription === "string" 
+            ? session.subscription 
+            : session.subscription?.id;
+
         const existing = await prisma.team_purchase.findFirst({
             where: { stripe_session_id: session.id },
         });
@@ -699,6 +987,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                             price_usd: (session.amount_total || 0) / 100,
                             status: "completed",
                             stripe_session_id: session.id,
+                            stripe_subscription_id: subscriptionId,
                             completed_at: new Date(),
                         },
                     })
@@ -707,7 +996,11 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                 operations.push(
                     prisma.team_purchase.update({
                         where: { id: existing.id },
-                        data: { status: "completed", completed_at: new Date() },
+                        data: { 
+                            status: "completed", 
+                            completed_at: new Date(),
+                            stripe_subscription_id: subscriptionId,
+                        },
                     })
                 );
             }
@@ -723,7 +1016,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
             userName = user?.name || undefined;
         }
 
-        if (session.mode === "subscription") {
+        if (session.mode === "subscription" && !isSeatAddon) {
             const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
             const newSubscriptionId = typeof session.subscription === "string"
                 ? session.subscription
@@ -760,6 +1053,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                 productKey,
                 purchaseFor,
             });
+            let shouldApplyCredits = true;
             const operations: Prisma.PrismaPromise<any>[] = [];
 
             if (!existing) {
@@ -787,29 +1081,40 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                     })
                 );
             } else {
-                // Calculate next renewal date (1 month from now)
-                // const nextRenewalDate = new Date();
-                // nextRenewalDate.setMonth(nextRenewalDate.getMonth() + 1);
-
                 const nextRenewalDate = new Date();
                 nextRenewalDate.setMinutes(nextRenewalDate.getMinutes() + 1);
-                
-                operations.push(
-                    prisma.user_credit_purchase.update({
-                        where: { id: existing.id },
-                        data: {
-                            status: "completed",
-                            completed_at: new Date(),
-                            autoRenewEnabled: true,
-                            nextRenewalDate: nextRenewalDate,
-                        },
-                    })
-                );
+
+                const completionResult = await prisma.user_credit_purchase.updateMany({
+                    where: {
+                        id: existing.id,
+                        status: "pending",
+                    },
+                    data: {
+                        status: "completed",
+                        completed_at: new Date(),
+                        autoRenewEnabled: true,
+                        nextRenewalDate: nextRenewalDate,
+                    },
+                });
+
+                if (completionResult.count === 0) {
+                    console.log("[PAYMENT] Skipping duplicate checkout processing for already completed purchase", {
+                        purchaseId: existing.id,
+                        sessionId: session.id,
+                    });
+
+                    const user = await prisma.user.findUnique({ where: { id: userId } });
+                    userEmail = user?.email;
+                    userName = user?.name || undefined;
+                    shouldApplyCredits = false;
+                }
             }
 
-            operations.push(applyCreditsToUser(userId, credits + demoTransferCredits));
+            if (shouldApplyCredits) {
+                operations.push(applyCreditsToUser(userId, credits + demoTransferCredits));
+            }
 
-            if (demoTransferCredits > 0) {
+            if (shouldApplyCredits && demoTransferCredits > 0) {
                 operations.push(
                     prisma.user_demo_tracking.upsert({
                         where: { user_id: userId },
@@ -826,22 +1131,26 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                 );
             }
 
-            await prisma.$transaction(operations);
+            if (operations.length > 0) {
+                await prisma.$transaction(operations);
+            }
 
-            const completedPurchase = await prisma.user_credit_purchase.findFirst({
-                where: {
-                    stripe_session_id: session.id,
-                    user_id: userId,
-                    status: "completed",
-                },
-                orderBy: { created_at: "desc" },
-            });
-
-            if (session.mode === "subscription" && completedPurchase) {
-                await enforceSingleActiveAutoRenewalSubscription({
-                    userId,
-                    keepPurchaseId: completedPurchase.id,
+            if (shouldApplyCredits) {
+                const completedPurchase = await prisma.user_credit_purchase.findFirst({
+                    where: {
+                        stripe_session_id: session.id,
+                        user_id: userId,
+                        status: "completed",
+                    },
+                    orderBy: { created_at: "desc" },
                 });
+
+                if (session.mode === "subscription" && completedPurchase) {
+                    await enforceSingleActiveAutoRenewalSubscription({
+                        userId,
+                        keepPurchaseId: completedPurchase.id,
+                    });
+                }
             }
 
             const user = await prisma.user.findUnique({ where: { id: userId } });
@@ -849,7 +1158,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
             userName = user?.name || undefined;
         }
 
-        if (session.mode === "subscription") {
+        if (session.mode === "subscription" && !isSeatAddon) {
             const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
             const newSubscriptionId = typeof session.subscription === "string"
                 ? session.subscription
@@ -998,6 +1307,8 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
         return;
     }
 
+    const billingReason = invoice.billing_reason || null;
+
     const subscription = await stripe.subscriptions.retrieve(subscriptionId);
     const metadata = subscription.metadata || {};
     const productKey = metadata.productKey;
@@ -1023,25 +1334,59 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
             throw new Error("Team ID missing in metadata");
         }
 
-        const existing = await prisma.team_purchase.findFirst({
+        const existingByInvoice = await prisma.team_purchase.findFirst({
             where: { stripe_invoice_id: invoice.id },
         });
 
-        if (existing) {
+        if (existingByInvoice) {
+            return;
+        }
+
+        const recentPurchase = billingReason === "subscription_create"
+            ? await findRecentTeamSubscriptionPurchase({
+                teamId,
+                amount: credits,
+            })
+            : null;
+
+        if (recentPurchase?.status === "completed") {
+            if (!recentPurchase.stripe_invoice_id || !recentPurchase.stripe_subscription_id) {
+                await prisma.team_purchase.update({
+                    where: { id: recentPurchase.id },
+                    data: { 
+                        stripe_invoice_id: invoice.id,
+                        stripe_subscription_id: subscriptionId,
+                    },
+                });
+            }
+
             return;
         }
 
         const operations: Prisma.PrismaPromise<any>[] = [
-            prisma.team_purchase.create({
-                data: {
-                    team_id: teamId,
-                    amount: credits,
-                    price_usd: invoice.amount_paid / 100,
-                    status: "completed",
-                    stripe_invoice_id: invoice.id,
-                    completed_at: new Date(),
-                },
-            }),
+            recentPurchase
+                ? prisma.team_purchase.update({
+                    where: { id: recentPurchase.id },
+                    data: {
+                        amount: credits,
+                        price_usd: invoice.amount_paid / 100,
+                        status: "completed",
+                        stripe_invoice_id: invoice.id,
+                        stripe_subscription_id: subscriptionId,
+                        completed_at: new Date(),
+                    },
+                })
+                : prisma.team_purchase.create({
+                    data: {
+                        team_id: teamId,
+                        amount: credits,
+                        price_usd: invoice.amount_paid / 100,
+                        status: "completed",
+                        stripe_invoice_id: invoice.id,
+                        stripe_subscription_id: subscriptionId,
+                        completed_at: new Date(),
+                    },
+                }),
         ];
 
         if (credits > 0) {
@@ -1097,26 +1442,56 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
             price: invoice.amount_paid / 100,
         });
 
-        const existing = await prisma.user_credit_purchase.findFirst({
+        const existingByInvoice = await prisma.user_credit_purchase.findFirst({
             where: { stripe_invoice_id: invoice.id },
         });
 
-        if (existing) {
+        if (existingByInvoice) {
+            return;
+        }
+
+        const recentPurchase = billingReason === "subscription_create"
+            ? await findRecentPersonalSubscriptionPurchase({
+                userId,
+                packageId: packageRecord.id,
+                amount: credits,
+            })
+            : null;
+
+        if (recentPurchase?.status === "completed") {
+            if (!recentPurchase.stripe_invoice_id) {
+                await prisma.user_credit_purchase.update({
+                    where: { id: recentPurchase.id },
+                    data: { stripe_invoice_id: invoice.id },
+                });
+            }
+
             return;
         }
 
         await prisma.$transaction([
-            prisma.user_credit_purchase.create({
-                data: {
-                    user_id: userId,
-                    package_id: packageRecord.id,
-                    amount: credits,
-                    price_usd: invoice.amount_paid / 100,
-                    status: "completed",
-                    stripe_invoice_id: invoice.id,
-                    completed_at: new Date(),
-                },
-            }),
+            recentPurchase
+                ? prisma.user_credit_purchase.update({
+                    where: { id: recentPurchase.id },
+                    data: {
+                        amount: credits,
+                        price_usd: invoice.amount_paid / 100,
+                        status: "completed",
+                        stripe_invoice_id: invoice.id,
+                        completed_at: new Date(),
+                    },
+                })
+                : prisma.user_credit_purchase.create({
+                    data: {
+                        user_id: userId,
+                        package_id: packageRecord.id,
+                        amount: credits,
+                        price_usd: invoice.amount_paid / 100,
+                        status: "completed",
+                        stripe_invoice_id: invoice.id,
+                        completed_at: new Date(),
+                    },
+                }),
             applyCreditsToUser(userId, credits),
         ]);
 
@@ -1273,17 +1648,26 @@ export async function processPendingPurchases() {
                         purchaseFor,
                     });
 
+                    const completionResult = await prisma.user_credit_purchase.updateMany({
+                        where: {
+                            id: purchase.id,
+                            status: "pending",
+                        },
+                        data: {
+                            status: "completed",
+                            completed_at: new Date(),
+                            autoRenewEnabled: isSubscriptionPlan,
+                            nextRenewalDate: isSubscriptionPlan ? nextRenewalDate : null,
+                            renewalCount: 0,
+                        },
+                    });
+
+                    if (completionResult.count === 0) {
+                        console.log(`[PENDING-PROCESSOR] Skipping already-processed purchase ${purchase.id}`);
+                        continue;
+                    }
+
                     const operations: Prisma.PrismaPromise<any>[] = [
-                        prisma.user_credit_purchase.update({
-                            where: { id: purchase.id },
-                            data: {
-                                status: "completed",
-                                completed_at: new Date(),
-                                autoRenewEnabled: isSubscriptionPlan,
-                                nextRenewalDate: isSubscriptionPlan ? nextRenewalDate : null,
-                                renewalCount: 0,
-                            }
-                        }),
                         applyCreditsToUser(purchase.user_id, purchase.amount + demoTransferCredits),
                     ];
 
@@ -1326,6 +1710,80 @@ export async function processPendingPurchases() {
             } catch (error: any) {
                 console.error(`[PENDING-PROCESSOR] Error processing purchase ${purchase.id}:`, error.message);
             }
+        }
+
+        // Process pending team purchases
+        console.log("[PENDING-PROCESSOR] Processing pending team purchases...");
+        
+        try {
+            const pendingTeamPurchases = await prisma.team_purchase.findMany({
+                where: { status: "pending" },
+                take: 50,
+            });
+
+            console.log(`[PENDING-PROCESSOR] Found ${pendingTeamPurchases.length} pending team purchases`);
+
+            for (const purchase of pendingTeamPurchases) {
+                try {
+                    if (!purchase.stripe_session_id) {
+                        console.log(`[PENDING-PROCESSOR-TEAM] Skipping team purchase ${purchase.id} - no session ID`);
+                        continue;
+                    }
+
+                    // Fetch session from Stripe
+                    const session = await stripe.checkout.sessions.retrieve(purchase.stripe_session_id);
+
+                    console.log(`[PENDING-PROCESSOR-TEAM] Checking session ${session.id}:`, {
+                        paymentStatus: session.payment_status,
+                        teamId: purchase.team_id,
+                        mode: session.mode,
+                    });
+
+                    if (session.payment_status === "paid") {
+                        // Extract subscription ID if this is a subscription
+                        const subscriptionId = typeof session.subscription === "string" 
+                            ? session.subscription 
+                            : session.subscription?.id;
+
+                        const completionResult = await prisma.team_purchase.updateMany({
+                            where: {
+                                id: purchase.id,
+                                status: "pending",
+                            },
+                            data: {
+                                status: "completed",
+                                completed_at: new Date(),
+                                stripe_subscription_id: subscriptionId,
+                            },
+                        });
+
+                        if (completionResult.count === 0) {
+                            console.log(`[PENDING-PROCESSOR-TEAM] Skipping already-processed purchase ${purchase.id}`);
+                            continue;
+                        }
+
+                        // Apply credits to team wallet
+                        if (purchase.amount > 0) {
+                            await prisma.teams.update({
+                                where: { id: purchase.team_id },
+                                data: { wallet: { increment: purchase.amount } },
+                            });
+                        }
+
+                        console.log(`[PENDING-PROCESSOR-TEAM] ✓ Processed team purchase ${purchase.id}:`, {
+                            teamId: purchase.team_id,
+                            credits: purchase.amount,
+                            price: purchase.price_usd,
+                            subscriptionId,
+                            isSubscription: !!subscriptionId,
+                        });
+                    }
+                } catch (error: any) {
+                    console.error(`[PENDING-PROCESSOR-TEAM] Error processing team purchase ${purchase.id}:`, error.message);
+                }
+            }
+        } catch (error: any) {
+            console.error("[PENDING-PROCESSOR-TEAM] Error processing team purchases:", error.message);
         }
 
         console.log("[PENDING-PROCESSOR] Completed pending purchase processing");

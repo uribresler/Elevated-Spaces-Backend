@@ -42,16 +42,28 @@ export async function signupService({
     data: { email, password_hash: hash, name, auth_provider: "LOCAL" },
   });
 
-  const defaultRole = await prisma.roles.findUnique({ where: { name: "USER" } });
-  if (!defaultRole) {
-    throw new Error("Default role 'USER' not found");
-  }
-  const assignRole = await prisma.user_roles.create({
-    data: {
-      user_id: user?.id,
-      role_id: defaultRole?.id
-    }
-  })
+  const defaultRole = await prisma.roles.upsert({
+    where: { name: "USER" },
+    update: {},
+    create: {
+      name: "USER",
+      description: "Default role for all users",
+    },
+  });
+
+  await prisma.user_roles.upsert({
+    where: {
+      user_id_role_id: {
+        user_id: user.id,
+        role_id: defaultRole.id,
+      },
+    },
+    update: {},
+    create: {
+      user_id: user.id,
+      role_id: defaultRole.id,
+    },
+  });
 
   if (requestedRole === "PHOTOGRAPHER") {
     const photographerRole = await prisma.roles.findUnique({ where: { name: "PHOTOGRAPHER" } });

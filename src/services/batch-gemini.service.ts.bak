@@ -74,7 +74,7 @@ class BatchGeminiService {
 
       // Create batch job
       const batchJob = await this.client.batches.create({
-        model: "gemini-3-pro-image-preview",
+        model: "gemini-3.1-flash-image-preview",
         src: uploadedFile.name,
         config: {
           display_name: `multi-image-staging-${Date.now()}`,

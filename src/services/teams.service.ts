@@ -5,10 +5,570 @@ import crypto from "crypto";
 import { invite_status } from "@prisma/client";
 import bcrypt from "bcrypt";
 import dotenv from "dotenv";
+import Stripe from "stripe";
 dotenv.config();
 
 // const INVITE_EXPIRY_MS = 24 * 60 * 60 * 1000;
 const INVITE_EXPIRY_MS = 24 * 60 * 60 * 1000;
+const STRIPE_API_VERSION = "2025-12-15.clover";
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY, { apiVersion: STRIPE_API_VERSION }) : null;
+
+const ACTIVE_SUBSCRIPTION_STATUSES = new Set([
+    "active",
+    "trialing",
+    "past_due",
+    "unpaid",
+]);
+
+function getSubscriptionStatusPriority(status: string): number {
+    switch (status) {
+        case "active":
+            return 4;
+        case "trialing":
+            return 3;
+        case "past_due":
+            return 2;
+        case "unpaid":
+            return 1;
+        default:
+            return 0;
+    }
+}
+const EXTRA_SEAT_BILLING_DAYS = 30;
+const EXTRA_SEAT_NON_RENEW_RETENTION_DAYS = 30;
+
+type TeamSeatPolicy = {
+    planKey: string;
+    planLabel: string;
+    freeAdditionalUsers: number;
+    extraSeatPriceUsdMonthly: number | null;
+    extraSeatProductKey: "pro_extra_user_seat" | "team_extra_user_seat" | null;
+    unlimited: boolean;
+};
+
+function getTeamSeatPolicyForProductKey(productKey?: string | null): TeamSeatPolicy | null {
+    switch (productKey) {
+        case "starter":
+        case "starter_annual":
+            return {
+                planKey: productKey,
+                planLabel: "Starter",
+                freeAdditionalUsers: 0,
+                extraSeatPriceUsdMonthly: null,
+                extraSeatProductKey: null,
+                unlimited: false,
+            };
+        case "pro":
+        case "pro_annual":
+            return {
+                planKey: productKey,
+                planLabel: "Pro",
+                freeAdditionalUsers: 2,
+                extraSeatPriceUsdMonthly: 20,
+                extraSeatProductKey: "pro_extra_user_seat",
+                unlimited: false,
+            };
+        case "team":
+        case "team_annual":
+            return {
+                planKey: productKey,
+                planLabel: "Team",
+                freeAdditionalUsers: 5,
+                extraSeatPriceUsdMonthly: 15,
+                extraSeatProductKey: "team_extra_user_seat",
+                unlimited: false,
+            };
+        case "enterprise":
+        case "enterprise_annual":
+            return {
+                planKey: productKey,
+                planLabel: "Enterprise",
+                freeAdditionalUsers: Number.MAX_SAFE_INTEGER,
+                extraSeatPriceUsdMonthly: null,
+                extraSeatProductKey: null,
+                unlimited: true,
+            };
+        default:
+            if (typeof productKey === "string" && productKey.toLowerCase().includes("enterprise")) {
+                return {
+                    planKey: productKey,
+                    planLabel: "Enterprise",
+                    freeAdditionalUsers: Number.MAX_SAFE_INTEGER,
+                    extraSeatPriceUsdMonthly: null,
+                    extraSeatProductKey: null,
+                    unlimited: true,
+                };
+            }
+            return null;
+    }
+}
+
+function buildTeamSeatLimitError(params: {
+    policy: TeamSeatPolicy;
+    activeMembers: number;
+    pendingInvites: number;
+    purchasedExtraSeats: number;
+}) {
+    const { policy, activeMembers, pendingInvites, purchasedExtraSeats } = params;
+    const included = policy.freeAdditionalUsers;
+    const allowed = included + purchasedExtraSeats;
+    const message = policy.extraSeatPriceUsdMonthly && policy.extraSeatProductKey
+        ? `Team member limit reached for ${policy.planLabel}. Included users: ${included}. Extra users cost $${policy.extraSeatPriceUsdMonthly}/month each.`
+        : `Team member limit reached for ${policy.planLabel}. Additional users are not available on this plan.`;
+
+    const error: any = new Error(message);
+    error.code = "TEAM_SEAT_LIMIT_REACHED";
+    error.details = {
+        planKey: policy.planKey,
+        planLabel: policy.planLabel,
+        freeIncludedUsers: included,
+        activeMembers,
+        pendingInvites,
+        purchasedExtraSeats,
+        allowedMembers: allowed,
+        allowPurchaseExtraSeats: Boolean(policy.extraSeatProductKey),
+        extraSeatProductKey: policy.extraSeatProductKey,
+        extraSeatPriceUsdMonthly: policy.extraSeatPriceUsdMonthly,
+    };
+    return error;
+}
+
+function buildTeamPlanRequiredError() {
+    const error: any = new Error(
+        "Team collaboration isn't available on the Starter plan. Upgrade to Pro, Team, or Enterprise to invite team members."
+    );
+    error.code = "TEAM_PLAN_REQUIRED";
+    error.details = {
+        allowPurchasePlan: true,
+        message: "Upgrade your plan to enable team collaboration and inviting members.",
+    };
+    return error;
+}
+
+type ActiveTeamSeatContext = {
+    policy: TeamSeatPolicy | null;
+    purchasedExtraSeats: number;
+    seatEntitlements: Array<{
+        autoRenew: boolean;
+        paidAt: Date;
+        expiresAt: Date;
+        productKey: string;
+    }>;
+};
+
+function addDays(base: Date, days: number): Date {
+    return new Date(base.getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+function isFutureDate(value: Date | null | undefined, now: Date): boolean {
+    return value instanceof Date && value.getTime() > now.getTime();
+}
+
+async function getActiveTeamSeatContext(teamId: string): Promise<ActiveTeamSeatContext> {
+    if (!stripe) {
+        return { policy: null, purchasedExtraSeats: 0, seatEntitlements: [] };
+    }
+
+    const team = await prisma.teams.findUnique({
+        where: { id: teamId },
+        include: { owner: true },
+    });
+
+    const customerId = team?.owner?.stripe_customer_id;
+    if (!customerId) {
+        return { policy: null, purchasedExtraSeats: 0, seatEntitlements: [] };
+    }
+
+    const subscriptions = await stripe.subscriptions.list({
+        customer: customerId,
+        status: "all",
+        limit: 100,
+    });
+
+    let policy: TeamSeatPolicy | null = null;
+    let selectedPlanMeta: { includedUsers: number; statusPriority: number; sortEpoch: number } | null = null;
+    let purchasedExtraSeats = 0;
+    const seatEntitlements: ActiveTeamSeatContext["seatEntitlements"] = [];
+    const ownerUserId = team?.owner_id;
+
+    for (const subscription of subscriptions.data) {
+        if (!ACTIVE_SUBSCRIPTION_STATUSES.has(subscription.status)) {
+            continue;
+        }
+
+        const metadata = subscription.metadata || {};
+        const isOwnerPlan = metadata.purchaseFor === "individual" && metadata.userId === ownerUserId;
+        const isTeamPlan = metadata.purchaseFor === "team" && metadata.teamId === teamId && metadata.userId === ownerUserId;
+        if (!isOwnerPlan && !isTeamPlan) {
+            continue;
+        }
+
+        const subscriptionProductKey = metadata.productKey;
+
+        const parsedQty = Number(metadata.seatUnits || metadata.quantity || "1");
+        const seatUnits = Number.isFinite(parsedQty) && parsedQty > 0 ? parsedQty : 1;
+
+        if (subscriptionProductKey === "pro_extra_user_seat" || subscriptionProductKey === "team_extra_user_seat") {
+            purchasedExtraSeats += seatUnits;
+            const autoRenew = String(metadata.seatAutoRenew || "true").toLowerCase() !== "false";
+            const periodStartEpoch = (subscription as any)?.current_period_start;
+            const currentPeriodStart = typeof periodStartEpoch === "number"
+                ? new Date(periodStartEpoch * 1000)
+                : new Date();
+            const expiresAt = autoRenew
+                ? addDays(currentPeriodStart, EXTRA_SEAT_BILLING_DAYS)
+                : addDays(currentPeriodStart, EXTRA_SEAT_NON_RENEW_RETENTION_DAYS);
+            for (let i = 0; i < seatUnits; i += 1) {
+                seatEntitlements.push({
+                    autoRenew,
+                    paidAt: currentPeriodStart,
+                    expiresAt,
+                    productKey: subscriptionProductKey,
+                });
+            }
+            continue;
+        }
+
+        const parsedPolicy = getTeamSeatPolicyForProductKey(subscriptionProductKey);
+        if (parsedPolicy) {
+            const periodStartEpoch = (subscription as any)?.current_period_start;
+            const createdEpoch = typeof subscription.created === "number" ? subscription.created : 0;
+            const sortEpoch = typeof periodStartEpoch === "number" ? periodStartEpoch : createdEpoch;
+            const statusPriority = getSubscriptionStatusPriority(subscription.status);
+
+            const shouldReplace = !selectedPlanMeta
+                || parsedPolicy.freeAdditionalUsers > selectedPlanMeta.includedUsers
+                || (parsedPolicy.freeAdditionalUsers === selectedPlanMeta.includedUsers
+                    && (
+                        statusPriority > selectedPlanMeta.statusPriority
+                        || (statusPriority === selectedPlanMeta.statusPriority && sortEpoch > selectedPlanMeta.sortEpoch)
+                    ));
+
+            if (shouldReplace) {
+                policy = parsedPolicy;
+                selectedPlanMeta = {
+                    includedUsers: parsedPolicy.freeAdditionalUsers,
+                    statusPriority,
+                    sortEpoch,
+                };
+            }
+        }
+    }
+
+    return { policy, purchasedExtraSeats, seatEntitlements };
+}
+
+export async function enforceTeamSeatCapacityForExistingMembers(teamId: string): Promise<void> {
+    const { policy, purchasedExtraSeats, seatEntitlements } = await getActiveTeamSeatContext(teamId);
+    if (!policy || policy.unlimited) {
+        return;
+    }
+
+    const now = new Date();
+    await prisma.team_membership.updateMany({
+        where: {
+            team_id: teamId,
+            deleted_at: null,
+            is_paid_extra_seat: true,
+            seat_auto_renew: false,
+            seat_expires_at: {
+                lte: now,
+            },
+        },
+        data: {
+            deleted_at: now,
+            is_paid_extra_seat: false,
+            seat_auto_renew: false,
+            seat_last_paid_at: null,
+            seat_expires_at: null,
+            seat_payment_product_key: null,
+        },
+    });
+
+    const activeMemberships = await prisma.team_membership.findMany({
+        where: {
+            team_id: teamId,
+            deleted_at: null,
+        },
+        select: {
+            id: true,
+            joined_at: true,
+            is_paid_extra_seat: true,
+            seat_auto_renew: true,
+            seat_expires_at: true,
+        },
+        orderBy: {
+            joined_at: "asc",
+        },
+    });
+
+    const reservedNonRenewSeats = activeMemberships.filter((membership) => (
+        membership.is_paid_extra_seat &&
+        membership.seat_auto_renew === false &&
+        isFutureDate(membership.seat_expires_at, now)
+    )).length;
+
+    const includedMembers = activeMemberships.slice(0, policy.freeAdditionalUsers);
+    const extraMembers = activeMemberships.slice(policy.freeAdditionalUsers);
+    const paidByReservedIds = new Set(
+        extraMembers
+            .filter((membership) => (
+                membership.is_paid_extra_seat &&
+                membership.seat_auto_renew === false &&
+                isFutureDate(membership.seat_expires_at, now)
+            ))
+            .map((membership) => membership.id)
+    );
+
+    const seatsAvailableFromPurchases = Math.max(0, purchasedExtraSeats);
+    const paidCandidates = extraMembers.filter((membership) => !paidByReservedIds.has(membership.id));
+    const paidByPurchase = paidCandidates.slice(0, seatsAvailableFromPurchases);
+    const shouldBePaidIds = new Set<string>([
+        ...Array.from(paidByReservedIds),
+        ...paidByPurchase.map((membership) => membership.id),
+    ]);
+
+    const includedIds = new Set(includedMembers.map((membership) => membership.id));
+    const overLimitMembers = activeMemberships.filter(
+        (membership) => !includedIds.has(membership.id) && !shouldBePaidIds.has(membership.id)
+    );
+
+    if (overLimitMembers.length > 0) {
+        const memberIdsToDisable = overLimitMembers.map((membership) => membership.id);
+        await prisma.team_membership.updateMany({
+            where: {
+                id: { in: memberIdsToDisable },
+                deleted_at: null,
+            },
+            data: {
+                deleted_at: now,
+                is_paid_extra_seat: false,
+                seat_auto_renew: false,
+                seat_last_paid_at: null,
+                seat_expires_at: null,
+                seat_payment_product_key: null,
+            },
+        });
+    }
+
+    const defaultEntitlement = seatEntitlements[0] || null;
+    const purchasedPaidMemberIds = paidByPurchase.map((membership) => membership.id);
+    if (purchasedPaidMemberIds.length > 0) {
+        const autoRenew = defaultEntitlement?.autoRenew ?? true;
+        const paidAt = defaultEntitlement?.paidAt ?? now;
+        const expiresAt = defaultEntitlement?.expiresAt ?? (autoRenew
+            ? addDays(paidAt, EXTRA_SEAT_BILLING_DAYS)
+            : addDays(paidAt, EXTRA_SEAT_NON_RENEW_RETENTION_DAYS));
+        const productKey = defaultEntitlement?.productKey ?? policy.extraSeatProductKey ?? null;
+
+        await prisma.team_membership.updateMany({
+            where: {
+                id: { in: purchasedPaidMemberIds },
+                deleted_at: null,
+            },
+            data: {
+                is_paid_extra_seat: true,
+                seat_auto_renew: autoRenew,
+                seat_last_paid_at: paidAt,
+                seat_expires_at: expiresAt,
+                seat_payment_product_key: productKey,
+            },
+        });
+    }
+
+    await prisma.team_membership.updateMany({
+        where: {
+            team_id: teamId,
+            deleted_at: null,
+            is_paid_extra_seat: true,
+            id: {
+                notIn: Array.from(shouldBePaidIds),
+            },
+        },
+        data: {
+            is_paid_extra_seat: false,
+            seat_auto_renew: false,
+            seat_last_paid_at: null,
+            seat_expires_at: null,
+            seat_payment_product_key: null,
+        },
+    });
+}
+
+async function assertTeamSeatCapacityForInvite(teamId: string, inviteEmail: string): Promise<void> {
+    const { policy, purchasedExtraSeats } = await getActiveTeamSeatContext(teamId);
+    if (!policy) {
+        throw buildTeamPlanRequiredError();
+    }
+
+    if (policy.unlimited) {
+        return;
+    }
+
+    await enforceTeamSeatCapacityForExistingMembers(teamId);
+
+    const now = new Date();
+    const retainedPaidSeats = await prisma.team_membership.count({
+        where: {
+            team_id: teamId,
+            deleted_at: null,
+            is_paid_extra_seat: true,
+            seat_auto_renew: false,
+            seat_expires_at: {
+                gt: now,
+            },
+        },
+    });
+
+    const [activeMembershipsCount, pendingInvitesCount] = await Promise.all([
+        prisma.team_membership.count({
+            where: {
+                team_id: teamId,
+                deleted_at: null,
+            },
+        }),
+        prisma.team_invites.count({
+            where: {
+                team_id: teamId,
+                status: invite_status.PENDING,
+                email: { not: inviteEmail },
+            },
+        }),
+    ]);
+
+    const allowedMembers = policy.freeAdditionalUsers + purchasedExtraSeats + retainedPaidSeats;
+    const projectedMembers = activeMembershipsCount + pendingInvitesCount + 1;
+
+    if (projectedMembers > allowedMembers) {
+        throw buildTeamSeatLimitError({
+            policy,
+            activeMembers: activeMembershipsCount,
+            pendingInvites: pendingInvitesCount,
+            purchasedExtraSeats,
+        });
+    }
+}
+
+async function assertTeamSeatCapacityForAcceptance(teamId: string): Promise<void> {
+    const { policy, purchasedExtraSeats } = await getActiveTeamSeatContext(teamId);
+    if (!policy) {
+        throw buildTeamPlanRequiredError();
+    }
+
+    if (policy.unlimited) {
+        return;
+    }
+
+    await enforceTeamSeatCapacityForExistingMembers(teamId);
+
+    const now = new Date();
+    const retainedPaidSeats = await prisma.team_membership.count({
+        where: {
+            team_id: teamId,
+            deleted_at: null,
+            is_paid_extra_seat: true,
+            seat_auto_renew: false,
+            seat_expires_at: {
+                gt: now,
+            },
+        },
+    });
+
+    const activeMembershipsCount = await prisma.team_membership.count({
+        where: {
+            team_id: teamId,
+            deleted_at: null,
+        },
+    });
+
+    const allowedMembers = policy.freeAdditionalUsers + purchasedExtraSeats + retainedPaidSeats;
+    const projectedMembers = activeMembershipsCount + 1;
+    if (projectedMembers > allowedMembers) {
+        throw buildTeamSeatLimitError({
+            policy,
+            activeMembers: activeMembershipsCount,
+            pendingInvites: 0,
+            purchasedExtraSeats,
+        });
+    }
+}
+
+const DEFAULT_TEAM_ROLE_DEFINITIONS: Record<string, { description: string; permissions: Record<string, boolean> }> = {
+    TEAM_OWNER: {
+        description: "Full control over the team",
+        permissions: {
+            manage_team: true,
+            manage_roles: true,
+            invite_members: true,
+            remove_members: true,
+            assign_credits: true,
+            manage_projects: true,
+            view_all_projects: true,
+            manage_wallet: true,
+        },
+    },
+    TEAM_ADMIN: {
+        description: "Admin control over the team",
+        permissions: {
+            manage_team: true,
+            manage_roles: true,
+            invite_members: true,
+            remove_members: true,
+            assign_credits: true,
+            manage_projects: true,
+            view_all_projects: true,
+            manage_wallet: false,
+        },
+    },
+    TEAM_AGENT: {
+        description: "Agent role with project creation and invite permissions",
+        permissions: {
+            manage_team: false,
+            manage_roles: false,
+            invite_members: true,
+            remove_members: false,
+            assign_credits: false,
+            manage_projects: true,
+            view_all_projects: false,
+            manage_wallet: false,
+        },
+    },
+    TEAM_PHOTOGRAPHER: {
+        description: "Photographer role with project access",
+        permissions: {
+            manage_team: false,
+            manage_roles: false,
+            invite_members: false,
+            remove_members: false,
+            assign_credits: false,
+            manage_projects: false,
+            view_all_projects: false,
+            manage_wallet: false,
+        },
+    },
+};
+
+async function ensureDefaultTeamRole(roleName: string) {
+    const normalized = roleName.trim().toUpperCase();
+    const def = DEFAULT_TEAM_ROLE_DEFINITIONS[normalized];
+    if (!def) {
+        throw new Error("Invalid team role");
+    }
+
+    return prisma.team_roles.upsert({
+        where: { name: normalized },
+        update: {
+            description: def.description,
+            permissions: def.permissions,
+        },
+        create: {
+            name: normalized,
+            description: def.description,
+            permissions: def.permissions,
+        },
+    });
+}
 
 function buildInviteToken({
     email,
@@ -163,6 +723,45 @@ async function getTeamAccess({
     return { team, roleName: membership.role.name };
 }
 
+async function assertEmailNotAlreadyPartOfTeam(teamId: string, email: string): Promise<void> {
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const existingUser = await prisma.user.findUnique({
+        where: { email: normalizedEmail },
+        select: { id: true },
+    });
+
+    if (!existingUser) {
+        return;
+    }
+
+    const team = await prisma.teams.findUnique({
+        where: { id: teamId },
+        select: { owner_id: true },
+    });
+
+    if (!team) {
+        throw new Error("Team doesnot exists");
+    }
+
+    if (team.owner_id === existingUser.id) {
+        throw new Error("User is already a team member");
+    }
+
+    const activeMembership = await prisma.team_membership.findFirst({
+        where: {
+            team_id: teamId,
+            user_id: existingUser.id,
+            deleted_at: null,
+        },
+        select: { id: true },
+    });
+
+    if (activeMembership) {
+        throw new Error("User is already a team member");
+    }
+}
+
 function resolveInviteRoleName(roleName?: string) {
     const normalized = roleName?.trim().toUpperCase();
     const allowedRoles = ["TEAM_AGENT", "TEAM_PHOTOGRAPHER", "TEAM_ADMIN"];
@@ -243,6 +842,7 @@ export async function createTeamService(
 }
 
 export async function invitationService({ email, userId, subject, text, teamId, roleName }: { email: string, userId: string, subject: string, text: string, teamId: string, roleName?: string }) {
+    const normalizedEmail = email.trim().toLowerCase();
     const existing = await prisma.user.findUnique({ where: { id: userId } });
     if (!existing || !userId) {
         const err: any = new Error("User doesnot exists, please create a normal account first");
@@ -251,17 +851,15 @@ export async function invitationService({ email, userId, subject, text, teamId, 
     }
 
     const { team: team_exists, roleName: inviterRole } = await getTeamAccess({ teamId, userId });
+    await assertEmailNotAlreadyPartOfTeam(team_exists.id, normalizedEmail);
+    await assertTeamSeatCapacityForInvite(team_exists.id, normalizedEmail);
     const inviteRoleName = resolveInviteRoleName(roleName);
     if (!canInviteRole(inviterRole, inviteRoleName)) {
         throw new Error("You are not allowed to invite this role");
     }
 
-    const inviteeUser = await prisma.user.findUnique({ where: { email } });
-    const defaultRole = await prisma.team_roles.findFirst({
-        where: { name: inviteRoleName },
-    });
-
-    if (!defaultRole) throw new Error("Default role not found");
+    const inviteeUser = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+    const defaultRole = await ensureDefaultTeamRole(inviteRoleName);
     if (inviteeUser) {
         const existingMembership = await prisma.team_membership.findFirst({
             where: {
@@ -287,7 +885,7 @@ export async function invitationService({ email, userId, subject, text, teamId, 
     }
 
     const inviteToken = buildInviteToken({
-        email,
+        email: normalizedEmail,
         invitedBy: userId,
         roleId: defaultRole.id,
     });
@@ -296,11 +894,11 @@ export async function invitationService({ email, userId, subject, text, teamId, 
         where: {
             team_id_email: {
                 team_id: team_exists?.id,
-                email,
+                email: normalizedEmail,
             },
         },
         create: {
-            email,
+            email: normalizedEmail,
             team_id: team_exists?.id,
             team_role_id: defaultRole.id,
             role_permissions_snapshot: defaultRole.permissions?.toLocaleString(),
@@ -341,7 +939,7 @@ export async function invitationService({ email, userId, subject, text, teamId, 
                 from: existing.email,
                 senderName: existing.name ?? "Elevated Spaces Team",
                 replyTo: existing.email,
-                to: email,
+                to: normalizedEmail,
                 subject: subject ?? `Join ${team_exists.name} - Team Invitation`,
                 text: text ?? emailTemplate.text,
                 html: emailTemplate.html,
@@ -357,7 +955,7 @@ export async function invitationService({ email, userId, subject, text, teamId, 
         } catch (err: any) {
             console.error("❌ Email sending failed:", {
                 error: err.message,
-                email: email,
+                email: normalizedEmail,
                 inviteId: invite.id,
             });
 
@@ -421,7 +1019,21 @@ export async function acceptInvitationService({
         throw new Error("Invite has expired");
     }
 
-    let user = await prisma.user.findUnique({ where: { email: payload.email } });
+    await assertTeamSeatCapacityForAcceptance(invite.team_id);
+
+    const inviteEmail = payload.email.trim().toLowerCase();
+    let user = await prisma.user.findUnique({ where: { email: inviteEmail } });
+
+    await assertEmailNotAlreadyPartOfTeam(invite.team_id, inviteEmail);
+
+    const defaultRole = await prisma.roles.upsert({
+        where: { name: "USER" },
+        update: {},
+        create: {
+            name: "USER",
+            description: "Default role for all users",
+        },
+    });
 
     if (!user) {
         if (!password || !name) {
@@ -443,18 +1055,21 @@ export async function acceptInvitationService({
             },
         });
 
-        const defaultRole = await prisma.roles.findUnique({ where: { name: "USER" } });
-        if (!defaultRole) {
-            throw new Error("Default role 'USER' not found");
-        }
+    }
 
-        await prisma.user_roles.create({
-            data: {
+    await prisma.user_roles.upsert({
+        where: {
+            user_id_role_id: {
                 user_id: user.id,
                 role_id: defaultRole.id,
             },
-        });
-    }
+        },
+        update: {},
+        create: {
+            user_id: user.id,
+            role_id: defaultRole.id,
+        },
+    });
 
     await prisma.team_membership.upsert({
         where: {
@@ -483,6 +1098,8 @@ export async function acceptInvitationService({
             accepted_by_user_id: user.id,
         },
     });
+
+    await enforceTeamSeatCapacityForExistingMembers(invite.team_id);
 
     return {
         success: true,
@@ -657,6 +1274,7 @@ export async function reinviteService({
     teamId: string;
     roleName?: string;
 }) {
+    const normalizedEmail = email.trim().toLowerCase();
     const existing = await prisma.user.findUnique({ where: { id: userId } });
     if (!existing || !userId) {
         const err: any = new Error("User doesnot exists, please create a normal account first");
@@ -665,17 +1283,16 @@ export async function reinviteService({
     }
 
     const { team: team_exists, roleName: inviterRole } = await getTeamAccess({ teamId, userId });
+    await assertEmailNotAlreadyPartOfTeam(team_exists.id, normalizedEmail);
+    await assertTeamSeatCapacityForInvite(team_exists.id, normalizedEmail);
     const inviteRoleName = resolveInviteRoleName(roleName);
     if (!canInviteRole(inviterRole, inviteRoleName)) {
         throw new Error("You are not allowed to invite this role");
     }
 
-    const defaultRole = await prisma.team_roles.findFirst({
-        where: { name: inviteRoleName },
-    });
-    if (!defaultRole) throw new Error("Default role not found");
+    const defaultRole = await ensureDefaultTeamRole(inviteRoleName);
 
-    const inviteeUser = await prisma.user.findUnique({ where: { email } });
+    const inviteeUser = await prisma.user.findUnique({ where: { email: normalizedEmail } });
     if (inviteeUser) {
         const existingMembership = await prisma.team_membership.findFirst({
             where: {
@@ -701,7 +1318,7 @@ export async function reinviteService({
     }
 
     const inviteToken = buildInviteToken({
-        email,
+        email: normalizedEmail,
         invitedBy: userId,
         roleId: defaultRole.id,
     });
@@ -710,11 +1327,11 @@ export async function reinviteService({
         where: {
             team_id_email: {
                 team_id: team_exists?.id,
-                email,
+                email: normalizedEmail,
             },
         },
         create: {
-            email,
+            email: normalizedEmail,
             team_id: team_exists?.id,
             team_role_id: defaultRole.id,
             role_permissions_snapshot: defaultRole.permissions?.toLocaleString(),
@@ -756,7 +1373,7 @@ export async function reinviteService({
                 from: existing.email,
                 senderName: existing.name ?? "Elevated Spaces Team",
                 replyTo: existing.email,
-                to: email,
+                to: normalizedEmail,
                 subject: subject ?? `Reminder: Join ${team_exists.name} - Team Invitation`,
                 text: text ?? emailTemplate.text,
                 html: emailTemplate.html,
@@ -772,7 +1389,7 @@ export async function reinviteService({
         } catch (err: any) {
             console.error("❌ Reinvite email failed:", {
                 error: err.message,
-                email: email,
+                email: normalizedEmail,
                 inviteId: invite.id,
             });
 
@@ -1112,5 +1729,39 @@ export async function deleteTeamService({ teamId, userId }: { teamId: string, us
     return {
         success: true,
         message: "Team has been deleted successfully",
+    };
+}
+
+export async function processTeamPaidExtraSeatsDaily() {
+    const teams = await prisma.team_membership.findMany({
+        where: {
+            deleted_at: null,
+            is_paid_extra_seat: true,
+        },
+        distinct: ["team_id"],
+        select: {
+            team_id: true,
+        },
+    });
+
+    let processed = 0;
+    let failed = 0;
+
+    for (const team of teams) {
+        try {
+            await enforceTeamSeatCapacityForExistingMembers(team.team_id);
+            processed += 1;
+        } catch (error) {
+            failed += 1;
+            console.error("[TEAM_SEATS] Failed daily processing for team", {
+                teamId: team.team_id,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+
+    return {
+        processed,
+        failed,
     };
 }

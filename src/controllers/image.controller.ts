@@ -50,10 +50,14 @@ const { fallbackImageService } = require("../services/fallbackImage.service") as
         style: string;
         modelSlug: string;
         buffer: Buffer;
-      }) => Promise<void> | void
+      }) => Promise<void> | void,
+      options?: {
+        maxDurationMs?: number;
+      }
     ) => Promise<Buffer[]>;
   };
 };
+
 
 // TypeScript: declare global property for demo upload counts
 declare global {
@@ -622,6 +626,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
   // Demo mode: guests OR logged-in users who haven't purchased credits
   let isDemo = !userId;
   let hasPurchasedCredits = false;
+  const usingTeamCredits = Boolean(userId && teamId && (isTeamOwner || teamMembership));
 
   // If logged in, check if they have purchased credits or personal credit balance
   if (userId) {
@@ -638,6 +643,10 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     });
     hasPurchasedCredits = purchaseCount > 0;
 
+    if (usingTeamCredits) {
+      // Team wallet/member allocations are paid credits and should never be treated as demo.
+      isDemo = false;
+    } else
     // User is NOT in demo mode if they have personal credits OR have purchased before
     // User IS in demo mode if they have never purchased and no personal credits
     if (!hasPersonalCredits && !hasPurchasedCredits) {
@@ -712,7 +721,8 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
 
     // Track demo upload - increment unified usage count
     if (isDemo) {
-      await incrementUnifiedDemoUsage(userId, guestId);
+      // Pass the stable fingerprint (not the DB id) so guest tracking rows are updated
+      await incrementUnifiedDemoUsage(userId, fingerprint);
       unifiedCount += 1;
 
       // Analytics event logging for demo uploads
@@ -1076,8 +1086,12 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
   let inputImagePath: string | null = null;
   let isDemo = !userId;
   let hasPurchasedCredits = false;
+  const usingTeamCredits = Boolean(userId && teamId && (isTeamOwner || teamMembership));
   let unifiedCount = 0;
   let stagingTrace: SingleImageTrace | null = null;
+  let sseHeartbeat: NodeJS.Timeout | null = null;
+  let fingerprint = "";
+  let guestId: string | null = null;
 
   if (userId) {
     const personalCredits = await prisma.user_credit_balance.findUnique({
@@ -1088,10 +1102,31 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
       where: { user_id: userId, status: 'completed' }
     });
     hasPurchasedCredits = purchaseCount > 0;
-    if (!hasPersonalCredits && !hasPurchasedCredits) {
+
+    if (usingTeamCredits) {
+      // Team wallet/member allocations are paid credits and should never be treated as demo.
+      isDemo = false;
+    } else if (!hasPersonalCredits && !hasPurchasedCredits) {
       isDemo = true;
     } else {
       isDemo = false;
+    }
+  }
+
+  // Resolve demo fingerprint and get guest tracking (for demo users)
+  if (isDemo) {
+    fingerprint = resolveDemoFingerprint({
+      cookieDeviceId: req.cookies?.device_id,
+      headerFingerprint: req.headers['x-fingerprint'] as string | undefined,
+      ip: req.ip,
+    });
+    const tracking = await getUnifiedDemoTracking(userId, fingerprint, req.ip || '');
+    unifiedCount = tracking.unifiedCount;
+    guestId = tracking.guestTracking?.id || null;
+    
+    if (userId) {
+      // Link guest session to user if not already linked
+      await linkGuestToUser(fingerprint, userId);
     }
   }
 
@@ -1195,6 +1230,16 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
         tracePath,
       });
     }
+    // Start heartbeat to keep client connections alive for long-running operations
+    const SSE_HEARTBEAT_MS = Math.max(5000, Number(process.env.SSE_HEARTBEAT_MS || "10000"));
+    sseHeartbeat = setInterval(() => {
+      try {
+        res.write(`event: ping\ndata: {}\n\n`);
+      } catch (e) {
+        // ignore write errors; connection may be closed
+      }
+    }, SSE_HEARTBEAT_MS);
+
     res.write(`event: trace\ndata: ${JSON.stringify({ traceId: stagingTrace?.traceId || null, tracePath })}\n\n`);
 
     // Upload original
@@ -1209,15 +1254,24 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
       await stagingTrace?.append("storage.original.upload.error", {
         error: String(err),
       });
+      if (sseHeartbeat) {
+        clearInterval(sseHeartbeat);
+        sseHeartbeat = null;
+      }
       res.write(`event: error\ndata: ${JSON.stringify({ message: 'Failed to upload original image' })}\n\n`);
       res.end();
       return;
     }
 
-    // ===== PHASE 1: Generate 1 PRIMARY IMAGE with Gemini =====
+    // ===== PARALLEL PHASE: Generate primary + start variants concurrently =====
+    const stageStartTime = Date.now();
     let primaryImageBuffer: Buffer | null = null;
-    const primaryStartTime = Date.now();
+    let variantsPromise: Promise<Buffer[]> | null = null;
+    let variantsStartTime = 0;
+    
     try {
+      // PHASE 1: Generate primary image
+      const primaryStartTime = Date.now();
       logger(`[DUAL_MODEL] PHASE1_START Gemini primary image generation`);
       await stagingTrace?.append("phase1.gemini.start", {
         roomType: roomType.toLowerCase(),
@@ -1230,19 +1284,65 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
         prompt
       );
       const primaryDuration = Date.now() - primaryStartTime;
+      logger(`[DUAL_MODEL] PHASE1_GEMINI_SUCCESS durationMs=${primaryDuration} sizeBytes=${primaryImageBuffer.length}`);
+      await stagingTrace?.append("phase1.gemini.success", {
+        durationMs: primaryDuration,
+        imageBytes: primaryImageBuffer.length,
+      });
 
+      // Start variant generation while primary is being watermarked/uploaded
+      if (primaryImageBuffer && primaryImageBuffer.length > 0) {
+        variantsStartTime = Date.now();
+        logger(`[DUAL_MODEL] PHASE2_START_PARALLEL variant generation started concurrently`);
+        variantsPromise = fallbackImageService.generateStyledVariants(
+          inputImagePath,
+          primaryImageBuffer,
+          roomType.toLowerCase(),
+          stagingStyle.toLowerCase(),
+          prompt,
+          async (step: string, details?: Record<string, unknown>) => {
+            await stagingTrace?.append(step, details || {});
+          }
+        );
+      }
+
+      // Process primary (watermark, upload, store DB)
       let watermarked = primaryImageBuffer;
       if (isDemo && primaryImageBuffer) {
+        const watermarkStart = Date.now();
+        logger(`[DUAL_MODEL] PHASE1_WATERMARK_START demoPreview=true`);
+        await stagingTrace?.append("phase1.watermark.start", {
+          imageBytes: primaryImageBuffer.length,
+        });
         watermarked = await addWatermark(primaryImageBuffer, "DEMO PREVIEW");
+        const watermarkDuration = Date.now() - watermarkStart;
+        logger(`[DUAL_MODEL] PHASE1_WATERMARK_COMPLETE durationMs=${watermarkDuration}`);
+        await stagingTrace?.append("phase1.watermark.success", {
+          durationMs: watermarkDuration,
+          imageBytes: watermarked.length,
+        });
       }
 
       const primaryFileName = `staged-primary-${Date.now()}.png`;
+      logger(`[DUAL_MODEL] PHASE1_UPLOAD_START fileName=${primaryFileName}`);
+      await stagingTrace?.append("phase1.upload.start", {
+        fileName: primaryFileName,
+        imageBytes: watermarked.length,
+      });
       const primaryUrl = await supabaseStorage.uploadStagedFromBuffer(
         watermarked,
         primaryFileName,
         "image/png"
       );
+      logger(`[DUAL_MODEL] PHASE1_UPLOAD_COMPLETE url=${primaryUrl}`);
+      await stagingTrace?.append("phase1.upload.success", {
+        primaryUrl,
+      });
 
+      logger(`[DUAL_MODEL] PHASE1_DB_CREATE_START`);
+      await stagingTrace?.append("phase1.db.create.start", {
+        stagedImageUrl: primaryUrl,
+      });
       const primaryRecord = await prisma.image.create({
         data: {
           user_id: userId,
@@ -1258,13 +1358,19 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
           source: isDemo ? 'demo' : 'user',
         }
       });
-
-      logger(`[DUAL_MODEL] PHASE1_COMPLETE Gemini primary image | durationMs=${primaryDuration} | sizeBytes=${primaryImageBuffer.length} | model=GEMINI`);
-      await stagingTrace?.append("phase1.gemini.success", {
-        durationMs: primaryDuration,
-        imageBytes: primaryImageBuffer.length,
-        primaryUrl,
+      logger(`[DUAL_MODEL] PHASE1_DB_CREATE_COMPLETE imageId=${primaryRecord.id}`);
+      await stagingTrace?.append("phase1.db.create.success", {
+        imageId: primaryRecord.id,
       });
+
+      // Increment demo usage after successful staging (for demo users)
+      if (isDemo) {
+        await incrementUnifiedDemoUsage(userId, fingerprint);
+        unifiedCount += 1;
+      }
+
+      const totalPrimaryDuration = Date.now() - primaryStartTime;
+      logger(`[DUAL_MODEL] PHASE1_COMPLETE Gemini primary image | durationMs=${totalPrimaryDuration} | sizeBytes=${primaryImageBuffer.length} | model=GEMINI`);
       res.write(`event: image\ndata: ${JSON.stringify({
         stagedImageUrl: primaryUrl,
         stagedId: primaryFileName,
@@ -1281,18 +1387,28 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
         demoCount: isDemo ? unifiedCount : undefined,
         demoLimit: isDemo ? DEMO_LIMIT : undefined,
       })}\n\n`);
-    } catch (err) {
+      } catch (err) {
       logger(`[DUAL_MODEL] PHASE1_ERROR Gemini primary image failed: ${err}`);
+      console.error(`[DUAL_MODEL][PHASE1_ERROR] Gemini primary image failed`, {
+        traceId: stagingTrace?.traceId || null,
+        roomType: roomType.toLowerCase(),
+        stagingStyle: stagingStyle.toLowerCase(),
+        error: String(err),
+      });
       await stagingTrace?.append("phase1.gemini.error", {
         error: String(err),
       });
+      if (sseHeartbeat) {
+        clearInterval(sseHeartbeat);
+        sseHeartbeat = null;
+      }
       res.write(`event: error\ndata: ${JSON.stringify({ message: 'Failed to generate primary image', error: String(err) })}\n\n`);
       res.end();
       return;
     }
 
-    // ===== PHASE 2: Generate 2 VARIANTS with Gemini Fallback Model (parallel) =====
-    if (primaryImageBuffer && primaryImageBuffer.length > 0) {
+    // ===== PHASE 2: Handle variants that started in parallel =====
+    if (variantsPromise && primaryImageBuffer && primaryImageBuffer.length > 0) {
       let responseClosed = false;
       const handleResponseError = () => {
         responseClosed = true;
@@ -1300,97 +1416,82 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
       res.on('error', handleResponseError);
       res.on('close', handleResponseError);
       try {
-        const variantsStartTime = Date.now();
-        logger(`[DUAL_MODEL] PHASE2_START parallel variant generation with fallback model=${FALLBACK_MODEL}`);
+        const phase2StartTime = Date.now();
+        logger(`[DUAL_MODEL] PHASE2_AWAIT parallel variants that started concurrently`);
+        
+        // Await variants that are generating in parallel (started during primary processing)
+        const variants = await variantsPromise;
+        
         let streamedVariantCount = 0;
-        const variants = await fallbackImageService.generateStyledVariants(
-          inputImagePath,
-          primaryImageBuffer,
-          roomType.toLowerCase(),
-          stagingStyle.toLowerCase(),
-          prompt,
-          async (step: string, details?: Record<string, unknown>) => {
-            await stagingTrace?.append(step, details || {});
-          },
-          async ({ index, variantId, modelSlug, buffer }: {
-            index: number;
-            variantId: string;
-            modelSlug: string;
-            buffer: Buffer;
-          }) => {
-            if (responseClosed) return;
+        for (let index = 0; index < variants.length; index++) {
+          const buffer = variants[index];
+          if (!buffer || responseClosed) continue;
 
-            try {
-              let watermarked = buffer;
-              if (isDemo) {
-                watermarked = await addWatermark(buffer, "DEMO PREVIEW");
-              }
-
-              const variantFileName = `staged-variant-${Date.now()}-${index + 1}.png`;
-              const variantUrl = await supabaseStorage.uploadStagedFromBuffer(
-                watermarked,
-                variantFileName,
-                "image/png"
-              );
-
-              await prisma.image.create({
-                data: {
-                  user_id: userId,
-                  project_id: projectId,
-                  original_image_url: originalUrl || '',
-                  staged_image_url: variantUrl,
-                  watermarked_preview_url: isDemo ? variantUrl : null,
-                  status: 'COMPLETED',
-                  is_demo: isDemo,
-                  room_type: roomType,
-                  staging_style: stagingStyle,
-                  prompt: prompt || null,
-                  source: isDemo ? 'demo' : 'user',
-                }
-              });
-
-              streamedVariantCount++;
-              logger(`[DUAL_MODEL] VARIANT_${index + 1}_STREAMED model=${modelSlug} | sizeBytes=${buffer.length}`);
-              await stagingTrace?.append("phase2.variant.streamed", {
-                index: index + 1,
-                bytes: buffer.length,
-                variantUrl,
-                modelSlug,
-                variantId,
-              });
-
-              if (!responseClosed) {
-                res.write(`event: image\ndata: ${JSON.stringify({
-                  stagedImageUrl: variantUrl,
-                  stagedId: variantFileName,
-                  index: index + 1,
-                  isDemo,
-                  roomType,
-                  stagingStyle,
-                  prompt: prompt || null,
-                  isVariant: true,
-                  model: modelSlug,
-                  storage: "supabase",
-                })}\n\n`);
-              }
-            } catch (err) {
-              logger(`[DUAL_MODEL] VARIANT_${index + 1}_ERROR upload failed: ${err}`);
-              await stagingTrace?.append("phase2.variant.upload.error", {
-                index: index + 1,
-                error: String(err),
-                modelSlug,
-                variantId,
-              });
+          try {
+            let watermarked = buffer;
+            if (isDemo) {
+              watermarked = await addWatermark(buffer, "DEMO PREVIEW");
             }
-          }
-        );
-        const variantsDuration = Date.now() - variantsStartTime;
 
-        logger(`[DUAL_MODEL] PHASE2_SUCCESS generated ${variants.length}/${FALLBACK_VARIANT_COUNT} variants | streamed=${streamedVariantCount} | totalDurationMs=${variantsDuration}`);
+            const variantFileName = `staged-variant-${Date.now()}-${index + 1}.png`;
+            const variantUrl = await supabaseStorage.uploadStagedFromBuffer(
+              watermarked,
+              variantFileName,
+              "image/png"
+            );
+
+            await prisma.image.create({
+              data: {
+                user_id: userId,
+                project_id: projectId,
+                original_image_url: originalUrl || '',
+                staged_image_url: variantUrl,
+                watermarked_preview_url: isDemo ? variantUrl : null,
+                status: 'COMPLETED',
+                is_demo: isDemo,
+                room_type: roomType,
+                staging_style: stagingStyle,
+                prompt: prompt || null,
+                source: isDemo ? 'demo' : 'user',
+              }
+            });
+
+            streamedVariantCount++;
+            logger(`[DUAL_MODEL] VARIANT_${index + 1}_STREAMED sizeBytes=${buffer.length}`);
+            await stagingTrace?.append("phase2.variant.streamed", {
+              index: index + 1,
+              bytes: buffer.length,
+              variantUrl,
+            });
+
+            if (!responseClosed) {
+              res.write(`event: image\ndata: ${JSON.stringify({
+                stagedImageUrl: variantUrl,
+                stagedId: variantFileName,
+                index: index + 1,
+                isDemo,
+                roomType,
+                stagingStyle,
+                prompt: prompt || null,
+                isVariant: true,
+                storage: "supabase",
+              })}\n\n`);
+            }
+          } catch (err) {
+            logger(`[DUAL_MODEL] VARIANT_${index + 1}_ERROR upload failed: ${err}`);
+            await stagingTrace?.append("phase2.variant.upload.error", {
+              index: index + 1,
+              error: String(err),
+            });
+          }
+        }
+        
+        const phase2Duration = Date.now() - phase2StartTime;
+        logger(`[DUAL_MODEL] PHASE2_SUCCESS processed ${variants.length} variants | streamed=${streamedVariantCount} | uploadDurationMs=${phase2Duration}`);
         await stagingTrace?.append("phase2.fallback.success", {
           generatedVariants: variants.length,
           streamedVariants: streamedVariantCount,
-          durationMs: variantsDuration,
+          uploadDurationMs: phase2Duration,
         });
 
         logger(`[DUAL_MODEL] PHASE2_COMPLETE all variants processed`);
@@ -1399,6 +1500,10 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
           totalVariantsProcessed: variants.length,
         });
         if (!responseClosed) {
+          if (sseHeartbeat) {
+            clearInterval(sseHeartbeat);
+            sseHeartbeat = null;
+          }
           res.write(`event: complete\ndata: ${JSON.stringify({ status: 'all_variants_completed', totalVariants: variants.length })}\n\n`);
           res.end();
         }
@@ -1408,6 +1513,10 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
           error: String(err),
         });
         if (!responseClosed) {
+          if (sseHeartbeat) {
+            clearInterval(sseHeartbeat);
+            sseHeartbeat = null;
+          }
           res.write(`event: variant_error\ndata: ${JSON.stringify({ message: 'Variant generation encountered an error', error: String(err) })}\n\n`);
           res.end();
         }
@@ -1416,10 +1525,14 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
         res.off('close', handleResponseError);
       }
     } else {
-      logger(`[DUAL_MODEL] PHASE2_SKIPPED no primary image buffer`);
+      logger(`[DUAL_MODEL] PHASE2_SKIPPED no variants promise or primary image buffer`);
       await stagingTrace?.append("phase2.skipped", {
-        reason: "No primary image buffer",
+        reason: variantsPromise ? "No primary buffer" : "Variants not started",
       });
+      if (sseHeartbeat) {
+        clearInterval(sseHeartbeat);
+        sseHeartbeat = null;
+      }
       res.write(`event: complete\ndata: ${JSON.stringify({ status: 'primary_only' })}\n\n`);
       res.end();
     }
@@ -1460,6 +1573,10 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
       error: { code: ImageErrorCode.UNKNOWN_ERROR, message: ErrorMessages[ImageErrorCode.UNKNOWN_ERROR] }
     });
   } finally {
+    if (sseHeartbeat) {
+      clearInterval(sseHeartbeat);
+      sseHeartbeat = null;
+    }
     await stagingTrace?.append("request.finally", {
       tempFileExists: !!(inputImagePath && fs.existsSync(inputImagePath)),
     });

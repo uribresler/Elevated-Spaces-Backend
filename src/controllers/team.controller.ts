@@ -1,8 +1,7 @@
 import { Request, Response } from "express";
 import { createTeamSchema } from "../utils/teamSchema";
-import { acceptInvitationService, createTeamService, invitationService, reinviteService, removeTeamMemberService, updateTeamMemberRoleService, leaveTeamService, transferCreditsBeforeLeavingService, completeLeaveTeamService, deleteTeamService, cancelInvitationService } from "../services/teams.service";
+import { acceptInvitationService, createTeamService, invitationService, reinviteService, removeTeamMemberService, updateTeamMemberRoleService, leaveTeamService, transferCreditsBeforeLeavingService, completeLeaveTeamService, deleteTeamService, cancelInvitationService, enforceTeamSeatCapacityForExistingMembers } from "../services/teams.service";
 import prisma from "../dbConnection";
-import { success } from "zod";
 
 export async function createTeam(req: Request, res: Response) {
     try {
@@ -108,8 +107,12 @@ export async function sendInvitation(req: Request, res: Response) {
         });
 
         // Return actual error message to frontend
-        return res.status(500).json({
-            message: error.message || "Failed to send invitation"
+        const isSeatLimit = error.code === "TEAM_SEAT_LIMIT_REACHED";
+        const isPlanRequired = error.code === "TEAM_PLAN_REQUIRED";
+        return res.status(isSeatLimit || isPlanRequired ? 409 : 500).json({
+            message: error.message || "Failed to send invitation",
+            ...(error.code ? { code: error.code } : {}),
+            ...(error.details ? { details: error.details } : {}),
         });
     }
 }
@@ -144,6 +147,25 @@ export async function cancelInvitation(req: Request, res: Response) {
 export async function getMyTeams(req: Request, res: Response) {
     try {
         const userId = req.user?.id;
+
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized",
+            });
+        }
+
+        const ownedTeamIds = await prisma.teams.findMany({
+            where: {
+                owner_id: userId,
+                deleted_at: null,
+            },
+            select: { id: true },
+        });
+
+        await Promise.all(
+            ownedTeamIds.map((team) => enforceTeamSeatCapacityForExistingMembers(team.id))
+        );
 
         const teams = await prisma.teams.findMany({
             where: {
@@ -205,6 +227,18 @@ export async function getMyTeamsWithCredits(req: Request, res: Response) {
         }
 
         // Get teams where user is owner
+        const ownedTeamIds = await prisma.teams.findMany({
+            where: {
+                owner_id: userId,
+                deleted_at: null,
+            },
+            select: { id: true },
+        });
+
+        await Promise.all(
+            ownedTeamIds.map((team) => enforceTeamSeatCapacityForExistingMembers(team.id))
+        );
+
         const ownedTeams = await prisma.teams.findMany({
             where: {
                 owner_id: userId,
@@ -333,8 +367,12 @@ export async function reinviteInvitation(req: Request, res: Response) {
         });
 
         // Return actual error message to frontend
-        return res.status(500).json({
-            message: error.message || "Failed to re-send invitation"
+        const isSeatLimit = error.code === "TEAM_SEAT_LIMIT_REACHED";
+        const isPlanRequired = error.code === "TEAM_PLAN_REQUIRED";
+        return res.status(isSeatLimit || isPlanRequired ? 409 : 500).json({
+            message: error.message || "Failed to re-send invitation",
+            ...(error.code ? { code: error.code } : {}),
+            ...(error.details ? { details: error.details } : {}),
         });
     }
 }
@@ -350,6 +388,21 @@ export async function getTeamsByUserId(req: Request, res: Response) {
                 message: "Unauthorized",
             })
         }
+
+        const activeMemberships = await prisma.team_membership.findMany({
+            where: {
+                user_id: userId,
+                deleted_at: null,
+            },
+            select: {
+                team_id: true,
+            },
+        });
+
+        const uniqueTeamIds = Array.from(new Set(activeMemberships.map((membership) => membership.team_id)));
+        await Promise.all(
+            uniqueTeamIds.map((teamId) => enforceTeamSeatCapacityForExistingMembers(teamId))
+        );
 
         const memberships = await prisma.team_membership.findMany({
             where: {

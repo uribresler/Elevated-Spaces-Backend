@@ -8,6 +8,7 @@ type GeminiKeyConfig = {
 };
 
 const QUOTA_COOLDOWN_MS = Number(process.env.GEMINI_QUOTA_COOLDOWN_MS || "86400000");
+const GEMINI_VERBOSE_LOGS = String(process.env.GEMINI_VERBOSE_LOGS || "false").toLowerCase() === "true";
 
 class GeminiKeyRotationService {
   private readonly keyConfigs: GeminiKeyConfig[];
@@ -92,7 +93,9 @@ class GeminiKeyRotationService {
       },
     });
 
-    logger(`[GEMINI_KEYS] ${keyName} marked quota exhausted until ${blockedUntil.toISOString()}`);
+    if (GEMINI_VERBOSE_LOGS) {
+      logger(`[GEMINI_KEYS] ${keyName} marked quota exhausted until ${blockedUntil.toISOString()}`);
+    }
   }
 }
 

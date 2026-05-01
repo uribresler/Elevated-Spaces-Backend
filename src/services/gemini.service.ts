@@ -1,10 +1,12 @@
 import { GoogleGenAI } from "@google/genai";
 import { promises as fsPromises } from "fs";
 import * as path from "path";
+import sharp from "sharp";
 import { logger } from "../utils/logger";
 import { RateLimiter } from "../utils/rateLimiter";
 import { DEFAULT_STAGING_PROMPT, STAGING_STYLE_PROMPTS } from "../utils/stagingPrompts";
 import { geminiKeyRotationService } from "./gemini-key-rotation.service";
+import { FALLBACK_PRIMARY_MODEL } from "../config/fallback.config";
 import {
   ImageProcessingError,
   ImageErrorCode,
@@ -15,10 +17,19 @@ import {
 const MAX_RETRIES = Number(process.env.GEMINI_MAX_RETRIES || "1");
 const BASE_DELAY_MS = Number(process.env.GEMINI_RETRY_BASE_DELAY_MS || "300");
 const MAX_DELAY_MS = Number(process.env.GEMINI_RETRY_MAX_DELAY_MS || "1200");
+const GEMINI_OPERATION_TIMEOUT_MS = Number(process.env.GEMINI_OPERATION_TIMEOUT_MS || "12000");
 const SINGLE_CALL_FAILURE_COOLDOWN_MS = Number(
   process.env.GEMINI_SINGLE_CALL_FAILURE_COOLDOWN_MS || "3600000"
 );
 const SINGLE_CALL_MODE = String(process.env.GEMINI_SINGLE_CALL_MODE || "auto").toLowerCase(); // auto | always | never
+const PRIMARY_IMAGE_MODEL = String(
+  process.env.GEMINI_IMAGE_MODEL || FALLBACK_PRIMARY_MODEL || "gemini-2.5-flash-image"
+);
+const FALLBACK_IMAGE_MODELS = String(process.env.GEMINI_IMAGE_FALLBACK_MODELS || "gemini-2.5-flash-image")
+  .split(",")
+  .map((entry) => entry.trim())
+  .filter(Boolean);
+const GEMINI_VERBOSE_LOGS = String(process.env.GEMINI_VERBOSE_LOGS || "false").toLowerCase() === "true";
 
 // Gemini API rate limiter: 18 requests/minute (safety buffer below 20/min limit)
 const GEMINI_RATE_LIMIT = Number(process.env.GEMINI_RATE_LIMIT_PER_MINUTE || "18");
@@ -32,6 +43,77 @@ function isQuotaExhaustedMessage(message: string): boolean {
     normalized.includes("generate_requests_per_model_per_day") ||
     normalized.includes("limit: 0")
   );
+}
+
+function isTransientFailoverError(error: unknown): boolean {
+  const err = error as any;
+  const message = String(err?.message || err || "").toLowerCase();
+  const code = String(err?.code || "").toLowerCase();
+  const status = Number(err?.status || err?.response?.status || 0);
+
+  if (code === String(ImageErrorCode.AI_TIMEOUT).toLowerCase()) {
+    return true;
+  }
+
+  if (status === 429 || (status >= 500 && status < 600)) {
+    return true;
+  }
+
+  if (status === 400 || status === 401 || status === 403 || status === 404) {
+    return (
+      message.includes("model") ||
+      message.includes("not found") ||
+      message.includes("unsupported") ||
+      message.includes("invalid argument") ||
+      message.includes("permission") ||
+      message.includes("access")
+    );
+  }
+
+  return (
+    message.includes("timeout") ||
+    message.includes("deadline") ||
+    message.includes("unavailable") ||
+    message.includes("503") ||
+    message.includes("connection")
+  );
+}
+
+function getErrorDiagnostics(error: unknown): string {
+  const err = error as any;
+  const status = err?.status || err?.code || err?.response?.status || "unknown";
+  const message = String(err?.message || err || "Unknown error").replace(/\s+/g, " ").trim();
+  return `status=${status} message=${message.substring(0, 500)}`;
+}
+
+function getErrorSnapshot(error: unknown): Record<string, unknown> {
+  const err = error as any;
+  return {
+    name: err?.name,
+    status: err?.status,
+    code: err?.code,
+    message: err?.message,
+    statusText: err?.statusText,
+    responseStatus: err?.response?.status,
+    responseText: err?.response?.text,
+    responseData: err?.response?.data,
+  };
+}
+
+function geminiVerboseLog(message: string): void {
+  if (GEMINI_VERBOSE_LOGS) {
+    logger(message);
+  }
+}
+
+function geminiVerboseError(message: string, payload?: unknown): void {
+  if (GEMINI_VERBOSE_LOGS) {
+    if (typeof payload === "undefined") {
+      console.error(message);
+      return;
+    }
+    console.error(message, payload);
+  }
 }
 
 class GeminiService {
@@ -53,11 +135,37 @@ class GeminiService {
     return client;
   }
 
+  private async withOperationTimeout<T>(promise: Promise<T>, operationName: string, keyName: string): Promise<T> {
+    let timeoutHandle: NodeJS.Timeout | null = null;
+
+    const timeoutPromise = new Promise<T>((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        reject(
+          new ImageProcessingError(
+            ImageErrorCode.AI_TIMEOUT,
+            ErrorMessages[ImageErrorCode.AI_TIMEOUT],
+            504,
+            `${operationName} timed out after ${GEMINI_OPERATION_TIMEOUT_MS}ms on key ${keyName}`
+          )
+        );
+      }, GEMINI_OPERATION_TIMEOUT_MS);
+    });
+
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
+  }
+
   private async executeWithKeyFailover<T>(
     operationName: string,
     operation: (client: GoogleGenAI, keyName: string) => Promise<T>
   ): Promise<T> {
     const availableKeys = await geminiKeyRotationService.getAvailableKeys();
+    geminiVerboseLog(`[GEMINI_KEYS] ${operationName} starting with ${availableKeys.length} available key(s)`);
 
     if (!availableKeys.length) {
       const nextAvailableAt = await geminiKeyRotationService.getNextAvailableAt();
@@ -76,24 +184,101 @@ class GeminiService {
     for (const keyConfig of availableKeys) {
       const client = this.getClientForKey(keyConfig.keyName, keyConfig.keyValue);
       try {
-        return await operation(client, keyConfig.keyName);
+        geminiVerboseLog(`[GEMINI_KEYS] ${operationName} trying key=${keyConfig.keyName}`);
+        return await this.withOperationTimeout(
+          operation(client, keyConfig.keyName),
+          operationName,
+          keyConfig.keyName
+        );
       } catch (error) {
         lastError = error;
 
         const errorMessage = String(error || "").toLowerCase();
         const status = (error as any)?.status || (error as any)?.code || (error as any)?.response?.status;
         const quotaHit = isQuotaExhaustedMessage(errorMessage) || status === 429;
+        const snapshot = getErrorSnapshot(error);
+
+        logger(`[GEMINI_MODEL_ERROR] ${operationName} model=${keyConfig.keyName} | ${getErrorDiagnostics(error)}`);
+
+        geminiVerboseLog(
+          `[GEMINI_KEYS] ${operationName} key=${keyConfig.keyName} failed | ${getErrorDiagnostics(error)} | quotaHit=${quotaHit}`
+        );
+        geminiVerboseError(`[GEMINI_KEYS][${operationName}] key=${keyConfig.keyName} failed`, snapshot);
 
         if (!quotaHit) {
-          throw error;
+          const shouldFailover = isTransientFailoverError(error);
+          if (!shouldFailover) {
+            throw error;
+          }
+
+          geminiVerboseLog(
+            `[GEMINI_KEYS] ${operationName} key=${keyConfig.keyName} failed with transient error. Trying next key.`
+          );
+          continue;
         }
 
         await geminiKeyRotationService.markQuotaExceeded(keyConfig.keyName);
-        logger(`[GEMINI_KEYS] ${keyConfig.keyName} hit quota during ${operationName}. Switching to next configured key.`);
+        geminiVerboseLog(`[GEMINI_KEYS] ${keyConfig.keyName} hit quota during ${operationName}. Switching to next configured key.`);
       }
     }
 
+    geminiVerboseLog(`[GEMINI_KEYS] ${operationName} exhausted all available keys`);
     throw lastError instanceof Error ? lastError : new Error(`All Gemini keys failed for ${operationName}.`);
+  }
+
+  private getImageModelCandidates(): string[] {
+    const models = [PRIMARY_IMAGE_MODEL, ...FALLBACK_IMAGE_MODELS];
+    return Array.from(new Set(models));
+  }
+
+  private async executeWithImageModelFailover<T>(
+    operationName: string,
+    operation: (model: string) => Promise<T>
+  ): Promise<T> {
+    const modelCandidates = this.getImageModelCandidates();
+    let lastError: unknown;
+
+    for (const model of modelCandidates) {
+      try {
+        geminiVerboseLog(`[GEMINI_MODEL] ${operationName} trying model=${model}`);
+        return await operation(model);
+      } catch (error) {
+        lastError = error;
+        geminiVerboseLog(
+          `[GEMINI_MODEL] ${operationName} model=${model} failed | ${getErrorDiagnostics(error)}`
+        );
+
+        if (!isTransientFailoverError(error)) {
+          throw error;
+        }
+
+        geminiVerboseLog(`[GEMINI_MODEL] ${operationName} model=${model} failed with transient error. Trying next model.`);
+      }
+    }
+
+    geminiVerboseLog(`[GEMINI_MODEL] ${operationName} exhausted all candidate models`);
+    throw lastError instanceof Error ? lastError : new Error(`All image models failed for ${operationName}.`);
+  }
+
+  private async prepareImageForGemini(inputImagePath: string): Promise<{ buffer: Buffer; mimeType: string }> {
+    const rawBuffer = await fsPromises.readFile(inputImagePath);
+    const normalizedBuffer = await sharp(rawBuffer)
+      .rotate()
+      .resize({
+        // Further reduced for faster processing: 1024px instead of 1024
+        width: Number(process.env.GEMINI_NORMALIZE_MAX_DIM || "1024"),
+        height: Number(process.env.GEMINI_NORMALIZE_MAX_DIM || "1024"),
+        fit: "inside",
+        // Do not enlarge very small inputs (helps avoid extra work)
+        withoutEnlargement: true,
+      })
+      .png({ compressionLevel: 3 })
+      .toBuffer();
+
+    return {
+      buffer: normalizedBuffer,
+      mimeType: "image/png",
+    };
   }
 
   private extractImagesFromResponse(response: any, maxImages: number): Buffer[] {
@@ -199,8 +384,7 @@ class GeminiService {
     removeFurniture?: boolean
   ): Promise<Buffer[]> {
     const safeVariationCount = Math.max(1, Math.min(variationCount, 8));
-    const imageBuffer = await fsPromises.readFile(inputImagePath);
-    const mimeType = this.getMimeType(inputImagePath);
+    const { buffer: imageBuffer, mimeType } = await this.prepareImageForGemini(inputImagePath);
     const base64Image = imageBuffer.toString("base64");
 
     const stagingPrompt = this.buildStagingPrompt(roomType, stagingStyle, prompt, safeVariationCount);
@@ -218,32 +402,36 @@ class GeminiService {
           logger(`[GEMINI] Starting single-call staging generation with ${safeVariationCount} variations`);
           geminiCallCount += 1;
 
-          const response = await this.executeWithKeyFailover(
+          const response = await this.executeWithImageModelFailover(
             "stage-single-call",
-            (client) =>
-              client.models.generateContent({
-                model: "gemini-3-pro-image-preview",
-                contents: [
-                  {
-                    role: "user",
-                    parts: [
+            (model) =>
+              this.executeWithKeyFailover(
+                `stage-single-call:${model}`,
+                (client) =>
+                  client.models.generateContent({
+                    model,
+                    contents: [
                       {
-                        inlineData: {
-                          mimeType,
-                          data: base64Image,
-                        },
-                      },
-                      {
-                        text: singleCallPrompt,
+                        role: "user",
+                        parts: [
+                          {
+                            inlineData: {
+                              mimeType,
+                              data: base64Image,
+                            },
+                          },
+                          {
+                            text: singleCallPrompt,
+                          },
+                        ],
                       },
                     ],
-                  },
-                ],
-                config: {
-                  responseModalities: ["IMAGE"],
-                  temperature: 0.7,
-                },
-              } as any)
+                    config: {
+                      responseModalities: ["IMAGE"],
+                      temperature: 0.7,
+                    },
+                  } as any)
+              )
           );
 
           const images = this.extractImagesFromResponse(response, safeVariationCount);
@@ -265,7 +453,7 @@ class GeminiService {
           logger(`[GEMINI] Single-call multi-image attempt failed, falling back to per-variation calls: ${String(error)}`);
         }
       } else {
-        logger(`[GEMINI] Skipping single-call multi-variation attempt (mode=${SINGLE_CALL_MODE}) and generating per-variation directly.`);
+        geminiVerboseLog(`[GEMINI] Skipping single-call multi-variation attempt (mode=${SINGLE_CALL_MODE}) and generating per-variation directly.`);
       }
 
       if (!usedSingleCallOnly && generated.length < safeVariationCount) {
@@ -273,61 +461,82 @@ class GeminiService {
           generated.length = 0;
           seen.clear();
         }
-        logger(`[GEMINI] Generating ${safeVariationCount - generated.length} remaining variations with per-variation calls (still one billed job)`);
+        geminiVerboseLog(`[GEMINI] Generating ${safeVariationCount - generated.length} remaining variations with per-variation calls (still one billed job)`);
       }
 
-      for (let index = generated.length; index < safeVariationCount; index++) {
-        await geminiRateLimiter.acquire(`stageImage-${safeVariationCount}-v${index + 1}`);
-        geminiCallCount += 1;
+      // Parallelize per-variation calls to improve total latency while respecting rate limits.
+      const VARIATION_CONCURRENCY = Math.max(1, Number(process.env.GEMINI_VARIATION_CONCURRENCY || "3"));
 
-        const variationPrompt = prompt
-          ? `${prompt}\n\nCreate variation ${index + 1} of ${safeVariationCount}. Keep architecture unchanged and make this variation visually distinct from previous ones.`
-          : `Create variation ${index + 1} of ${safeVariationCount} for this ${roomType} in ${stagingStyle} style. Keep architecture unchanged and make this variation visually distinct from previous ones.`;
+      const indicesToGenerate: number[] = [];
+      for (let i = generated.length; i < safeVariationCount; i++) indicesToGenerate.push(i);
 
-        const perVariationPrompt = this.buildStagingPrompt(roomType, stagingStyle, variationPrompt, 1);
+      const tasks: Array<() => Promise<{ index: number; buffer?: Buffer }>> = indicesToGenerate.map((index) => {
+        return async () => {
+          await geminiRateLimiter.acquire(`stageImage-${safeVariationCount}-v${index + 1}`);
+          geminiCallCount += 1;
 
-        const variationResponse = await this.executeWithKeyFailover(
-          `stage-variation-${index + 1}`,
-          (client) =>
-            client.models.generateContent({
-              model: "gemini-3-pro-image-preview",
-              contents: [
-                {
-                  role: "user",
-                  parts: [
+          const variationPrompt = prompt
+            ? `${prompt}\n\nCreate variation ${index + 1} of ${safeVariationCount}. Keep architecture unchanged and make this variation visually distinct from previous ones.`
+            : `Create variation ${index + 1} of ${safeVariationCount} for this ${roomType} in ${stagingStyle} style. Keep architecture unchanged and make this variation visually distinct from previous ones.`;
+
+          const perVariationPrompt = this.buildStagingPrompt(roomType, stagingStyle, variationPrompt, 1);
+
+          const variationResponse = await this.executeWithImageModelFailover(
+            `stage-variation-${index + 1}`,
+            (model) =>
+              this.executeWithKeyFailover(`stage-variation-${index + 1}:${model}`, (client) =>
+                client.models.generateContent({
+                  model,
+                  contents: [
                     {
-                      inlineData: {
-                        mimeType,
-                        data: base64Image,
-                      },
-                    },
-                    {
-                      text: perVariationPrompt,
+                      role: "user",
+                      parts: [
+                        {
+                          inlineData: {
+                            mimeType,
+                            data: base64Image,
+                          },
+                        },
+                        {
+                          text: perVariationPrompt,
+                        },
+                      ],
                     },
                   ],
-                },
-              ],
-              config: {
-                responseModalities: ["IMAGE"],
-                temperature: 0.75,
-              },
-            } as any)
-        );
+                  config: {
+                    responseModalities: ["IMAGE"],
+                    temperature: 0.75,
+                  },
+                } as any)
+              )
+          );
 
-        const nextImage = this.extractImagesFromResponse(variationResponse, 1)[0];
-        if (!nextImage) {
-          continue;
-        }
+          const nextImage = this.extractImagesFromResponse(variationResponse, 1)[0];
+          return { index, buffer: nextImage };
+        };
+      });
 
-        const fingerprint = nextImage.toString("base64");
-        if (!seen.has(fingerprint)) {
-          generated.push(nextImage);
-          seen.add(fingerprint);
+      // Run tasks in batches to control concurrency
+      const runBatches = async () => {
+        for (let i = 0; i < tasks.length; i += VARIATION_CONCURRENCY) {
+          const batch = tasks.slice(i, i + VARIATION_CONCURRENCY).map((t) => t());
+          const results = await Promise.all(batch);
+          for (const r of results) {
+            if (!r.buffer) continue;
+            const fingerprint = r.buffer.toString("base64");
+            if (!seen.has(fingerprint)) {
+              generated.push(r.buffer);
+              seen.add(fingerprint);
+            }
+            if (generated.length >= safeVariationCount) return;
+          }
         }
-      }
+      };
+
+      await runBatches();
 
       if (generated.length < safeVariationCount) {
-        logger(`[GEMINI] API call count for this job: ${geminiCallCount} (single-call success: ${usedSingleCallOnly})`);
+        geminiVerboseLog(`[GEMINI] API call count for this job: ${geminiCallCount} (single-call success: ${usedSingleCallOnly})`);
         throw new ImageProcessingError(
           ImageErrorCode.AI_NO_IMAGE_GENERATED,
           ErrorMessages[ImageErrorCode.AI_NO_IMAGE_GENERATED],
@@ -336,8 +545,8 @@ class GeminiService {
         );
       }
 
-      logger(`[GEMINI] API call count for this job: ${geminiCallCount} (single-call success: ${usedSingleCallOnly})`);
-      logger(`[GEMINI] Staging generation succeeded with ${generated.length} images`);
+      geminiVerboseLog(`[GEMINI] API call count for this job: ${geminiCallCount} (single-call success: ${usedSingleCallOnly})`);
+      geminiVerboseLog(`[GEMINI] Staging generation succeeded with ${generated.length} images`);
       return generated.slice(0, safeVariationCount);
     }, "generateStagedImages");
   }
@@ -399,6 +608,7 @@ class GeminiService {
       } catch (error) {
         lastError = error;
         const errorMsg = error instanceof Error ? error.message : String(error);
+        const snapshot = getErrorSnapshot(error);
         
         // Check for daily quota exhaustion
         const isDailyQuota = errorMsg.toLowerCase().includes('per_day') || errorMsg.toLowerCase().includes('per day');
@@ -408,7 +618,8 @@ class GeminiService {
           throw error instanceof ImageProcessingError ? error : parseGeminiError(error);
         }
 
-        logger(`[GEMINI] Attempt ${attempt}/${MAX_RETRIES} failed: ${errorMsg.substring(0, 100)}...`);
+        geminiVerboseLog(`[GEMINI] Attempt ${attempt}/${MAX_RETRIES} failed for ${operationName}: ${getErrorDiagnostics(error)}`);
+        geminiVerboseError(`[GEMINI][${operationName}] attempt ${attempt}/${MAX_RETRIES} failed`, snapshot);
 
         if (!this.isRetryableError(error)) {
           throw error instanceof ImageProcessingError ? error : parseGeminiError(error);
@@ -416,12 +627,14 @@ class GeminiService {
 
         if (attempt < MAX_RETRIES) {
           const delay = this.calculateDelay(attempt);
-          logger(`[GEMINI] Retrying in ${Math.round(delay / 1000)}s...`);
+          geminiVerboseLog(`[GEMINI] Retrying in ${Math.round(delay / 1000)}s...`);
           await new Promise((resolve) => setTimeout(resolve, delay));
         }
       }
     }
 
+    geminiVerboseLog(`[GEMINI] ${operationName} exhausted retries: ${getErrorDiagnostics(lastError)}`);
+    geminiVerboseError(`[GEMINI][${operationName}] exhausted retries`, getErrorSnapshot(lastError));
     throw lastError instanceof ImageProcessingError ? lastError : parseGeminiError(lastError);
   }
 
@@ -469,10 +682,8 @@ class GeminiService {
    * Uses text response mode for analysis
    */
   async analyzeImage(imagePath: string): Promise<any> {
-    // Use async file read for better performance
-    const imageBuffer = await fsPromises.readFile(imagePath);
+    const { buffer: imageBuffer, mimeType } = await this.prepareImageForGemini(imagePath);
     const base64Image = imageBuffer.toString("base64");
-    const mimeType = this.getMimeType(imagePath);
 
     return this.executeWithRetry(async () => {
       logger(`Analyzing image: ${imagePath}`);
@@ -483,7 +694,7 @@ class GeminiService {
         "analyze-image",
         (client) =>
           client.models.generateContentStream({
-            model: "gemini-3-pro-image-preview",
+            model: PRIMARY_IMAGE_MODEL,
             contents: [
               {
                 role: "user",

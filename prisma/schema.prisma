@@ -43,6 +43,10 @@ model user {
   credit_usage          user_credit_usage[]
   demo_tracking         user_demo_tracking?
   invoices              invoice[]
+  direct_conversations_as_a direct_conversation[] @relation("ConversationUserA")
+  direct_conversations_as_b direct_conversation[] @relation("ConversationUserB")
+  sent_direct_messages      direct_message[]      @relation("DirectMessageSender")
+  received_direct_messages  direct_message[]      @relation("DirectMessageReceiver")
 
   @@map("user")
 }
@@ -76,6 +80,11 @@ model team_membership {
   allocated    Int          @default(0) @map("allocated")
   // Credits used by this member (sum of team_usage for this member)
   used         Int          @default(0) @map("used")
+  is_paid_extra_seat Boolean @default(false) @map("is_paid_extra_seat")
+  seat_auto_renew Boolean @default(false) @map("seat_auto_renew")
+  seat_last_paid_at DateTime? @map("seat_last_paid_at")
+  seat_expires_at DateTime? @map("seat_expires_at")
+  seat_payment_product_key String? @map("seat_payment_product_key")
   joined_at    DateTime     @default(now()) @map("joined_at")
   updated_at   DateTime     @updatedAt @map("updated_at")
   deleted_at   DateTime?    @map("deleted_at")
@@ -105,18 +114,20 @@ model team_usage {
 
 // When owner purchases credits for team
 model team_purchase {
-  id                String    @id @default(uuid()) @map("id")
-  team_id           String    @map("team_id")
-  amount            Int       @map("amount")
-  price_usd         Float     @map("price_usd")
-  status            String    @default("pending") @map("status")
-  stripe_session_id String?   @map("stripe_session_id")
-  stripe_invoice_id String?   @map("stripe_invoice_id")
-  created_at        DateTime  @default(now()) @map("created_at")
-  completed_at      DateTime? @map("completed_at")
-  team              teams     @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  id                    String    @id @default(uuid()) @map("id")
+  team_id               String    @map("team_id")
+  amount                Int       @map("amount")
+  price_usd             Float     @map("price_usd")
+  status                String    @default("pending") @map("status")
+  stripe_session_id     String?   @map("stripe_session_id")
+  stripe_subscription_id String?  @map("stripe_subscription_id")
+  stripe_invoice_id     String?   @map("stripe_invoice_id")
+  created_at            DateTime  @default(now()) @map("created_at")
+  completed_at          DateTime? @map("completed_at")
+  team                  teams     @relation(fields: [team_id], references: [id], onDelete: Cascade)
 
   @@index([team_id, status])
+  @@index([stripe_subscription_id])
   @@map("team_purchase")
 }
 
@@ -233,15 +244,27 @@ model photographer_profile {
   user_id                     String    @unique @map("user_id")
   bio                         String?   @map("bio")
   documents_url               String?   @map("documents_url")
+  driving_license_url         String?   @map("driving_license_url")
+  utility_bill_url            String?   @map("utility_bill_url")
   approved                    Boolean   @default(false) @map("approved")
   application_status          photographer_application_status @default(SUBMITTED) @map("application_status")
   availability                String?   @map("availability")
   photographer_type           String?   @map("photographer_type")
   years_experience            String?   @map("years_experience")
   service_area                String?   @map("service_area")
+  service_areas               Json?     @map("service_areas")
   portfolio_url               String?   @map("portfolio_url")
   instagram_url               String?   @map("instagram_url")
+  facebook_url                String?   @map("facebook_url")
+  linkedin_url                String?   @map("linkedin_url")
+  x_url                       String?   @map("x_url")
   website_url                 String?   @map("website_url")
+  phone_number                String?   @map("phone_number")
+  portfolio_items             Json?     @map("portfolio_items")
+  service_keywords            String?   @map("service_keywords")
+  price_min                   Int?      @map("price_min")
+  price_max                   Int?      @map("price_max")
+  refund_policy               Json?     @map("refund_policy")
   gear_description            String?   @map("gear_description")
   business_name               String?   @map("business_name")
   short_pitch                 String?   @map("short_pitch")
@@ -257,6 +280,41 @@ model photographer_profile {
   user                        user      @relation(fields: [user_id], references: [id])
 
   @@map("photographer_profile")
+}
+
+model direct_conversation {
+  id          String          @id @default(uuid()) @map("id")
+  user_a_id   String          @map("user_a_id")
+  user_b_id   String          @map("user_b_id")
+  created_at  DateTime        @default(now()) @map("created_at")
+  updated_at  DateTime        @updatedAt @map("updated_at")
+  user_a      user            @relation("ConversationUserA", fields: [user_a_id], references: [id], onDelete: Cascade)
+  user_b      user            @relation("ConversationUserB", fields: [user_b_id], references: [id], onDelete: Cascade)
+  messages    direct_message[]
+
+  @@unique([user_a_id, user_b_id])
+  @@index([user_a_id])
+  @@index([user_b_id])
+  @@map("direct_conversation")
+}
+
+model direct_message {
+  id               String              @id @default(uuid()) @map("id")
+  conversation_id  String              @map("conversation_id")
+  sender_id        String              @map("sender_id")
+  receiver_id      String              @map("receiver_id")
+  body             String?             @map("body")
+  attachments      Json?               @map("attachments")
+  read_at          DateTime?           @map("read_at")
+  created_at       DateTime            @default(now()) @map("created_at")
+  updated_at       DateTime            @updatedAt @map("updated_at")
+  conversation     direct_conversation @relation(fields: [conversation_id], references: [id], onDelete: Cascade)
+  sender           user                @relation("DirectMessageSender", fields: [sender_id], references: [id], onDelete: Cascade)
+  receiver         user                @relation("DirectMessageReceiver", fields: [receiver_id], references: [id], onDelete: Cascade)
+
+  @@index([conversation_id, created_at])
+  @@index([receiver_id, read_at])
+  @@map("direct_message")
 }
 
 model guest_tracking {
@@ -372,6 +430,17 @@ model webhook_event {
   created_at    DateTime @default(now()) @map("created_at")
 
   @@map("webhook_event")
+}
+
+model gemini_api_key_state {
+  id                     String    @id @default(uuid()) @map("id")
+  key_name               String    @unique @map("key_name")
+  blocked_until          DateTime? @map("blocked_until")
+  last_quota_exceeded_at DateTime? @map("last_quota_exceeded_at")
+  created_at             DateTime  @default(now()) @map("created_at")
+  updated_at             DateTime  @updatedAt @map("updated_at")
+
+  @@map("gemini_api_key_state")
 }
 
 model booking {
@@ -514,18 +583,6 @@ model invoice {
   @@index([created_at])
   @@map("invoice")
 }
-
-model gemini_api_key_state {
-  id                     String    @id @default(uuid()) @map("id")
-  key_name               String    @unique @map("key_name")
-  last_quota_exceeded_at DateTime? @map("last_quota_exceeded_at")
-  blocked_until          DateTime? @map("blocked_until")
-  created_at             DateTime  @default(now()) @map("created_at")
-  updated_at             DateTime  @updatedAt @map("updated_at")
-
-  @@map("gemini_api_key_state")
-}
-
 
 enum image_status {
   PROCESSING

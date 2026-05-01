@@ -21,30 +21,39 @@ export function isNewMonth(lastDate: Date, currentDate: Date = new Date()): bool
  */
 export async function getUserDemoTracking(userId: string) {
   const now = new Date();
+
+  // Users can carry stale tokens after DB migration; avoid FK errors for missing users.
+  const userExists = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true },
+  });
+  if (!userExists) {
+    return null;
+  }
   
   let tracking = await prisma.user_demo_tracking.findUnique({
     where: { user_id: userId },
   });
 
-  if (!tracking) {
-    // Create new tracking record
-    tracking = await prisma.user_demo_tracking.create({
-      data: {
-        user_id: userId,
-        uploads_count: 0,
-        last_reset_at: now,
-      },
-    });
-  } else {
-    // Check if we need to reset for new month
-    if (isNewMonth(tracking.last_reset_at, now)) {
-      tracking = await prisma.user_demo_tracking.update({
-        where: { user_id: userId },
+    if (!tracking) {
+      // Create new tracking record
+      tracking = await prisma.user_demo_tracking.create({
         data: {
+          user_id: userId,
           uploads_count: 0,
           last_reset_at: now,
         },
       });
+    } else {
+    // Check if we need to reset for new month
+      if (isNewMonth(tracking.last_reset_at, now)) {
+        tracking = await prisma.user_demo_tracking.update({
+          where: { user_id: userId },
+          data: {
+            uploads_count: 0,
+            last_reset_at: now,
+          },
+        });
 
       // Log reset event
       await prisma.analytics_event.create({
@@ -70,6 +79,7 @@ export async function getGuestDemoTracking(fingerprint: string, ip: string = "")
   
   let tracking = await prisma.guest_tracking.findFirst({
     where: { fingerprint },
+    orderBy: { last_used_at: "desc" },
   });
 
   if (!tracking) {
@@ -78,7 +88,7 @@ export async function getGuestDemoTracking(fingerprint: string, ip: string = "")
       data: {
         fingerprint,
         ip,
-        uploads_count: 0,
+          uploads_count: 0,
         blocked: false,
         last_used_at: now,
       },
@@ -124,18 +134,33 @@ export async function incrementUserDemoUsage(userId: string) {
 }
 
 /**
- * Increment demo usage for a guest
+ * Increment demo usage for a guest fingerprint.
  */
-export async function incrementGuestDemoUsage(guestId: string) {
-  return await prisma.guest_tracking.update({
-    where: { id: guestId },
-    data: {
-      uploads_count: {
-        increment: 1,
-      },
-      last_used_at: new Date(),
-    },
+export async function incrementGuestDemoUsage(fingerprint: string) {
+  const now = new Date();
+  const guestTrackings = await prisma.guest_tracking.findMany({
+    where: { fingerprint },
   });
+
+  if (guestTrackings.length === 0) {
+    return null;
+  }
+
+  const nextCount = Math.max(...guestTrackings.map((tracking) => tracking.uploads_count)) + 1;
+
+  await Promise.all(
+    guestTrackings.map((tracking) =>
+      prisma.guest_tracking.update({
+        where: { id: tracking.id },
+        data: {
+          uploads_count: nextCount,
+          last_used_at: now,
+        },
+      })
+    )
+  );
+
+  return nextCount;
 }
 
 /**
@@ -143,16 +168,32 @@ export async function incrementGuestDemoUsage(guestId: string) {
  * This ensures they don't get extra credits by logging in
  */
 export async function linkGuestToUser(fingerprint: string, userId: string) {
-  const guestTracking = await prisma.guest_tracking.findFirst({
+  const userExists = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true },
+  });
+
+  if (!userExists) {
+    return;
+  }
+
+  const guestTrackings = await prisma.guest_tracking.findMany({
     where: { fingerprint },
   });
   
-  if (guestTracking && !guestTracking.userId) {
-    await prisma.guest_tracking.update({
-      where: { id: guestTracking.id },
-      data: { userId },
-    });
-  }
+  if (guestTrackings.length === 0) return;
+
+    // Link guest tracking rows to the user account. Use `user_id` column name.
+    await Promise.all(
+      guestTrackings
+        .filter((guestTracking) => !guestTracking.userId)
+        .map((guestTracking) =>
+          prisma.guest_tracking.update({
+            where: { id: guestTracking.id },
+            data: { userId },
+          })
+        )
+    );
 }
 
 /**
@@ -161,34 +202,54 @@ export async function linkGuestToUser(fingerprint: string, userId: string) {
  */
 export async function incrementUnifiedDemoUsage(
   userId: string | null,
-  guestId: string | null
+  guestFingerprint: string | null
 ) {
   const promises = [];
   
   if (userId) {
-    promises.push(
-      prisma.user_demo_tracking.upsert({
-        where: { user_id: userId },
-        create: {
-          user_id: userId,
-          uploads_count: 1,
-          last_reset_at: new Date(),
-        },
-        update: { uploads_count: { increment: 1 } },
-      })
-    );
+    const userExists = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true },
+    });
+
+    if (userExists) {
+      promises.push(
+        prisma.user_demo_tracking.upsert({
+          where: { user_id: userId },
+          create: {
+            user_id: userId,
+            uploads_count: 1,
+            last_reset_at: new Date(),
+          },
+          update: { uploads_count: { increment: 1 } },
+        })
+      );
+    }
   }
   
-  if (guestId) {
-    promises.push(
-      prisma.guest_tracking.update({
-        where: { id: guestId },
-        data: {
-          uploads_count: { increment: 1 },
-          last_used_at: new Date(),
-        },
-      })
-    );
+  if (guestFingerprint) {
+    const guestTrackings = await prisma.guest_tracking.findMany({
+      where: { fingerprint: guestFingerprint },
+    });
+
+    if (guestTrackings.length > 0) {
+      const now = new Date();
+      const nextCount = Math.max(...guestTrackings.map((tracking) => tracking.uploads_count)) + 1;
+
+      promises.push(
+        Promise.all(
+          guestTrackings.map((tracking) =>
+            prisma.guest_tracking.update({
+              where: { id: tracking.id },
+              data: {
+                uploads_count: nextCount,
+                last_used_at: now,
+              },
+            })
+          )
+        )
+      );
+    }
   }
   
   await Promise.all(promises);

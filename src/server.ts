@@ -6,6 +6,7 @@ import { supabaseStorage } from './services/supabaseStorage.service';
 import { startCleanupCron } from './cron/cleanupExpiredInvitations';
 import processSubscriptionRenewals from './cron/processSubscriptionRenewals';
 import { processPendingPurchases } from './services/payment.service';
+import { processTeamPaidExtraSeatsDaily } from './services/teams.service';
 import 'dotenv/config';
 
 (async () => {
@@ -66,16 +67,18 @@ app.listen(PORT, async () => {
     console.error('Failed to initialize Supabase Storage:', err);
   }
 
-  // Test DB connection
-  prisma.$connect()
-    .then(() => console.log('Connected to PostgreSQL database'))
-    .catch((err: any) => {
-      console.error('Failed to connect to database:', err);
-      process.exit(1);
-    });
-
-  // Start cron job for cleaning up expired invitations
-  startCleanupCron();
+  // Test DB connection before starting critical services
+  try {
+    await prisma.$connect();
+    console.log('✅ Connected to PostgreSQL database');
+    
+    // Only start cron job if database connection succeeds
+    startCleanupCron();
+  } catch (err: any) {
+    console.error('❌ Failed to connect to database:', err.message || err);
+    console.error('Please verify your DATABASE_URL credentials in .env');
+    console.warn('⚠️  Server running but database-dependent services are disabled');
+  }
 
   // Start cron job for processing subscription renewals (daily at 8 AM UTC)
   scheduleSubscriptionRenewalsCron();
@@ -88,12 +91,20 @@ app.listen(PORT, async () => {
     console.error('Failed to process pending purchases on startup:', err);
   }
 
+  // Reconcile paid extra seats on startup
+  try {
+    const result = await processTeamPaidExtraSeatsDaily();
+    console.log(`[TEAM_SEATS] Startup reconciliation complete: ${result.processed} processed, ${result.failed} failed`);
+  } catch (err) {
+    console.error('[TEAM_SEATS] Startup reconciliation failed:', err);
+  }
+
   // Schedule pending purchase processing every 5 minutes
   setInterval(() => {
     processPendingPurchases().catch(err => {
       console.error('Scheduled pending purchase processing failed:', err);
     });
-  }, 5 * 60 * 1000); // 5 minutes
+  }, 60 * 1000); // 5 minutes
 });
 
 /**
@@ -128,6 +139,12 @@ function scheduleSubscriptionRenewalsCron() {
         .then((result) => {
           console.log(
             `[CRON] Subscription renewal completed: ${result.processed} processed, ${result.successful} successful, ${result.failed} failed`
+          );
+          return processTeamPaidExtraSeatsDaily();
+        })
+        .then((seatResult) => {
+          console.log(
+            `[CRON] Team paid-seat reconciliation completed: ${seatResult.processed} processed, ${seatResult.failed} failed`
           );
         })
         .catch((err) => {

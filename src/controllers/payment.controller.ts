@@ -1,8 +1,9 @@
 import { Request, Response } from "express";
-import { constructStripeEvent, createCheckoutSession, handleCheckoutCompleted, handleInvoicePaid, getSessionDetails, processPendingPurchases } from "../services/payment.service";
+import { constructStripeEvent, createCheckoutSession, handleCheckoutCompleted, handleInvoicePaid, getSessionDetails, processPendingPurchases, sendContactSalesInquiry } from "../services/payment.service";
 import Stripe from "stripe";
 import prisma from "../dbConnection";
 import { loggingService } from "../services/logging.service";
+import { DEMO_LIMIT, isNewMonth } from "../utils/demoTracking";
 
 export async function createCheckoutSessionHandler(req: Request, res: Response) {
     try {
@@ -11,7 +12,7 @@ export async function createCheckoutSessionHandler(req: Request, res: Response) 
             return res.status(401).json({ message: "Unauthorized" });
         }
 
-        const { productKey, purchaseFor, teamId, quantity, confirmPlanChange } = req.body;
+        const { productKey, purchaseFor, teamId, quantity, confirmPlanChange, seatAutoRenew } = req.body;
         if (!productKey || !purchaseFor) {
             return res.status(400).json({ message: "Product key and purchase type are required" });
         }
@@ -23,6 +24,7 @@ export async function createCheckoutSessionHandler(req: Request, res: Response) 
             teamId,
             quantity,
             confirmPlanChange,
+            seatAutoRenew,
         });
 
         return res.status(200).json(result);
@@ -47,11 +49,6 @@ export async function getCreditsHandler(req: Request, res: Response) {
             return res.status(401).json({ message: "Unauthorized" });
         }
 
-        // Get user's personal credit balance
-        const creditBalance = await prisma.user_credit_balance.findUnique({
-            where: { user_id: userId }
-        });
-
         // Get user's purchase history
         const purchases = await prisma.user_credit_purchase.findMany({
             where: { user_id: userId },
@@ -59,6 +56,58 @@ export async function getCreditsHandler(req: Request, res: Response) {
             orderBy: { completed_at: 'desc' },
             take: 10
         });
+
+        let creditBalance = await prisma.user_credit_balance.findUnique({
+            where: { user_id: userId }
+        });
+
+        // One-time self-heal: if user already purchased credits but still has demo credits,
+        // convert remaining demo credits into paid wallet credits.
+        const hasCompletedPurchase = purchases.some((purchase) => purchase.status === "completed");
+        if (hasCompletedPurchase) {
+            const now = new Date();
+
+            const [userTracking, guestTracking] = await Promise.all([
+                prisma.user_demo_tracking.findUnique({ where: { user_id: userId } }),
+                prisma.guest_tracking.findFirst({ where: { userId } }),
+            ]);
+
+            const userUsage = userTracking
+                ? (isNewMonth(userTracking.last_reset_at, now) ? 0 : userTracking.uploads_count)
+                : 0;
+            const guestUsage = guestTracking
+                ? (isNewMonth(guestTracking.last_used_at, now) ? 0 : guestTracking.uploads_count)
+                : 0;
+
+            const unifiedUsage = Math.max(userUsage, guestUsage);
+            const remainingDemoCredits = Math.max(0, DEMO_LIMIT - unifiedUsage);
+
+            if (remainingDemoCredits > 0) {
+                await prisma.$transaction([
+                    prisma.user_credit_balance.upsert({
+                        where: { user_id: userId },
+                        create: { user_id: userId, balance: remainingDemoCredits },
+                        update: { balance: { increment: remainingDemoCredits } },
+                    }),
+                    prisma.user_demo_tracking.upsert({
+                        where: { user_id: userId },
+                        create: {
+                            user_id: userId,
+                            uploads_count: DEMO_LIMIT,
+                            last_reset_at: now,
+                        },
+                        update: {
+                            uploads_count: DEMO_LIMIT,
+                            last_reset_at: now,
+                        },
+                    }),
+                ]);
+
+                creditBalance = await prisma.user_credit_balance.findUnique({
+                    where: { user_id: userId }
+                });
+            }
+        }
 
         return res.status(200).json({
             success: true,
@@ -320,6 +369,30 @@ export async function testPaymentLogHandler(req: Request, res: Response) {
             success: false,
             message: error.message || "Failed to log test payment",
             error: error.toString()
+        });
+    }
+}
+
+export async function contactSalesHandler(req: Request, res: Response) {
+    try {
+        const { email, message } = req.body;
+        if (!email || typeof email !== "string") {
+            return res.status(400).json({ message: "Email is required" });
+        }
+
+        await sendContactSalesInquiry({
+            email,
+            message: typeof message === "string" ? message : undefined,
+            userId: req.user?.id,
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: "Your request has been sent to sales.",
+        });
+    } catch (error: any) {
+        return res.status(400).json({
+            message: error?.message || "Failed to send contact sales request",
         });
     }
 }
