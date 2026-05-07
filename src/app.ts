@@ -16,6 +16,7 @@ import subscriptionRoutes from './api/subscription.route'
 import paymentHistoryRoutes from './api/payment-history.route'
 import debugRoutes from './api/debug.route'
 import photographerRoutes from './api/photographer.route'
+import consentsRoute from './api/consents.route'
 import { stripeWebhookHandler } from "./controllers/payment.controller";
 import { errorHandler } from "./middlewares/errorHandler";
 import { zodErrorHandler } from "./middlewares/zodErrorHandler";
@@ -101,6 +102,7 @@ app.use('/api/projects', projectsRoute)
 app.use('/api/payment', paymentRoutes)
 app.use('/api/payments', paymentHistoryRoutes)
 app.use('/api/admin/logs', adminLogsRoute)
+app.use('/api/consents', consentsRoute)
 app.use('/api/legal-documents', legalDocumentsRoute)
 app.use('/api/subscriptions', subscriptionRoutes)
 app.use('/debug', debugRoutes)

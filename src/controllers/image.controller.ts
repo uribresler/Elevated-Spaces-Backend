@@ -92,6 +92,60 @@ function toPublicImageUrl(rawPath: string, req: Request): string {
   return rawPath;
 }
 
+async function sanitizeProjectIdForUser({
+  projectId,
+  userId,
+}: {
+  projectId: string | null;
+  userId: string | null;
+}): Promise<string | null> {
+  if (!projectId || !userId) {
+    return null;
+  }
+
+  const project = await prisma.team_project.findUnique({
+    where: { id: projectId },
+    select: {
+      id: true,
+      team_id: true,
+      created_by_user_id: true,
+    },
+  });
+
+  if (!project) {
+    return null;
+  }
+
+  if (project.created_by_user_id === userId) {
+    return project.id;
+  }
+
+  if (!project.team_id) {
+    return null;
+  }
+
+  const [membership, ownerTeam] = await Promise.all([
+    prisma.team_membership.findFirst({
+      where: {
+        team_id: project.team_id,
+        user_id: userId,
+        deleted_at: null,
+      },
+      select: { id: true },
+    }),
+    prisma.teams.findFirst({
+      where: {
+        id: project.team_id,
+        owner_id: userId,
+        deleted_at: null,
+      },
+      select: { id: true },
+    }),
+  ]);
+
+  return membership || ownerTeam ? project.id : null;
+}
+
 type MultiRunOriginalSummary = {
   originalIndex: number;
   originalFile: string;
@@ -522,6 +576,8 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     projectId = null;
   }
 
+  projectId = await sanitizeProjectIdForUser({ projectId, userId });
+
   // If logged in and teamId provided, validate team access and credits
   if (userId && teamId) {
     // Check if user is team owner
@@ -902,6 +958,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
           storage: "supabase",
           demoCount: isDemo ? unifiedCount : undefined,
           demoLimit: isDemo ? DEMO_LIMIT : undefined,
+          remainingDemoCredits: isDemo ? Math.max(0, DEMO_LIMIT - unifiedCount) : undefined,
         })}\n\n`);
 
         hasSuccessfulGeneration = true;
@@ -1386,6 +1443,7 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
         storage: "supabase",
         demoCount: isDemo ? unifiedCount : undefined,
         demoLimit: isDemo ? DEMO_LIMIT : undefined,
+        remainingDemoCredits: isDemo ? Math.max(0, DEMO_LIMIT - unifiedCount) : undefined,
       })}\n\n`);
       } catch (err) {
       logger(`[DUAL_MODEL] PHASE1_ERROR Gemini primary image failed: ${err}`);
@@ -1617,11 +1675,52 @@ export async function generateMultipleImages(
   }
 
   const VARIATIONS_PER_IMAGE = 3;
+  const MULTI_STAGE_BATCH_SIZE = 15;
   const wantsStream =
     req.query.stream === "1" ||
     (typeof req.headers.accept === "string" && req.headers.accept.includes("text/event-stream"));
 
   const userId = req.user.id;
+
+  // Determine if user is a demo user (has no purchased credits)
+  let isDemo = false;
+  let unifiedCount = 0;
+  try {
+    const personalCredits = await prisma.user_credit_balance.findUnique({
+      where: { user_id: userId }
+    });
+    const hasPersonalCredits = personalCredits && personalCredits.balance > 0;
+    const purchaseCount = await prisma.user_credit_purchase.count({
+      where: { user_id: userId, status: 'completed' }
+    });
+    const hasPurchasedCredits = purchaseCount > 0;
+
+    if (!hasPersonalCredits && !hasPurchasedCredits) {
+      isDemo = true;
+      // Get unified demo tracking for counting purposes
+      const fingerprint = resolveDemoFingerprint({
+        cookieDeviceId: req.cookies?.device_id,
+        headerFingerprint: req.headers['x-fingerprint'] as string | undefined,
+        ip: req.ip,
+      });
+      const tracking = await getUnifiedDemoTracking(userId, fingerprint, req.ip || '');
+      unifiedCount = tracking.unifiedCount;
+      
+      // Check if demo limit will be exceeded
+      if (isDemo && unifiedCount >= DEMO_LIMIT) {
+        res.status(403).json({
+          success: false,
+          error: {
+            code: 'DEMO_LIMIT_REACHED',
+            message: 'Demo limit reached. Please sign up or purchase credits to continue.',
+          },
+        });
+        return;
+      }
+    }
+  } catch (e) {
+    logger(`[MULTI-STAGE] Warning: Failed to check demo status: ${e}`);
+  }
   
   // Support both single style (for all images) and per-image styles
   const { roomType = "living-room", stagingStyle = "modern", prompt } = req.body;
@@ -1690,6 +1789,10 @@ export async function generateMultipleImages(
   if (!projectId || typeof projectId !== "string" || projectId.trim() === "" || projectId === "undefined" || projectId === "null") {
     projectId = null;
   }
+
+  projectId = await sanitizeProjectIdForUser({ projectId, userId });
+
+  projectId = await sanitizeProjectIdForUser({ projectId, userId });
 
   let originalsWithUrls: Array<{ file: Express.Multer.File; originalUrl: string }> = [];
   try {
@@ -1842,6 +1945,14 @@ export async function generateMultipleImages(
   });
 
   // Push jobs to queue
+  // PARALLEL PROCESSING STRATEGY:
+  // - All images added to queue simultaneously (no sequential batching)
+  // - Queue processes up to QUEUE_CONCURRENCY (15) images in parallel
+  // - Each image generates 3 variants using optimized full-set call (reduces API calls)
+  // - Variants within an image are parallelized (up to 3 concurrent at GEMINI_VARIATION_CONCURRENCY)
+  // - Rate limiter (18 calls/min) in burst mode allows up to 18 parallel API calls without pacing delays
+  // - Expected performance: 5 images with 3 variants each = 15 variants in ~45-50 seconds
+  // - Credit deduction: 5 images = 5 credits (NOT 15 for variants)
   imageQueue.reset();
   images.forEach((image, index) => {
     imageQueue.add({
@@ -1877,13 +1988,13 @@ export async function generateMultipleImages(
   const originalUrls = images.map((img) => img.original_image_url);
   const sentImageIds = new Set<string>();
   const expectedTotalVariants = creditsRequired * VARIATIONS_PER_IMAGE;
-  const waves = Math.ceil(creditsRequired / Math.max(1, QUEUE_CONCURRENCY));
-  const estimatedSeconds = Math.max(
-    20,
-    Math.ceil(waves * 22)
-  );
+  const waves = Math.ceil(creditsRequired / MULTI_STAGE_BATCH_SIZE);
+  const estimatedSeconds = Math.max(40, waves * 40);
   const runStartedAt = Date.now();
   const runId = `ms-${runStartedAt}-${userId.slice(0, 8)}`;
+  const MAX_RETRY_PASSES = Number(process.env.MULTI_STAGE_RETRY_PASSES || "1");
+  let retryPassCount = 0;
+  let streamClosed = false;
 
   logger(
     `[MULTI-STAGE][${runId}] START user=${userId} images=${images.length} expectedVariants=${expectedTotalVariants} queueConcurrency=${QUEUE_CONCURRENCY} est=${estimatedSeconds}s`
@@ -1897,11 +2008,19 @@ export async function generateMultipleImages(
       estimatedSeconds,
       creditsUsed: creditsRequired,
       imageIds: images.map((img) => img.id),
+      isDemo,
+      demoCount: isDemo ? unifiedCount : undefined,
+      demoLimit: isDemo ? DEMO_LIMIT : undefined,
+      remainingDemoCredits: isDemo ? Math.max(0, DEMO_LIMIT - unifiedCount) : undefined,
     })}\n\n`
   );
 
   let monitorCheckCount = 0;
   const interval = setInterval(async () => {
+    if (streamClosed) {
+      return;
+    }
+
     try {
       const rows = await prisma.image.findMany({
         where: {
@@ -1940,6 +2059,11 @@ export async function generateMultipleImages(
               `[MULTI-STAGE][${runId}] PROGRESS ${originalIndex + 1}/${originalUrls.length} => ${sentImageIds.size}/${expectedTotalVariants} total`
             );
 
+            // Update demo count on first variant stream from each image
+            if (variationIndex === 0 && isDemo) {
+              unifiedCount += 1;
+            }
+
             res.write(
               `event: image\ndata: ${JSON.stringify({
                 imageId: row.id,
@@ -1951,6 +2075,10 @@ export async function generateMultipleImages(
                 stagingStyle,
                 prompt: prompt || null,
                 storage: "supabase",
+                isDemo,
+                demoCount: isDemo ? unifiedCount : undefined,
+                demoLimit: isDemo ? DEMO_LIMIT : undefined,
+                remainingDemoCredits: isDemo ? Math.max(0, DEMO_LIMIT - unifiedCount) : undefined,
               })}\n\n`
             );
           }
@@ -1978,7 +2106,65 @@ export async function generateMultipleImages(
       // Only end stream when: (1) no base images are processing AND (2) queue is idle
       const shouldEndStream = !hasProcessingBase && queueStatus.isIdle;
 
+      // One automatic recovery pass for originals that are still missing variants.
+      if (shouldEndStream && retryPassCount < MAX_RETRY_PASSES) {
+        const originalsNeedingRetry = originalUrls
+          .map((originalUrl, originalIndex) => {
+            const list = (byOriginal.get(originalUrl) || []).sort(
+              (a, b) => a.created_at.getTime() - b.created_at.getTime()
+            );
+            const completedCount = list.filter(
+              (row) => row.status === image_status.COMPLETED && Boolean(row.staged_image_url)
+            ).length;
+            return {
+              originalIndex,
+              completedCount,
+            };
+          })
+          .filter((entry) => entry.completedCount < VARIATIONS_PER_IMAGE);
+
+        if (originalsNeedingRetry.length > 0) {
+          retryPassCount += 1;
+
+          // Remove already-streamed IDs for retry targets so progress reflects replacement outputs.
+          for (const { originalIndex } of originalsNeedingRetry) {
+            const originalUrl = originalUrls[originalIndex];
+            const existingRows = byOriginal.get(originalUrl) || [];
+            for (const row of existingRows) {
+              sentImageIds.delete(row.id);
+            }
+          }
+
+          imageQueue.reset();
+          originalsNeedingRetry.forEach(({ originalIndex }) => {
+            imageQueue.add({
+              imageId: images[originalIndex].id,
+              originalPath: originalsWithUrls[originalIndex].file.path,
+              roomType: roomTypesList[originalIndex] || roomType,
+              stagingStyle: stagingStylesList[originalIndex] || stagingStyle,
+              customPrompt: prompt,
+            });
+          });
+
+          const retryQueueStatus = imageQueue.getStatus();
+          logger(
+            `[MULTI-STAGE][${runId}] RETRY pass=${retryPassCount}/${MAX_RETRY_PASSES} originals=${originalsNeedingRetry.length} queue=${JSON.stringify(retryQueueStatus)}`
+          );
+
+          res.write(
+            `event: retry\ndata: ${JSON.stringify({
+              pass: retryPassCount,
+              maxPasses: MAX_RETRY_PASSES,
+              originals: originalsNeedingRetry.map((entry) => entry.originalIndex),
+            })}\n\n`
+          );
+
+          return;
+        }
+      }
+
       if (shouldEndStream) {
+        streamClosed = true;
         logger(
           `[MULTI-STAGE][${runId}] TERMINATING queue=${JSON.stringify(queueStatus)} baseProcessing=${hasProcessingBase}`
         );
@@ -2073,6 +2259,7 @@ export async function generateMultipleImages(
         res.end();
       }
     } catch (streamErr) {
+      streamClosed = true;
       clearInterval(interval);
       logger(
         `[MULTI-STAGE][${runId}] STREAM_ERROR ${streamErr instanceof Error ? streamErr.message : String(streamErr)}`
@@ -2088,6 +2275,7 @@ export async function generateMultipleImages(
   }, 700);
 
   req.on("close", () => {
+    streamClosed = true;
     clearInterval(interval);
   });
 }

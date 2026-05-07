@@ -18,9 +18,11 @@ class LoggingService {
     path: string;
     statusCode?: number;
     userId?: string;
+    userName?: string;
     userEmail?: string;
     userRole?: string;
     ip: string;
+    location?: string;
     userAgent?: string;
     requestBody?: any;
     responseTime?: number;
@@ -105,6 +107,7 @@ class LoggingService {
     limit?: number;
     method?: string;
     userId?: string;
+    search?: string;
     startDate?: Date;
     endDate?: Date;
     month?: string; // Format: YYYY-MM
@@ -126,6 +129,18 @@ class LoggingService {
       
       if (options.method) filter.method = options.method;
       if (options.userId) filter.userId = options.userId;
+      if (options.search?.trim()) {
+        const escaped = options.search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const searchRegex = new RegExp(escaped, "i");
+        filter.$or = [
+          { userName: searchRegex },
+          { userEmail: searchRegex },
+          { userId: searchRegex },
+          { path: searchRegex },
+          { ip: searchRegex },
+          { location: searchRegex },
+        ];
+      }
       if (options.startDate || options.endDate) {
         filter.timestamp = {};
         if (options.startDate) filter.timestamp.$gte = options.startDate;

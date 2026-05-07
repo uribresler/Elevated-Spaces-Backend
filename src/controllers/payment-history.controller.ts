@@ -719,9 +719,103 @@ export class PaymentHistoryController {
             const completed = purchases.filter((p) => p.status === "completed");
             const pending = purchases.filter((p) => p.status === "pending");
             const failed = purchases.filter((p) => p.status === "failed");
-            const active = purchases.filter(
+            const activeCandidates = purchases.filter(
                 (p) => p.autoRenewEnabled && !p.cancelledAt
             );
+            const active: typeof activeCandidates = [];
+
+            for (const purchase of activeCandidates) {
+                if (!purchase.stripe_session_id) {
+                    await prisma.user_credit_purchase.updateMany({
+                        where: {
+                            id: purchase.id,
+                            cancelledAt: null,
+                        },
+                        data: {
+                            autoRenewEnabled: false,
+                            cancelledAt: new Date(),
+                            cancellationReason: "Auto-synced: missing Stripe session id",
+                            nextRenewalDate: null,
+                        },
+                    });
+                    continue;
+                }
+
+                if (!stripe) {
+                    active.push(purchase);
+                    continue;
+                }
+
+                try {
+                    const session = await stripe.checkout.sessions.retrieve(purchase.stripe_session_id);
+                    const subscriptionId = typeof session.subscription === "string"
+                        ? session.subscription
+                        : session.subscription?.id;
+
+                    if (!subscriptionId) {
+                        await prisma.user_credit_purchase.updateMany({
+                            where: {
+                                id: purchase.id,
+                                cancelledAt: null,
+                            },
+                            data: {
+                                autoRenewEnabled: false,
+                                cancelledAt: new Date(),
+                                cancellationReason: "Auto-synced from Stripe: checkout has no subscription",
+                                nextRenewalDate: null,
+                            },
+                        });
+                        continue;
+                    }
+
+                    const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+                    const isStripeActive =
+                        subscription.status === "active" ||
+                        subscription.status === "trialing" ||
+                        subscription.status === "past_due";
+
+                    if (isStripeActive) {
+                        active.push(purchase);
+                        continue;
+                    }
+
+                    await prisma.user_credit_purchase.updateMany({
+                        where: {
+                            id: purchase.id,
+                            cancelledAt: null,
+                        },
+                        data: {
+                            autoRenewEnabled: false,
+                            cancelledAt: new Date(),
+                            cancellationReason: `Auto-synced from Stripe status: ${subscription.status}`,
+                            nextRenewalDate: null,
+                        },
+                    });
+                } catch (error: any) {
+                    const isMissingSubscription =
+                        error?.type === "StripeInvalidRequestError" &&
+                        error?.code === "resource_missing";
+
+                    if (isMissingSubscription) {
+                        await prisma.user_credit_purchase.updateMany({
+                            where: {
+                                id: purchase.id,
+                                cancelledAt: null,
+                            },
+                            data: {
+                                autoRenewEnabled: false,
+                                cancelledAt: new Date(),
+                                cancellationReason: "Auto-synced from Stripe: subscription not found",
+                                nextRenewalDate: null,
+                            },
+                        });
+                        continue;
+                    }
+
+                    // Fall back to DB state on transient Stripe failures.
+                    active.push(purchase);
+                }
+            }
             const cancelled = purchases.filter((p) => p.cancelledAt);
 
             const completedTeamPurchases = teamPurchases.filter((purchase) => purchase.status === "completed");

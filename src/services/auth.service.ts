@@ -115,7 +115,7 @@ export async function signupService({
   const token = jwt.sign({ userId: user.id, role: defaultRole.name }, JWT_SECRET, { expiresIn: "7d" });
   return {
     token,
-    user: { id: user.id, email: user.email, name: user.name, role: requestedRole === "PHOTOGRAPHER" ? "PHOTOGRAPHER" : defaultRole.name },
+    user: { id: user.id, email: user.email, name: user.name, role: requestedRole === "PHOTOGRAPHER" ? "PHOTOGRAPHER" : defaultRole.name, created_at: user.created_at },
     success: true,
   };
 }
@@ -162,8 +162,12 @@ export async function loginService({ email, password }: { email: string; passwor
     throw err;
   }
   const userWithRole = {
-    ...user,
+    id: user.id,
+    email: user.email,
+    name: user.name,
     role: userRole.role.name,
+    avatarUrl: user.avatar_url,
+    created_at: user.created_at,
   };
   const token = jwt.sign({ userId: user.id, role: userRole.role.name }, JWT_SECRET, { expiresIn: "7d" });
   return {
@@ -211,6 +215,7 @@ export async function updateProfileImageService({
       name: updatedUser.name,
       role: userRole?.role.name || "USER",
       avatar_url: updatedUser.avatar_url,
+      created_at: updatedUser.created_at,
     },
   };
 }
@@ -247,6 +252,7 @@ export async function deleteProfileImageService({ userId }: { userId: string }) 
       name: updatedUser.name,
       role: userRole?.role.name || "USER",
       avatar_url: updatedUser.avatar_url,
+      created_at: updatedUser.created_at,
     },
   };
 }

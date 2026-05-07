@@ -494,6 +494,17 @@ async function assertTeamSeatCapacityForAcceptance(teamId: string): Promise<void
     }
 }
 
+const TEAM_ROLE_ALIASES: Record<string, string> = {
+    TEAM_ADMIN: "ADMIN",
+    TEAM_AGENT: "MEMBER",
+    TEAM_PHOTOGRAPHER: "PHOTOGRAPHER",
+};
+
+function normalizeTeamRoleName(roleName: string) {
+    const normalized = roleName.trim().toUpperCase();
+    return TEAM_ROLE_ALIASES[normalized] || normalized;
+}
+
 const DEFAULT_TEAM_ROLE_DEFINITIONS: Record<string, { description: string; permissions: Record<string, boolean> }> = {
     TEAM_OWNER: {
         description: "Full control over the team",
@@ -508,7 +519,7 @@ const DEFAULT_TEAM_ROLE_DEFINITIONS: Record<string, { description: string; permi
             manage_wallet: true,
         },
     },
-    TEAM_ADMIN: {
+    ADMIN: {
         description: "Admin control over the team",
         permissions: {
             manage_team: true,
@@ -521,8 +532,8 @@ const DEFAULT_TEAM_ROLE_DEFINITIONS: Record<string, { description: string; permi
             manage_wallet: false,
         },
     },
-    TEAM_AGENT: {
-        description: "Agent role with project creation and invite permissions",
+    MEMBER: {
+        description: "Member role with project creation and invite permissions",
         permissions: {
             manage_team: false,
             manage_roles: false,
@@ -534,7 +545,7 @@ const DEFAULT_TEAM_ROLE_DEFINITIONS: Record<string, { description: string; permi
             manage_wallet: false,
         },
     },
-    TEAM_PHOTOGRAPHER: {
+    PHOTOGRAPHER: {
         description: "Photographer role with project access",
         permissions: {
             manage_team: false,
@@ -550,7 +561,7 @@ const DEFAULT_TEAM_ROLE_DEFINITIONS: Record<string, { description: string; permi
 };
 
 async function ensureDefaultTeamRole(roleName: string) {
-    const normalized = roleName.trim().toUpperCase();
+    const normalized = normalizeTeamRoleName(roleName);
     const def = DEFAULT_TEAM_ROLE_DEFINITIONS[normalized];
     if (!def) {
         throw new Error("Invalid team role");
@@ -720,7 +731,7 @@ async function getTeamAccess({
         throw new Error("You are not a member of this team");
     }
 
-    return { team, roleName: membership.role.name };
+    return { team, roleName: normalizeTeamRoleName(membership.role.name) };
 }
 
 async function assertEmailNotAlreadyPartOfTeam(teamId: string, email: string): Promise<void> {
@@ -763,11 +774,11 @@ async function assertEmailNotAlreadyPartOfTeam(teamId: string, email: string): P
 }
 
 function resolveInviteRoleName(roleName?: string) {
-    const normalized = roleName?.trim().toUpperCase();
-    const allowedRoles = ["TEAM_AGENT", "TEAM_PHOTOGRAPHER", "TEAM_ADMIN"];
+    const normalized = roleName ? normalizeTeamRoleName(roleName) : null;
+    const allowedRoles = ["MEMBER", "PHOTOGRAPHER", "ADMIN"];
 
     if (!normalized) {
-        return "TEAM_AGENT";
+        return "MEMBER";
     }
 
     if (!allowedRoles.includes(normalized)) {
@@ -778,20 +789,23 @@ function resolveInviteRoleName(roleName?: string) {
 }
 
 function canInviteRole(inviterRole: string, requestedRole: string) {
-    if (inviterRole === "TEAM_OWNER" || inviterRole === "TEAM_ADMIN") {
-        return requestedRole !== "TEAM_OWNER";
+    const normalizedInviterRole = normalizeTeamRoleName(inviterRole);
+    const normalizedRequestedRole = normalizeTeamRoleName(requestedRole);
+
+    if (normalizedInviterRole === "TEAM_OWNER" || normalizedInviterRole === "ADMIN") {
+        return normalizedRequestedRole !== "TEAM_OWNER";
     }
 
-    if (inviterRole === "TEAM_AGENT") {
-        return requestedRole === "TEAM_PHOTOGRAPHER";
+    if (normalizedInviterRole === "MEMBER") {
+        return normalizedRequestedRole === "PHOTOGRAPHER";
     }
 
     return false;
 }
 
 function normalizeAssignableRole(roleName: string) {
-    const normalized = roleName.trim().toUpperCase();
-    const allowedRoles = ["TEAM_ADMIN", "TEAM_AGENT", "TEAM_PHOTOGRAPHER"];
+    const normalized = normalizeTeamRoleName(roleName);
+    const allowedRoles = ["ADMIN", "MEMBER", "PHOTOGRAPHER"];
     if (!allowedRoles.includes(normalized)) {
         throw new Error("Invalid team role assignment");
     }
@@ -800,12 +814,15 @@ function normalizeAssignableRole(roleName: string) {
 }
 
 function canAssignRole(assignerRole: string, requestedRole: string) {
-    if (assignerRole === "TEAM_OWNER") {
+    const normalizedAssignerRole = normalizeTeamRoleName(assignerRole);
+    const normalizedRequestedRole = normalizeTeamRoleName(requestedRole);
+
+    if (normalizedAssignerRole === "TEAM_OWNER") {
         return true;
     }
 
-    if (assignerRole === "TEAM_ADMIN") {
-        return ["TEAM_PHOTOGRAPHER", "TEAM_AGENT"].includes(requestedRole);
+    if (normalizedAssignerRole === "ADMIN") {
+        return ["PHOTOGRAPHER", "MEMBER"].includes(normalizedRequestedRole);
     }
 
     return false;
@@ -932,40 +949,38 @@ export async function invitationService({ email, userId, subject, text, teamId, 
         expiresAt: invite.expires_at,
     });
 
-    // Send email in background without awaiting
-    setImmediate(async () => {
-        try {
-            await sendEmail({
-                from: existing.email,
-                senderName: existing.name ?? "Elevated Spaces Team",
-                replyTo: existing.email,
-                to: normalizedEmail,
-                subject: subject ?? `Join ${team_exists.name} - Team Invitation`,
-                text: text ?? emailTemplate.text,
-                html: emailTemplate.html,
-            });
+    // Await sendEmail so serverless environments don't terminate the task
+    try {
+        await sendEmail({
+            from: existing.email,
+            senderName: existing.name ?? "Elevated Spaces Team",
+            replyTo: existing.email,
+            to: normalizedEmail,
+            subject: subject ?? `Join ${team_exists.name} - Team Invitation`,
+            text: text ?? emailTemplate.text,
+            html: emailTemplate.html,
+        });
 
-            // Update status to PENDING if email sent successfully
-            await prisma.team_invites.update({
-                where: { id: invite.id },
-                data: { status: invite_status.PENDING },
-            });
+        // Update status to PENDING if email sent successfully
+        await prisma.team_invites.update({
+            where: { id: invite.id },
+            data: { status: invite_status.PENDING },
+        });
 
-            console.log(`✅ Invitation email sent to ${email}`);
-        } catch (err: any) {
-            console.error("❌ Email sending failed:", {
-                error: err.message,
-                email: normalizedEmail,
-                inviteId: invite.id,
-            });
+        console.log(`✅ Invitation email sent to ${normalizedEmail}`);
+    } catch (err: any) {
+        console.error("❌ Email sending failed:", {
+            error: err?.message ?? String(err),
+            email: normalizedEmail,
+            inviteId: invite.id,
+        });
 
-            // Mark as failed in database
-            await prisma.team_invites.update({
-                where: { id: invite.id },
-                data: { status: invite_status.FAILED },
-            }).catch(console.error);
-        }
-    });
+        // Mark as failed in database
+        await prisma.team_invites.update({
+            where: { id: invite.id },
+            data: { status: invite_status.FAILED },
+        }).catch(console.error);
+    }
 
     // Return immediately without waiting for email
     return {
@@ -1443,7 +1458,7 @@ export async function cancelInvitationService({ inviteId, userId }: { inviteId: 
         include: { role: true }
     });
 
-    const isTeamAdmin = membership?.role?.name === "TEAM_ADMIN";
+    const isTeamAdmin = normalizeTeamRoleName(membership?.role?.name || "") === "ADMIN";
 
     if (!isTeamOwner && !isTeamAdmin) {
         throw new Error("Only team owner or admin can cancel invitations");

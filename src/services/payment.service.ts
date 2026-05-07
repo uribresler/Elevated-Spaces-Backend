@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import prisma from "../dbConnection";
 import { sendEmail } from "../config/mail.config";
 import { loggingService } from "./logging.service";
+import { InvoiceService } from "./invoice.service";
 import { DEMO_LIMIT, isNewMonth } from "../utils/demoTracking";
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
@@ -46,6 +47,115 @@ const PLAN_PRODUCT_KEYS = new Set([
     "team_annual",
 ]);
 
+async function debugSendStripeInvoice(invoiceId: string, scope: string) {
+    console.error(`[WEBHOOK][${scope}] Preparing to send Stripe invoice email`, {
+        invoiceId,
+        hasStripeInvoicesApi: !!stripe.invoices,
+        hasSendInvoiceMethod: typeof (stripe.invoices as any)?.sendInvoice === 'function',
+    });
+
+    try {
+        if (!stripe.invoices || typeof (stripe.invoices as any).sendInvoice !== 'function') {
+            console.error(`[WEBHOOK][${scope}] stripe.invoices.sendInvoice is not available on this SDK version`);
+            return { success: false, reason: 'sendInvoice not available' };
+        }
+
+        // @ts-ignore - Stripe SDK version differences may not expose a typed sendInvoice method.
+        const response = await (stripe.invoices as any).sendInvoice(invoiceId);
+
+        console.error(`[WEBHOOK][${scope}] Stripe invoice send request completed`, {
+            invoiceId,
+            responseType: typeof response,
+            responseKeys: response && typeof response === 'object' ? Object.keys(response).slice(0, 25) : null,
+            responseId: response?.id,
+            responseStatus: response?.status,
+            responseNumber: response?.number,
+            responseHostedInvoiceUrl: response?.hosted_invoice_url,
+            responseInvoicePdf: response?.invoice_pdf,
+            responseCustomer: response?.customer,
+        });
+
+        return { success: true, response };
+    } catch (error: any) {
+        console.error(`[WEBHOOK][${scope}] Failed to send Stripe invoice email`, {
+            invoiceId,
+            message: error?.message,
+            code: error?.code,
+            statusCode: error?.statusCode,
+            requestId: error?.requestId,
+            rawType: error?.type,
+            rawDeclineCode: error?.decline_code,
+            rawParam: error?.param,
+        });
+
+        return { success: false, error };
+    }
+}
+
+async function sendCustomSubscriptionInvoiceEmail(params: {
+    to: string;
+    userName: string;
+    packageName: string;
+    amount: number;
+    invoiceId: string;
+    renewalNumber: number;
+    issueDate?: Date;
+    dueDate?: Date;
+    invoicePdfUrl?: string | null;
+    hostedInvoiceUrl?: string | null;
+}) {
+    const {
+        to,
+        userName,
+        packageName,
+        amount,
+        invoiceId,
+        renewalNumber,
+        issueDate = new Date(),
+        dueDate = new Date(),
+        invoicePdfUrl,
+        hostedInvoiceUrl,
+    } = params;
+
+    const invoiceHTML = InvoiceService.generateInvoiceHTML({
+        invoiceId,
+        subscriptionId: invoiceId,
+        userId: "",
+        packageName,
+        credits: 0,
+        amount,
+        currency: "usd",
+        issueDate,
+        dueDate,
+        renewalNumber,
+        userName,
+        userEmail: to,
+        companyName: "Elevated Spaces",
+    });
+
+    const extraLinks = [
+        hostedInvoiceUrl ? `<p><strong>Stripe invoice:</strong> <a href="${hostedInvoiceUrl}">${hostedInvoiceUrl}</a></p>` : "",
+        invoicePdfUrl ? `<p><strong>Stripe PDF:</strong> <a href="${invoicePdfUrl}">${invoicePdfUrl}</a></p>` : "",
+    ].filter(Boolean).join("");
+
+    await sendEmail({
+        from: "noreply@elevatedspaces.com",
+        senderName: "Elevated Spaces",
+        to,
+        subject: `Invoice #${invoiceId} - ${packageName} Subscription Renewal`,
+        text: [
+            `Hi ${userName},`,
+            "",
+            `Your ${packageName} subscription renewal invoice for $${amount.toFixed(2)} is ready.`,
+            hostedInvoiceUrl ? `Stripe invoice: ${hostedInvoiceUrl}` : "",
+            invoicePdfUrl ? `Stripe PDF: ${invoicePdfUrl}` : "",
+            "",
+            "Thank you for continuing with Elevated Spaces!",
+        ].filter(Boolean).join("\n"),
+        html: `${invoiceHTML}${extraLinks}`,
+    });
+}
+
 function getPlanTierPriority(productKey?: string | null): number {
     switch (productKey) {
         case "starter":
@@ -79,6 +189,23 @@ export type ProductKey =
     | "pro_extra_user_seat"
     | "team_extra_user_seat";
 
+const PRODUCT_KEY_ALIASES: Record<string, ProductKey> = {
+    starterannual: "starter_annual",
+    proannual: "pro_annual",
+    teamannual: "team_annual",
+    "starter-annual": "starter_annual",
+    "pro-annual": "pro_annual",
+    "team-annual": "team_annual",
+};
+
+function normalizeProductKey(productKey: string): string {
+    const normalized = (productKey || "").trim().toLowerCase();
+    if (PRODUCT_KEY_ALIASES[normalized]) {
+        return PRODUCT_KEY_ALIASES[normalized];
+    }
+    return normalized;
+}
+
 const PRODUCT_CATALOG: Record<ProductKey, {
     name: string;
     type: "subscription" | "one_time";
@@ -104,15 +231,27 @@ const PRODUCT_CATALOG: Record<ProductKey, {
 };
 
 function getProductConfig(productKey: string) {
-    const config = PRODUCT_CATALOG[productKey as ProductKey];
+    const normalizedProductKey = normalizeProductKey(productKey);
+    const config = PRODUCT_CATALOG[normalizedProductKey as ProductKey];
     if (!config) {
-        throw new Error("Invalid product selection");
+        console.error("❌ Product not found in catalog:", {
+            requestedKey: productKey,
+            normalizedProductKey,
+            availableKeys: Object.keys(PRODUCT_CATALOG),
+        });
+        throw new Error(`Invalid product selection: ${productKey} not found. Available products: ${Object.keys(PRODUCT_CATALOG).join(", ")}`);
     }
     return config;
 }
 
 function toCents(amountUsd: number) {
     return Math.round(amountUsd * 100);
+}
+
+function calculateNextRenewalDate(baseDate: Date = new Date()): Date {
+    const nextRenewalDate = new Date(baseDate);
+    nextRenewalDate.setMonth(nextRenewalDate.getMonth() + 1);
+    return nextRenewalDate;
 }
 
 function calcCredits(config: ReturnType<typeof getProductConfig>, quantity: number) {
@@ -439,6 +578,7 @@ async function ensureCreditPackage({
 export async function createCheckoutSession({
     userId,
     productKey,
+    uiUnitAmountUsd,
     purchaseFor,
     teamId,
     quantity,
@@ -447,19 +587,21 @@ export async function createCheckoutSession({
 }: {
     userId: string;
     productKey: string;
+    uiUnitAmountUsd?: number;
     purchaseFor: PurchaseFor;
     teamId?: string;
     quantity?: number;
     confirmPlanChange?: boolean;
     seatAutoRenew?: boolean;
 }) {
-    const isSubscriptionTopUp = productKey === "subscription_topup";
-    const config = isSubscriptionTopUp ? null : getProductConfig(productKey);
+    const normalizedProductKey = normalizeProductKey(productKey);
+    const isSubscriptionTopUp = normalizedProductKey === "subscription_topup";
+    const config = isSubscriptionTopUp ? null : getProductConfig(normalizedProductKey);
     if (purchaseFor !== "individual" && purchaseFor !== "team") {
         throw new Error("Invalid purchase type");
     }
     const safeQuantity = Math.max(1, Math.min(quantity || 1, 1000));
-    const isSeatAddon = productKey === "pro_extra_user_seat" || productKey === "team_extra_user_seat";
+    const isSeatAddon = normalizedProductKey === "pro_extra_user_seat" || normalizedProductKey === "team_extra_user_seat";
     const shouldAutoRenewSeat = seatAutoRenew !== false;
 
     if (!isSubscriptionTopUp && config!.type === "subscription" && safeQuantity !== 1) {
@@ -503,15 +645,15 @@ export async function createCheckoutSession({
 
         const activePlanKey = activePlan.metadata?.productKey;
         const validForPlan =
-            (productKey === "pro_extra_user_seat" && (activePlanKey === "pro" || activePlanKey === "pro_annual")) ||
-            (productKey === "team_extra_user_seat" && (activePlanKey === "team" || activePlanKey === "team_annual"));
+            (normalizedProductKey === "pro_extra_user_seat" && (activePlanKey === "pro" || activePlanKey === "pro_annual")) ||
+            (normalizedProductKey === "team_extra_user_seat" && (activePlanKey === "team" || activePlanKey === "team_annual"));
 
         if (!validForPlan) {
             throw new Error("Selected extra user seat add-on does not match your active team plan");
         }
     }
 
-    if (productKey === "furnishing_addon") {
+    if (normalizedProductKey === "furnishing_addon") {
         const hasSubscriptionHistory = await hasAnyPlanSubscriptionHistoryForScope({
             customerId,
             purchaseFor,
@@ -552,7 +694,7 @@ export async function createCheckoutSession({
     let productName = "";
 
     const metadata: Record<string, string> = {
-        productKey,
+        productKey: normalizedProductKey,
         purchaseFor,
         userId,
         quantity: String(safeQuantity),
@@ -598,7 +740,7 @@ export async function createCheckoutSession({
         productName = config!.name;
         metadata.productType = config!.type;
 
-        if (productKey === "furnishing_addon") {
+        if (normalizedProductKey === "furnishing_addon") {
             metadata.productCategory = "addon";
         }
     }
@@ -621,6 +763,22 @@ export async function createCheckoutSession({
     }
 
     const isSubscriptionMode = !isSubscriptionTopUp && config!.type === "subscription";
+    
+    const safeUiUnitAmountUsd = typeof uiUnitAmountUsd === "number" && Number.isFinite(uiUnitAmountUsd) && uiUnitAmountUsd > 0
+        ? uiUnitAmountUsd
+        : null;
+    // Only override unitAmount for one-time purchases, NOT for subscriptions
+    // Subscriptions must use the catalog prices to ensure correct recurring amounts
+    const isOneTimeNonPlanPurchase = safeUiUnitAmountUsd && !isSubscriptionTopUp && !isSubscriptionMode && 
+        !(normalizedProductKey === "starter" || normalizedProductKey === "pro" || normalizedProductKey === "team" || 
+          normalizedProductKey === "starter_annual" || normalizedProductKey === "pro_annual" || normalizedProductKey === "team_annual" ||
+          normalizedProductKey === "pro_extra_user_seat" || normalizedProductKey === "team_extra_user_seat");
+    
+    if (isOneTimeNonPlanPurchase) {
+        unitAmount = toCents(safeUiUnitAmountUsd);
+        totalAmount = unitAmount * safeQuantity;
+    }
+    const shouldCreateStripeInvoice = !isSubscriptionMode && totalAmount > 0;
     const session = await stripe.checkout.sessions.create({
         mode: isSubscriptionMode ? "subscription" : "payment",
         customer: customerId,
@@ -638,6 +796,7 @@ export async function createCheckoutSession({
             },
         ],
         metadata,
+        invoice_creation: shouldCreateStripeInvoice ? { enabled: true } : undefined,
         subscription_data: isSubscriptionMode ? {
             metadata,
             ...(isSeatAddon && !shouldAutoRenewSeat ? { cancel_at_period_end: true } : {}),
@@ -708,10 +867,18 @@ function applyCreditsToTeam(teamId: string, credits: number) {
 export async function sendContactSalesInquiry({
     email,
     message,
+    companyName,
+    teamSize,
+    billingPreference,
+    phone,
     userId,
 }: {
     email: string;
     message?: string;
+    companyName?: string;
+    teamSize?: string;
+    billingPreference?: string;
+    phone?: string;
     userId?: string;
 }) {
     const senderEmail = (email || "").trim();
@@ -721,6 +888,10 @@ export async function sendContactSalesInquiry({
 
     const SALES_CONTACT_EMAIL = process.env.SALES_CONTACT_EMAIL || "elevatespacesai@gmail.com";
     const safeMessage = (message || "").trim();
+    const safeCompanyName = (companyName || "").trim();
+    const safeTeamSize = (teamSize || "").trim();
+    const safeBillingPreference = (billingPreference || "").trim();
+    const safePhone = (phone || "").trim();
     const submittedAt = new Date().toISOString();
 
     const subject = `Enterprise plan inquiry${userId ? ` (user: ${userId})` : ""}`;
@@ -729,6 +900,10 @@ export async function sendContactSalesInquiry({
         `Submitted at: ${submittedAt}`,
         `User ID: ${userId || "N/A"}`,
         `Email: ${senderEmail}`,
+        `Company: ${safeCompanyName || "N/A"}`,
+        `Team Size: ${safeTeamSize || "N/A"}`,
+        `Billing Preference: ${safeBillingPreference || "N/A"}`,
+        `Phone: ${safePhone || "N/A"}`,
         "",
         "Message:",
         safeMessage || "Please contact me about enterprise pricing.",
@@ -739,6 +914,10 @@ export async function sendContactSalesInquiry({
         <p><strong>Submitted at:</strong> ${submittedAt}</p>
         <p><strong>User ID:</strong> ${userId || "N/A"}</p>
         <p><strong>Email:</strong> ${senderEmail}</p>
+        <p><strong>Company:</strong> ${safeCompanyName || "N/A"}</p>
+        <p><strong>Team Size:</strong> ${safeTeamSize || "N/A"}</p>
+        <p><strong>Billing Preference:</strong> ${safeBillingPreference || "N/A"}</p>
+        <p><strong>Phone:</strong> ${safePhone || "N/A"}</p>
         <p><strong>Message:</strong></p>
         <p>${(safeMessage || "Please contact me about enterprise pricing.").replace(/\n/g, "<br />")}</p>
     `;
@@ -891,6 +1070,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
 
     const metadata = session.metadata || {};
     const productKey = metadata.productKey;
+    const normalizedProductKey = normalizeProductKey(String(productKey || ""));
     const isSeatAddon = productKey === "pro_extra_user_seat" || productKey === "team_extra_user_seat";
     const purchaseFor = metadata.purchaseFor as PurchaseFor | undefined;
     const userId = metadata.userId;
@@ -954,17 +1134,25 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
         throw new Error("Amount mismatch for checkout session");
     }
 
+    const detailedSession = await stripe.checkout.sessions.retrieve(session.id, {
+        expand: ["invoice"],
+    });
+    const detailedInvoice = typeof detailedSession.invoice === "string" ? null : detailedSession.invoice;
+    const stripeInvoicePdfUrl = detailedInvoice?.invoice_pdf || null;
+    const stripeInvoiceHostedUrl = detailedInvoice?.hosted_invoice_url || null;
+
     let userEmail: string | undefined = undefined;
     let userName: string | undefined = undefined;
+    const isSubscriptionPlanPurchase =
+        session.mode === "subscription" &&
+        (PLAN_PRODUCT_KEYS.has(normalizedProductKey as ProductKey) || isSeatAddon);
+    const subscriptionId = typeof session.subscription === "string"
+        ? session.subscription
+        : session.subscription?.id;
     if (purchaseFor === "team") {
         if (!teamId) {
             throw new Error("Team ID missing in metadata");
         }
-
-        // Extract subscription ID from session for subscription mode
-        const subscriptionId = typeof session.subscription === "string" 
-            ? session.subscription 
-            : session.subscription?.id;
 
         const existing = await prisma.team_purchase.findFirst({
             where: { stripe_session_id: session.id },
@@ -1061,8 +1249,9 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                 // const nextRenewalDate = new Date();
                 // nextRenewalDate.setMonth(nextRenewalDate.getMonth() + 1);
 
-                const nextRenewalDate = new Date();
-                nextRenewalDate.setMinutes(nextRenewalDate.getMinutes() + 1);
+                const nextRenewalDate = isSubscriptionPlanPurchase
+                    ? calculateNextRenewalDate(new Date())
+                    : null;
 
                 operations.push(
                     prisma.user_credit_purchase.create({
@@ -1073,16 +1262,18 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                             price_usd: (session.amount_total || 0) / 100,
                             status: "completed",
                             stripe_session_id: session.id,
+                            stripe_subscription_id: isSubscriptionPlanPurchase ? subscriptionId : null,
                             completed_at: new Date(),
-                            autoRenewEnabled: true,
-                            nextRenewalDate: nextRenewalDate,
+                            autoRenewEnabled: isSubscriptionPlanPurchase,
+                            nextRenewalDate,
                             renewalCount: 0,
                         },
                     })
                 );
             } else {
-                const nextRenewalDate = new Date();
-                nextRenewalDate.setMinutes(nextRenewalDate.getMinutes() + 1);
+                const nextRenewalDate = isSubscriptionPlanPurchase
+                    ? calculateNextRenewalDate(new Date())
+                    : null;
 
                 const completionResult = await prisma.user_credit_purchase.updateMany({
                     where: {
@@ -1092,8 +1283,9 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                     data: {
                         status: "completed",
                         completed_at: new Date(),
-                        autoRenewEnabled: true,
-                        nextRenewalDate: nextRenewalDate,
+                        stripe_subscription_id: isSubscriptionPlanPurchase ? subscriptionId : null,
+                        autoRenewEnabled: isSubscriptionPlanPurchase,
+                        nextRenewalDate,
                     },
                 });
 
@@ -1126,6 +1318,15 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                         update: {
                             uploads_count: DEMO_LIMIT,
                             last_reset_at: new Date(),
+                        },
+                    })
+                );
+                operations.push(
+                    prisma.guest_tracking.updateMany({
+                        where: { userId },
+                        data: {
+                            uploads_count: DEMO_LIMIT,
+                            last_used_at: new Date(),
                         },
                     })
                 );
@@ -1206,7 +1407,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
     }
 
     // Send receipt email after successful payment processing
-    if (userEmail) {
+    if (userEmail && session.mode !== "subscription") {
         let emailSent = false;
         let emailError: string | undefined = undefined;
         let emailSentAt: Date | undefined = undefined;
@@ -1222,9 +1423,27 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                 from: "hello@elevatespacesai.com",
                 senderName: "Elevated Spaces",
                 to: userEmail,
-                subject: "Your Payment Receipt - Elevated Spaces",
-                text: `Thank you for your payment!\n\nProduct: ${productName}\nCredits: ${credits}\nAmount Paid: $${((session.amount_total || 0) / 100).toFixed(2)}\n\nIf you have any questions, contact support@elevatespacesai.com.`,
-                html: `<h2>Thank you for your payment!</h2><p><b>Product:</b> ${productName}<br/><b>Credits:</b> ${credits}<br/><b>Amount Paid:</b> $${((session.amount_total || 0) / 100).toFixed(2)}</p><p>If you have any questions, contact <a href='mailto:support@elevatespacesai.com'>support@elevatespacesai.com</a>.</p>`,
+                subject: stripeInvoicePdfUrl || stripeInvoiceHostedUrl
+                    ? "Your Stripe Invoice and Payment Confirmation"
+                    : "Your Payment Receipt - Elevated Spaces",
+                text: [
+                    "Thank you for your payment!",
+                    "",
+                    `Product: ${productName}`,
+                    `Credits: ${credits}`,
+                    `Amount Paid: $${((session.amount_total || 0) / 100).toFixed(2)}`,
+                    stripeInvoiceHostedUrl ? `Stripe invoice: ${stripeInvoiceHostedUrl}` : "",
+                    stripeInvoicePdfUrl ? `Stripe invoice PDF: ${stripeInvoicePdfUrl}` : "",
+                    "",
+                    "If you have any questions, contact support@elevatespacesai.com.",
+                ].filter(Boolean).join("\n"),
+                html: `
+                    <h2>Thank you for your payment!</h2>
+                    <p><b>Product:</b> ${productName}<br/><b>Credits:</b> ${credits}<br/><b>Amount Paid:</b> $${((session.amount_total || 0) / 100).toFixed(2)}</p>
+                    ${stripeInvoiceHostedUrl ? `<p><b>Stripe invoice:</b> <a href="${stripeInvoiceHostedUrl}">${stripeInvoiceHostedUrl}</a></p>` : ""}
+                    ${stripeInvoicePdfUrl ? `<p><b>Stripe invoice PDF:</b> <a href="${stripeInvoicePdfUrl}">${stripeInvoicePdfUrl}</a></p>` : ""}
+                    <p>If you have any questions, contact <a href='mailto:support@elevatespacesai.com'>support@elevatespacesai.com</a>.</p>
+                `,
             });
             console.log(`[EMAIL-DEBUG] Payment receipt sent to ${userEmail} successfully.`);
             emailSent = true;
@@ -1301,15 +1520,26 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
 }
 
 export async function handleInvoicePaid(invoice: Stripe.Invoice) {
+    console.error('[WEBHOOK] ========== INVOICE PAID WEBHOOK RECEIVED ==========');
+    console.error('[WEBHOOK] Invoice ID:', invoice.id);
+    console.error('[WEBHOOK] Invoice Number:', invoice.number);
+    console.error('[WEBHOOK] Invoice Status:', invoice.status);
+    
     const rawSubscription = (invoice as any).subscription as string | { id: string } | null;
     const subscriptionId = typeof rawSubscription === "string" ? rawSubscription : rawSubscription?.id;
+    console.error('[WEBHOOK] Subscription ID:', subscriptionId);
+    
     if (!subscriptionId) {
+        console.error('[WEBHOOK] NO SUBSCRIPTION ID - RETURNING EARLY');
         return;
     }
 
     const billingReason = invoice.billing_reason || null;
+    console.error('[WEBHOOK] Billing Reason:', billingReason);
 
     const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+    console.error('[WEBHOOK] Subscription retrieved, metadata:', subscription.metadata);
+    
     const metadata = subscription.metadata || {};
     const productKey = metadata.productKey;
     const purchaseFor = metadata.purchaseFor as PurchaseFor | undefined;
@@ -1317,7 +1547,10 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
     const teamId = metadata.teamId;
     const quantity = Number(metadata.quantity || 1);
 
+    console.error('[WEBHOOK] Extracted metadata - productKey:', productKey, 'purchaseFor:', purchaseFor, 'userId:', userId, 'teamId:', teamId, 'quantity:', quantity);
+
     if (!productKey || !purchaseFor || !userId) {
+        console.error('[WEBHOOK] MISSING REQUIRED METADATA - RETURNING EARLY. productKey:', productKey, 'purchaseFor:', purchaseFor, 'userId:', userId);
         return;
     }
 
@@ -1325,12 +1558,17 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
     const credits = calcCredits(config, quantity);
     const expectedAmount = toCents(config.unitAmountUsd) * quantity;
 
+    console.error('[WEBHOOK] Config loaded - productKey:', productKey, 'credits:', credits, 'expectedAmount:', expectedAmount, 'actualAmount:', invoice.amount_paid);
+
     if (invoice.amount_paid !== expectedAmount) {
+        console.error('[WEBHOOK] AMOUNT MISMATCH - THROWING ERROR');
         throw new Error("Amount mismatch for invoice");
     }
 
     if (purchaseFor === "team") {
+        console.error('[WEBHOOK] TEAM PLAN PATH - teamId:', teamId);
         if (!teamId) {
+            console.error('[WEBHOOK] TEAM PLAN BUT NO TEAM ID - THROWING ERROR');
             throw new Error("Team ID missing in metadata");
         }
 
@@ -1338,7 +1576,10 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
             where: { stripe_invoice_id: invoice.id },
         });
 
+        console.error('[WEBHOOK] Checked for existing purchase by invoice ID, found:', !!existingByInvoice);
+
         if (existingByInvoice) {
+            console.error('[WEBHOOK] PURCHASE ALREADY EXISTS BY INVOICE ID - RETURNING EARLY (idempotency)');
             return;
         }
 
@@ -1349,7 +1590,10 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
             })
             : null;
 
+        console.error('[WEBHOOK] Recent purchase check - billingReason:', billingReason, 'found:', !!recentPurchase, 'status:', recentPurchase?.status);
+
         if (recentPurchase?.status === "completed") {
+            console.error('[WEBHOOK] RECENT PURCHASE COMPLETED - UPDATING STRIPE IDS AND RETURNING');
             if (!recentPurchase.stripe_invoice_id || !recentPurchase.stripe_subscription_id) {
                 await prisma.team_purchase.update({
                     where: { id: recentPurchase.id },
@@ -1394,9 +1638,11 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
         }
 
         await prisma.$transaction(operations);
+        console.error('[WEBHOOK] TEAM PURCHASE RECORD CREATED/UPDATED AND CREDITS APPLIED');
 
         // Get user email for logging
         const user = await prisma.user.findUnique({ where: { id: userId } });
+        console.error('[WEBHOOK] USER LOOKUP - userId:', userId, 'found:', !!user, 'email:', user?.email);
 
         // Log subscription renewal payment to MongoDB
         try {
@@ -1414,6 +1660,7 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
                 provider: 'stripe',
                 providerResponse: {
                     invoiceId: invoice.id,
+                    invoiceNumber: invoice.number || null,
                     subscriptionId,
                     customer: invoice.customer,
                     hostedInvoiceUrl: invoice.hosted_invoice_url,
@@ -1432,10 +1679,36 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
             console.error('[PAYMENT] Error logging subscription renewal (team) to MongoDB:', logErr);
         }
 
+        console.error('[WEBHOOK] Stripe invoice data ready for team plan:', {
+            invoiceNumber: invoice.number || invoice.id,
+            hostedInvoiceUrl: invoice.hosted_invoice_url,
+            invoicePdfUrl: invoice.invoice_pdf,
+            customerEmail: user?.email,
+        });
+
+        if (user?.email) {
+            await sendCustomSubscriptionInvoiceEmail({
+                to: user.email,
+                userName: user.name || "Valued Customer",
+                packageName: config.name,
+                amount: invoice.amount_paid / 100,
+                invoiceId: invoice.number || invoice.id,
+                renewalNumber: ((subscription as any).renewalCount ?? 0) + 1,
+                issueDate: new Date(),
+                dueDate: new Date(),
+                invoicePdfUrl: invoice.invoice_pdf,
+                hostedInvoiceUrl: invoice.hosted_invoice_url,
+            });
+        } else {
+            console.error('[WEBHOOK] Skipping custom invoice email for team plan - no user email found');
+        }
+
         return;
     }
 
     if (credits > 0) {
+        console.error('[WEBHOOK] PERSONAL PLAN PATH - userId:', userId, 'credits:', credits);
+        
         const packageRecord = await ensureCreditPackage({
             name: `plan_${productKey}`,
             credits,
@@ -1446,7 +1719,10 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
             where: { stripe_invoice_id: invoice.id },
         });
 
+        console.error('[WEBHOOK] Checked for existing purchase by invoice ID, found:', !!existingByInvoice);
+
         if (existingByInvoice) {
+            console.error('[WEBHOOK] PURCHASE ALREADY EXISTS BY INVOICE ID - RETURNING EARLY (idempotency)');
             return;
         }
 
@@ -1458,7 +1734,10 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
             })
             : null;
 
+        console.error('[WEBHOOK] Recent purchase check - billingReason:', billingReason, 'found:', !!recentPurchase, 'status:', recentPurchase?.status);
+
         if (recentPurchase?.status === "completed") {
+            console.error('[WEBHOOK] RECENT PURCHASE COMPLETED - UPDATING STRIPE IDS AND RETURNING');
             if (!recentPurchase.stripe_invoice_id) {
                 await prisma.user_credit_purchase.update({
                     where: { id: recentPurchase.id },
@@ -1494,9 +1773,11 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
                 }),
             applyCreditsToUser(userId, credits),
         ]);
+        console.error('[WEBHOOK] PERSONAL PURCHASE RECORD CREATED/UPDATED AND CREDITS APPLIED');
 
         // Get user email for logging
         const user = await prisma.user.findUnique({ where: { id: userId } });
+        console.error('[WEBHOOK] USER LOOKUP - userId:', userId, 'found:', !!user, 'email:', user?.email);
 
         // Log subscription renewal payment to MongoDB
         try {
@@ -1513,6 +1794,7 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
                 provider: 'stripe',
                 providerResponse: {
                     invoiceId: invoice.id,
+                    invoiceNumber: invoice.number || null,
                     subscriptionId,
                     customer: invoice.customer,
                     hostedInvoiceUrl: invoice.hosted_invoice_url,
@@ -1531,14 +1813,42 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
             console.error('[PAYMENT] Error logging subscription renewal (personal) to MongoDB:', logErr);
         }
 
+        console.error('[WEBHOOK] Stripe invoice data ready for personal plan:', {
+            invoiceNumber: invoice.number || invoice.id,
+            hostedInvoiceUrl: invoice.hosted_invoice_url,
+            invoicePdfUrl: invoice.invoice_pdf,
+            customerEmail: user?.email,
+        });
+
+        if (user?.email) {
+            await sendCustomSubscriptionInvoiceEmail({
+                to: user.email,
+                userName: user.name || "Valued Customer",
+                packageName: config.name,
+                amount: invoice.amount_paid / 100,
+                invoiceId: invoice.number || invoice.id,
+                renewalNumber: ((subscription as any).renewalCount ?? 0) + 1,
+                issueDate: new Date(),
+                dueDate: new Date(),
+                invoicePdfUrl: invoice.invoice_pdf,
+                hostedInvoiceUrl: invoice.hosted_invoice_url,
+            });
+        } else {
+            console.error('[WEBHOOK] Skipping custom invoice email for personal plan - no user email found');
+        }
+
         return;
     }
+    
+    console.error('[WEBHOOK] ========== INVOICE PAID WEBHOOK COMPLETED SUCCESSFULLY ==========');
 }
+
+
 
 export async function getSessionDetails(sessionId: string) {
     try {
         const session = await stripe.checkout.sessions.retrieve(sessionId, {
-            expand: ["line_items.data.price.product"],
+            expand: ["line_items.data.price.product", "invoice"],
         });
 
         const metadata = session.metadata || {};
@@ -1565,6 +1875,8 @@ export async function getSessionDetails(sessionId: string) {
                 ? "addon"
                 : normalizedCategory || null;
 
+        const invoice = typeof session.invoice === "string" ? null : session.invoice;
+
         return {
             id: session.id,
             status: session.status,
@@ -1575,6 +1887,10 @@ export async function getSessionDetails(sessionId: string) {
             subscription: session.subscription,
             mode: session.mode,
             metadata,
+            invoiceId: invoice?.id || null,
+            invoiceNumber: invoice?.number || null,
+            invoicePdf: invoice?.invoice_pdf || null,
+            hostedInvoiceUrl: invoice?.hosted_invoice_url || null,
             resolvedProductKey: normalizedProductKey || null,
             resolvedProductName,
             resolvedProductCategory,
@@ -1597,6 +1913,8 @@ export async function processPendingPurchases() {
     console.log("[PENDING-PROCESSOR] Starting pending purchase processing");
 
     try {
+        const unpaidSessionExpiryThreshold = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
         // Find all pending user credit purchases
         const pendingPurchases = await prisma.user_credit_purchase.findMany({
             where: { status: "pending" },
@@ -1612,7 +1930,54 @@ export async function processPendingPurchases() {
 
         console.log(`[PENDING-PROCESSOR] Found ${pendingPurchases.length} pending purchases`);
 
+        const cleanedPersonalPurchaseIds = new Set<string>();
+
         for (const purchase of pendingPurchases) {
+            if (!purchase.stripe_session_id) {
+                continue;
+            }
+
+            if (purchase.created_at > unpaidSessionExpiryThreshold) {
+                continue;
+            }
+
+            try {
+                const session = await stripe.checkout.sessions.retrieve(purchase.stripe_session_id, {
+                    expand: ["invoice"],
+                });
+                if (session.payment_status !== "unpaid") {
+                    continue;
+                }
+
+                if (session.status === "open") {
+                    try {
+                        await stripe.checkout.sessions.expire(session.id);
+                    } catch (expireError: any) {
+                        console.warn(`[PENDING-PROCESSOR] Could not expire session ${session.id}:`, expireError?.message || expireError);
+                    }
+                }
+
+                const deleted = await prisma.user_credit_purchase.deleteMany({
+                    where: {
+                        id: purchase.id,
+                        status: "pending",
+                    },
+                });
+
+                if (deleted.count > 0) {
+                    cleanedPersonalPurchaseIds.add(purchase.id);
+                    console.log(`[PENDING-PROCESSOR] Removed stale unpaid pending purchase ${purchase.id} (session ${session.id})`);
+                }
+            } catch (cleanupError: any) {
+                console.warn(`[PENDING-PROCESSOR] Failed stale-unpaid cleanup for purchase ${purchase.id}:`, cleanupError?.message || cleanupError);
+            }
+        }
+
+        for (const purchase of pendingPurchases) {
+            if (cleanedPersonalPurchaseIds.has(purchase.id)) {
+                continue;
+            }
+
             try {
                 if (!purchase.stripe_session_id) {
                     console.log(`[PENDING-PROCESSOR] Skipping purchase ${purchase.id} - no session ID`);
@@ -1620,7 +1985,9 @@ export async function processPendingPurchases() {
                 }
 
                 // Fetch session from Stripe
-                const session = await stripe.checkout.sessions.retrieve(purchase.stripe_session_id);
+                const session = await stripe.checkout.sessions.retrieve(purchase.stripe_session_id, {
+                    expand: ["invoice"],
+                });
 
                 console.log(`[PENDING-PROCESSOR] Checking session ${session.id}:`, {
                     paymentStatus: session.payment_status,
@@ -1639,8 +2006,7 @@ export async function processPendingPurchases() {
                         session.mode === "subscription" ||
                         PLAN_PRODUCT_KEYS.has(normalizedProductKey as any) ||
                         SUBSCRIPTION_PLAN_PACKAGE_NAMES.includes(purchase.package?.name || "");
-                    const nextRenewalDate = new Date();
-                    nextRenewalDate.setMinutes(nextRenewalDate.getMinutes() + 1);
+                    const nextRenewalDate = calculateNextRenewalDate(new Date());
 
                     const demoTransferCredits = await getOneTimeDemoTransferCredits({
                         userId: purchase.user_id,
@@ -1686,6 +2052,15 @@ export async function processPendingPurchases() {
                                 },
                             })
                         );
+                        operations.push(
+                            prisma.guest_tracking.updateMany({
+                                where: { userId: purchase.user_id },
+                                data: {
+                                    uploads_count: DEMO_LIMIT,
+                                    last_used_at: new Date(),
+                                },
+                            })
+                        );
                     }
 
                     await prisma.$transaction(operations);
@@ -1706,6 +2081,42 @@ export async function processPendingPurchases() {
                         credits: purchase.amount,
                         transferredDemoCredits: demoTransferCredits,
                     });
+
+                    const invoiceObject = session.invoice && typeof session.invoice === "object" ? session.invoice : null;
+                    const invoiceId = typeof session.invoice === "string" ? session.invoice : invoiceObject?.id;
+
+                    console.log(`[PENDING-PROCESSOR] Stripe invoice details for purchase ${purchase.id}:`, {
+                        invoiceId,
+                        invoiceNumber: invoiceObject?.number || null,
+                        invoiceStatus: invoiceObject?.status || null,
+                        hostedInvoiceUrl: invoiceObject?.hosted_invoice_url || null,
+                        invoicePdf: invoiceObject?.invoice_pdf || null,
+                        customer: invoiceObject?.customer || null,
+                    });
+
+                    // Send the custom app invoice email when the cron path completes the purchase.
+                    if (isSubscriptionPlan && invoiceId && purchase.user_id) {
+                        const user = await prisma.user.findUnique({ where: { id: purchase.user_id } });
+                        if (user?.email) {
+                            await sendCustomSubscriptionInvoiceEmail({
+                                to: user.email,
+                                userName: user.name || "Valued Customer",
+                                packageName: purchase.package?.name || "Subscription",
+                                amount: purchase.price_usd,
+                                invoiceId: invoiceObject?.number || invoiceId,
+                                renewalNumber: 0,
+                                issueDate: new Date(),
+                                dueDate: new Date(),
+                                invoicePdfUrl: invoiceObject?.invoice_pdf || null,
+                                hostedInvoiceUrl: invoiceObject?.hosted_invoice_url || null,
+                            });
+                            console.log(`[PENDING-PROCESSOR] Custom invoice email sent for purchase ${purchase.id}`);
+                        } else {
+                            console.log(`[PENDING-PROCESSOR] No user email available for subscription purchase ${purchase.id}`);
+                        }
+                    } else if (isSubscriptionPlan) {
+                        console.log(`[PENDING-PROCESSOR] No invoice ID available yet for subscription purchase ${purchase.id}`);
+                    }
                 }
             } catch (error: any) {
                 console.error(`[PENDING-PROCESSOR] Error processing purchase ${purchase.id}:`, error.message);
@@ -1723,7 +2134,54 @@ export async function processPendingPurchases() {
 
             console.log(`[PENDING-PROCESSOR] Found ${pendingTeamPurchases.length} pending team purchases`);
 
+            const cleanedTeamPurchaseIds = new Set<string>();
+
             for (const purchase of pendingTeamPurchases) {
+                if (!purchase.stripe_session_id) {
+                    continue;
+                }
+
+                if (purchase.created_at > unpaidSessionExpiryThreshold) {
+                    continue;
+                }
+
+                try {
+                    const session = await stripe.checkout.sessions.retrieve(purchase.stripe_session_id, {
+                        expand: ["invoice"],
+                    });
+                    if (session.payment_status !== "unpaid") {
+                        continue;
+                    }
+
+                    if (session.status === "open") {
+                        try {
+                            await stripe.checkout.sessions.expire(session.id);
+                        } catch (expireError: any) {
+                            console.warn(`[PENDING-PROCESSOR-TEAM] Could not expire session ${session.id}:`, expireError?.message || expireError);
+                        }
+                    }
+
+                    const deleted = await prisma.team_purchase.deleteMany({
+                        where: {
+                            id: purchase.id,
+                            status: "pending",
+                        },
+                    });
+
+                    if (deleted.count > 0) {
+                        cleanedTeamPurchaseIds.add(purchase.id);
+                        console.log(`[PENDING-PROCESSOR-TEAM] Removed stale unpaid team purchase ${purchase.id} (session ${session.id})`);
+                    }
+                } catch (cleanupError: any) {
+                    console.warn(`[PENDING-PROCESSOR-TEAM] Failed stale-unpaid cleanup for purchase ${purchase.id}:`, cleanupError?.message || cleanupError);
+                }
+            }
+
+            for (const purchase of pendingTeamPurchases) {
+                if (cleanedTeamPurchaseIds.has(purchase.id)) {
+                    continue;
+                }
+
                 try {
                     if (!purchase.stripe_session_id) {
                         console.log(`[PENDING-PROCESSOR-TEAM] Skipping team purchase ${purchase.id} - no session ID`);
@@ -1777,6 +2235,51 @@ export async function processPendingPurchases() {
                             subscriptionId,
                             isSubscription: !!subscriptionId,
                         });
+
+                        const invoiceObject = session.invoice && typeof session.invoice === "object" ? session.invoice : null;
+                        const invoiceId = typeof session.invoice === "string" ? session.invoice : invoiceObject?.id;
+
+                        console.log(`[PENDING-PROCESSOR-TEAM] Stripe invoice details for purchase ${purchase.id}:`, {
+                            invoiceId,
+                            invoiceNumber: invoiceObject?.number || null,
+                            invoiceStatus: invoiceObject?.status || null,
+                            hostedInvoiceUrl: invoiceObject?.hosted_invoice_url || null,
+                            invoicePdf: invoiceObject?.invoice_pdf || null,
+                            customer: invoiceObject?.customer || null,
+                        });
+
+                        if (subscriptionId && invoiceId) {
+                            const team = await prisma.teams.findUnique({
+                                where: { id: purchase.team_id },
+                                select: { owner_id: true, name: true },
+                            });
+                            const owner = team?.owner_id
+                                ? await prisma.user.findUnique({
+                                    where: { id: team.owner_id },
+                                    select: { email: true, name: true },
+                                })
+                                : null;
+
+                            if (owner?.email) {
+                                await sendCustomSubscriptionInvoiceEmail({
+                                    to: owner.email,
+                                    userName: owner.name || "Valued Customer",
+                                    packageName: team?.name || "Team Plan",
+                                    amount: purchase.price_usd,
+                                    invoiceId: invoiceObject?.number || invoiceId,
+                                    renewalNumber: 0,
+                                    issueDate: new Date(),
+                                    dueDate: new Date(),
+                                    invoicePdfUrl: invoiceObject?.invoice_pdf || null,
+                                    hostedInvoiceUrl: invoiceObject?.hosted_invoice_url || null,
+                                });
+                                console.log(`[PENDING-PROCESSOR-TEAM] Custom invoice email sent for purchase ${purchase.id}`);
+                            } else {
+                                console.log(`[PENDING-PROCESSOR-TEAM] No owner email found for team purchase ${purchase.id}`);
+                            }
+                        } else if (subscriptionId) {
+                            console.log(`[PENDING-PROCESSOR-TEAM] No invoice ID available yet for team purchase ${purchase.id}`);
+                        }
                     }
                 } catch (error: any) {
                     console.error(`[PENDING-PROCESSOR-TEAM] Error processing team purchase ${purchase.id}:`, error.message);
@@ -1796,5 +2299,25 @@ export async function processPendingPurchases() {
         }
 
         console.error("[PENDING-PROCESSOR] Error:", error.message || error);
+    }
+}
+
+export async function resendInvoiceById(invoiceId: string) {
+    if (!invoiceId) throw new Error('invoiceId is required');
+
+    try {
+        if (stripe.invoices && typeof (stripe.invoices as any).sendInvoice === 'function') {
+            // @ts-ignore
+            await (stripe.invoices as any).sendInvoice(invoiceId);
+            return { success: true, method: 'sdk' };
+        }
+
+        // Fallback: call the REST endpoint directly
+        // @ts-ignore
+        await stripe.request({ method: 'POST', url: `/v1/invoices/${invoiceId}/send` });
+        return { success: true, method: 'rest' };
+    } catch (err: any) {
+        console.error('[SERVICE] resendInvoiceById error:', err);
+        return { success: false, error: err?.message || String(err) };
     }
 }

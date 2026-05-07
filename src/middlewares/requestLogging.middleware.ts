@@ -14,6 +14,7 @@ const EXCLUDED_PATHS = [
   '/api/health',
   '/api/ping',
   '/favicon.ico',
+  '/api/consents',
 ];
 
 // Fields to redact from request bodies
@@ -88,9 +89,11 @@ export function requestLoggingMiddleware(req: Request, res: Response, next: Next
       path: req.path,
       statusCode: res.statusCode,
       userId: user?.id,
+      userName: user?.name,
       userEmail: user?.email,
       userRole: user?.role?.[0],
       ip: getClientIp(req),
+      location: getClientIp(req),
       userAgent: req.headers['user-agent'],
       requestBody: req.method !== 'GET' ? redactSensitiveData(req.body) : undefined,
       responseTime,

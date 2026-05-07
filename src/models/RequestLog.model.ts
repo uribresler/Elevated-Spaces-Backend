@@ -6,9 +6,11 @@ export interface IRequestLog extends Document {
   path: string;
   statusCode?: number;
   userId?: string;
+  userName?: string;
   userEmail?: string;
   userRole?: string;
   ip: string;
+  location?: string;
   userAgent?: string;
   requestBody?: any;
   responseTime?: number;
@@ -22,9 +24,11 @@ const RequestLogSchema: Schema = new Schema({
   path: { type: String, required: true, index: true },
   statusCode: { type: Number },
   userId: { type: String, index: true },
+  userName: { type: String, index: true },
   userEmail: { type: String },
   userRole: { type: String },
   ip: { type: String, required: true },
+  location: { type: String },
   userAgent: { type: String },
   requestBody: { type: Schema.Types.Mixed },
   responseTime: { type: Number },

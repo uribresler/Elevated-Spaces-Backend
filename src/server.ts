@@ -4,6 +4,7 @@ import prisma from './dbConnection';
 import { mongoDb } from './config/mongodb.config';
 import { supabaseStorage } from './services/supabaseStorage.service';
 import { startCleanupCron } from './cron/cleanupExpiredInvitations';
+import { startImageCleanupCron } from './cron/cleanupExpiredImages';
 import processSubscriptionRenewals from './cron/processSubscriptionRenewals';
 import { processPendingPurchases } from './services/payment.service';
 import { processTeamPaidExtraSeatsDaily } from './services/teams.service';
@@ -74,6 +75,7 @@ app.listen(PORT, async () => {
     
     // Only start cron job if database connection succeeds
     startCleanupCron();
+    startImageCleanupCron();
   } catch (err: any) {
     console.error('❌ Failed to connect to database:', err.message || err);
     console.error('Please verify your DATABASE_URL credentials in .env');

@@ -9,10 +9,12 @@ export class RateLimiter {
   private maxRequests: number;
   private windowMs: number;
   private minIntervalMs: number;
+  private allowBurstMode: boolean; // Allow burst for parallel requests
 
-  constructor(maxRequests: number, windowMs: number) {
+  constructor(maxRequests: number, windowMs: number, allowBurst: boolean = true) {
     this.maxRequests = maxRequests;
     this.windowMs = windowMs;
+    this.allowBurstMode = allowBurst;
     // Calculate minimum interval between requests to evenly pace them
     this.minIntervalMs = Math.ceil(windowMs / maxRequests);
   }
@@ -20,6 +22,7 @@ export class RateLimiter {
   /**
    * Wait if necessary to respect rate limits
    * Returns the delay in milliseconds (0 if no delay needed)
+   * In burst mode, allows rapid parallel requests up to maxRequests per window
    */
   async acquire(operationName: string = "operation"): Promise<number> {
     const now = Date.now();
@@ -44,20 +47,20 @@ export class RateLimiter {
       return waitTime + await this.acquire(operationName);
     }
 
-    // Check minimum interval between consecutive requests for smooth pacing
-    if (this.requestTimestamps.length > 0) {
+    // In burst mode, allow rapid parallel requests without pacing delays
+    // Only apply pacing when approaching the limit to smooth out traffic
+    if (!this.allowBurstMode && this.requestTimestamps.length > 0) {
       const lastRequestTime = this.requestTimestamps[this.requestTimestamps.length - 1];
       const timeSinceLastRequest = now - lastRequestTime;
       
-      if (timeSinceLastRequest < this.minIntervalMs) {
+      // Only pace if we're using more than 80% of requests (to allow burst for parallel)
+      const utilizationThreshold = Math.ceil(this.maxRequests * 0.8);
+      if (this.requestTimestamps.length >= utilizationThreshold && timeSinceLastRequest < this.minIntervalMs) {
         const paceDelay = this.minIntervalMs - timeSinceLastRequest;
         
-        // Only log every 10th paced request to reduce noise
-        if (this.requestTimestamps.length % 10 === 0) {
-          logger(
-            `[RATE_LIMIT] Pacing at ${this.requestTimestamps.length}/${this.maxRequests} requests`
-          );
-        }
+        logger(
+          `[RATE_LIMIT] Pacing at ${this.requestTimestamps.length}/${this.maxRequests} requests (${Math.round(paceDelay)}ms delay)`
+        );
         
         await new Promise((resolve) => setTimeout(resolve, paceDelay));
         return paceDelay + await this.acquire(operationName);

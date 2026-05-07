@@ -12,6 +12,7 @@ export async function getRequestLogsHandler(req: Request, res: Response) {
       month,
       method,
       userId,
+      search,
       startDate,
       endDate,
     } = req.query;
@@ -22,6 +23,7 @@ export async function getRequestLogsHandler(req: Request, res: Response) {
       month: month as string,
       method: method as string,
       userId: userId as string,
+      search: search as string,
       startDate: startDate ? new Date(startDate as string) : undefined,
       endDate: endDate ? new Date(endDate as string) : undefined,
     });

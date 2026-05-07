@@ -17,7 +17,7 @@ import {
 const MAX_RETRIES = Number(process.env.GEMINI_MAX_RETRIES || "1");
 const BASE_DELAY_MS = Number(process.env.GEMINI_RETRY_BASE_DELAY_MS || "300");
 const MAX_DELAY_MS = Number(process.env.GEMINI_RETRY_MAX_DELAY_MS || "1200");
-const GEMINI_OPERATION_TIMEOUT_MS = Number(process.env.GEMINI_OPERATION_TIMEOUT_MS || "12000");
+const GEMINI_OPERATION_TIMEOUT_MS = Number(process.env.GEMINI_OPERATION_TIMEOUT_MS || "60000");
 const SINGLE_CALL_FAILURE_COOLDOWN_MS = Number(
   process.env.GEMINI_SINGLE_CALL_FAILURE_COOLDOWN_MS || "3600000"
 );
@@ -33,7 +33,9 @@ const GEMINI_VERBOSE_LOGS = String(process.env.GEMINI_VERBOSE_LOGS || "false").t
 
 // Gemini API rate limiter: 18 requests/minute (safety buffer below 20/min limit)
 const GEMINI_RATE_LIMIT = Number(process.env.GEMINI_RATE_LIMIT_PER_MINUTE || "18");
-const geminiRateLimiter = new RateLimiter(GEMINI_RATE_LIMIT, 60000);
+// Enable burst mode to allow parallel requests for multi-image staging
+// This allows up to GEMINI_RATE_LIMIT requests in parallel, then queues additional requests
+const geminiRateLimiter = new RateLimiter(GEMINI_RATE_LIMIT, 60000, true);
 
 function isQuotaExhaustedMessage(message: string): boolean {
   const normalized = (message || "").toLowerCase();
@@ -257,6 +259,34 @@ class GeminiService {
     }
 
     geminiVerboseLog(`[GEMINI_MODEL] ${operationName} exhausted all candidate models`);
+    throw lastError instanceof Error ? lastError : new Error(`All image models failed for ${operationName}.`);
+  }
+
+  private async executeWithPreferredImageModelFailover<T>(
+    operationName: string,
+    preferredModel: string,
+    operation: (model: string) => Promise<T>
+  ): Promise<T> {
+    const fallbackModels = this.getImageModelCandidates().filter((model) => model !== preferredModel);
+    const modelCandidates = [preferredModel, ...fallbackModels];
+    let lastError: unknown;
+
+    for (const model of modelCandidates) {
+      try {
+        geminiVerboseLog(`[GEMINI_MODEL] ${operationName} trying model=${model}`);
+        return await operation(model);
+      } catch (error) {
+        lastError = error;
+        geminiVerboseLog(
+          `[GEMINI_MODEL] ${operationName} model=${model} failed | ${getErrorDiagnostics(error)}`
+        );
+
+        if (!isTransientFailoverError(error)) {
+          throw error;
+        }
+      }
+    }
+
     throw lastError instanceof Error ? lastError : new Error(`All image models failed for ${operationName}.`);
   }
 
@@ -656,6 +686,70 @@ class GeminiService {
       removeFurniture
     );
     return images[0];
+  }
+
+  async stageImageWithModel(
+    inputImagePath: string,
+    roomType: string,
+    stagingStyle: string,
+    prompt: string | undefined,
+    removeFurniture: boolean | undefined,
+    model: string
+  ): Promise<Buffer> {
+    const { buffer: imageBuffer, mimeType } = await this.prepareImageForGemini(inputImagePath);
+    const base64Image = imageBuffer.toString("base64");
+    const stagingPrompt = this.buildStagingPrompt(roomType, stagingStyle, prompt, 1);
+
+    return this.executeWithRetry(async () => {
+      await geminiRateLimiter.acquire(`stageImageWithModel:${model}`);
+
+      const response = await this.executeWithPreferredImageModelFailover(
+        `stageImageWithModel:${model}`,
+        model,
+        (modelName) =>
+          this.executeWithKeyFailover(
+            `stageImageWithModel:${modelName}`,
+            (client) =>
+              client.models.generateContent({
+                model: modelName,
+                contents: [
+                  {
+                    role: "user",
+                    parts: [
+                      {
+                        inlineData: {
+                          mimeType,
+                          data: base64Image,
+                        },
+                      },
+                      {
+                        text: removeFurniture
+                          ? `${stagingPrompt}\n\nRemove all furniture and stage an empty room with the requested style.`
+                          : stagingPrompt,
+                      },
+                    ],
+                  },
+                ],
+                config: {
+                  responseModalities: ["IMAGE"],
+                  temperature: 0.7,
+                },
+              } as any)
+          )
+      );
+
+      const images = this.extractImagesFromResponse(response, 1);
+      if (!images.length) {
+        throw new ImageProcessingError(
+          ImageErrorCode.AI_NO_IMAGE_GENERATED,
+          ErrorMessages[ImageErrorCode.AI_NO_IMAGE_GENERATED],
+          502,
+          `Gemini model ${model} returned no staged image.`
+        );
+      }
+
+      return images[0];
+    }, "stageImageWithModel");
   }
 
   async stageImageVariations(

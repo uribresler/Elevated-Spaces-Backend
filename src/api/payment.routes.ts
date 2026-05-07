@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { requireAuth } from "../middlewares/auth";
-import { createCheckoutSessionHandler, getSessionDetailsHandler, getCreditsHandler, getWebhookLogsHandler, simulateWebhookHandler, processPendingPurchasesHandler, testPaymentLogHandler, contactSalesHandler } from "../controllers/payment.controller";
+import { createCheckoutSessionHandler, getSessionDetailsHandler, getCreditsHandler, getWebhookLogsHandler, simulateWebhookHandler, processPendingPurchasesHandler, testPaymentLogHandler, contactSalesHandler, resendInvoiceHandler } from "../controllers/payment.controller";
 
 const router = Router();
 
@@ -15,6 +15,7 @@ if (process.env.NODE_ENV !== "production") {
     router.post("/simulate-webhook", simulateWebhookHandler);
     router.post("/process-pending", processPendingPurchasesHandler);
     router.post("/test-payment-log", testPaymentLogHandler);
+    router.post("/resend-invoice", resendInvoiceHandler);
 }
 
 export default router;

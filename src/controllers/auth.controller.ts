@@ -155,7 +155,8 @@ export async function oauthCallback(req: Request, res: Response) {
       name: authResult.user.name || "",
       provider: authResult.user.authProvider.toLowerCase(),
       isNewUser: authResult.isNewUser ? "true" : "false",
-      role: roleString
+      role: roleString,
+      created_at: latestUser?.created_at?.toISOString() || new Date().toISOString(),
     });
 
     if (authResult.user.avatarUrl) {

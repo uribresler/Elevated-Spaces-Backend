@@ -38,6 +38,7 @@ class OAuthService {
       role: string[];
       avatarUrl: string | null;
       authProvider: string;
+      created_at: Date;
     };
     success: boolean;
     isNewUser: boolean;
@@ -57,6 +58,7 @@ class OAuthService {
       role: string[];
       avatarUrl: string | null;
       authProvider: string;
+      created_at: Date;
     };
     success: boolean;
     isNewUser: boolean;
@@ -126,6 +128,7 @@ class OAuthService {
         role: roleNames,
         avatarUrl: user.avatar_url,
         authProvider: user.auth_provider,
+        created_at: user.created_at,
       },
       success: true,
       isNewUser,
