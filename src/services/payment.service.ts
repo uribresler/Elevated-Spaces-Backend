@@ -935,6 +935,99 @@ export async function sendContactSalesInquiry({
     return { success: true };
 }
 
+export async function sendSupportInquiry({
+    fullName,
+    email,
+    briefDescription,
+    orderNumber,
+    additionalContext,
+    screenshots,
+    userId,
+    caseNumber,
+}: {
+    fullName: string;
+    email: string;
+    briefDescription: string;
+    orderNumber?: string;
+    additionalContext?: string;
+    screenshots?: Array<{
+        filename: string;
+        content: string;
+        type?: string;
+    }>;
+    userId?: string;
+    caseNumber: string;
+}) {
+    const senderEmail = (email || "").trim();
+    const senderName = (fullName || "").trim();
+    const description = (briefDescription || "").trim();
+    const safeOrderNumber = (orderNumber || "").trim();
+    const safeContext = (additionalContext || "").trim();
+
+    if (!senderName) {
+        throw new Error("Full name is required");
+    }
+
+    if (!senderEmail) {
+        throw new Error("Email is required");
+    }
+
+    if (!description) {
+        throw new Error("Brief description is required");
+    }
+
+    const SUPPORT_CONTACT_EMAIL = process.env.SUPPORT_CONTACT_EMAIL || process.env.SALES_CONTACT_EMAIL || "elevatespacesai@gmail.com";
+    const submittedAt = new Date().toISOString();
+    const safeAttachments = (screenshots || []).slice(0, 3);
+
+    const subject = `Support request ${caseNumber}${userId ? ` (user: ${userId})` : ""}`;
+    const text = [
+        "New Support request",
+        `Case Number: ${caseNumber}`,
+        `Submitted at: ${submittedAt}`,
+        `User ID: ${userId || "N/A"}`,
+        `Full Name: ${senderName}`,
+        `Email: ${senderEmail}`,
+        `Order Number: ${safeOrderNumber || "N/A"}`,
+        "",
+        "Brief Description:",
+        description,
+        "",
+        "Additional Context:",
+        safeContext || "N/A",
+        "",
+        `Screenshots attached: ${safeAttachments.length}`,
+    ].join("\n");
+
+    const html = `
+        <h2>New Support request</h2>
+        <p><strong>Case Number:</strong> ${caseNumber}</p>
+        <p><strong>Submitted at:</strong> ${submittedAt}</p>
+        <p><strong>User ID:</strong> ${userId || "N/A"}</p>
+        <p><strong>Full Name:</strong> ${senderName}</p>
+        <p><strong>Email:</strong> ${senderEmail}</p>
+        <p><strong>Order Number:</strong> ${safeOrderNumber || "N/A"}</p>
+        <p><strong>Brief Description:</strong></p>
+        <p>${description.replace(/\n/g, "<br />")}</p>
+        <p><strong>Additional Context:</strong></p>
+        <p>${(safeContext || "N/A").replace(/\n/g, "<br />")}</p>
+        <p><strong>Screenshots attached:</strong> ${safeAttachments.length}</p>
+    `;
+
+    await sendEmail({
+        from: senderEmail,
+        senderName: "Elevate Spaces Support",
+        replyTo: senderEmail,
+        to: SUPPORT_CONTACT_EMAIL,
+        subject,
+        text,
+        html,
+        attachments: safeAttachments,
+    });
+
+    return { success: true, caseNumber };
+}
+
 const INITIAL_SUBSCRIPTION_LOOKBACK_MS = 12 * 60 * 60 * 1000;
 
 function getInitialSubscriptionCutoff() {

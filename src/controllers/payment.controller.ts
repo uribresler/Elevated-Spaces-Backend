@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { constructStripeEvent, createCheckoutSession, handleCheckoutCompleted, handleInvoicePaid, getSessionDetails, processPendingPurchases, sendContactSalesInquiry } from "../services/payment.service";
+import { constructStripeEvent, createCheckoutSession, handleCheckoutCompleted, handleInvoicePaid, getSessionDetails, processPendingPurchases, sendContactSalesInquiry, sendSupportInquiry } from "../services/payment.service";
 import { resendInvoiceById } from "../services/payment.service";
 import Stripe from "stripe";
 import prisma from "../dbConnection";
@@ -423,6 +423,55 @@ export async function contactSalesHandler(req: Request, res: Response) {
     } catch (error: any) {
         return res.status(400).json({
             message: error?.message || "Failed to send contact sales request",
+        });
+    }
+}
+
+export async function supportRequestHandler(req: Request, res: Response) {
+    try {
+        const { fullName, email, briefDescription, orderNumber, additionalContext, screenshots } = req.body;
+
+        if (!fullName || typeof fullName !== "string") {
+            return res.status(400).json({ message: "Full name is required" });
+        }
+
+        if (!email || typeof email !== "string") {
+            return res.status(400).json({ message: "Email is required" });
+        }
+
+        if (!briefDescription || typeof briefDescription !== "string") {
+            return res.status(400).json({ message: "Brief description is required" });
+        }
+
+        const caseNumber = `CASE-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+
+        await sendSupportInquiry({
+            fullName,
+            email,
+            briefDescription,
+            orderNumber: typeof orderNumber === "string" ? orderNumber : undefined,
+            additionalContext: typeof additionalContext === "string" ? additionalContext : undefined,
+            screenshots: Array.isArray(screenshots)
+                ? screenshots
+                    .filter((item) => item && typeof item.filename === "string" && typeof item.content === "string")
+                    .map((item) => ({
+                        filename: item.filename,
+                        content: item.content,
+                        type: typeof item.type === "string" ? item.type : undefined,
+                    }))
+                : undefined,
+            userId: req.user?.id,
+            caseNumber,
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: "Your support request has been sent.",
+            caseNumber,
+        });
+    } catch (error: any) {
+        return res.status(400).json({
+            message: error?.message || "Failed to send support request",
         });
     }
 }
