@@ -14,7 +14,7 @@ import {
   parseGeminiError,
 } from "../utils/imageErrors";
 
-const MAX_RETRIES = Number(process.env.GEMINI_MAX_RETRIES || "1");
+const MAX_RETRIES = Number(process.env.GEMINI_MAX_RETRIES || "3");
 const BASE_DELAY_MS = Number(process.env.GEMINI_RETRY_BASE_DELAY_MS || "300");
 const MAX_DELAY_MS = Number(process.env.GEMINI_RETRY_MAX_DELAY_MS || "1200");
 const GEMINI_OPERATION_TIMEOUT_MS = Number(process.env.GEMINI_OPERATION_TIMEOUT_MS || "60000");
@@ -49,9 +49,19 @@ function isQuotaExhaustedMessage(message: string): boolean {
 
 function isTransientFailoverError(error: unknown): boolean {
   const err = error as any;
-  const message = String(err?.message || err || "").toLowerCase();
+  let message = String(err?.message || err || "").toLowerCase();
   const code = String(err?.code || "").toLowerCase();
   const status = Number(err?.status || err?.response?.status || 0);
+
+  // Try to extract message from nested JSON error objects
+  try {
+    const parsed = JSON.parse(message);
+    if (parsed?.error?.message) {
+      message = String(parsed.error.message).toLowerCase();
+    }
+  } catch {
+    // Not JSON, use as-is
+  }
 
   if (code === String(ImageErrorCode.AI_TIMEOUT).toLowerCase()) {
     return true;
@@ -68,7 +78,9 @@ function isTransientFailoverError(error: unknown): boolean {
       message.includes("unsupported") ||
       message.includes("invalid argument") ||
       message.includes("permission") ||
-      message.includes("access")
+      message.includes("access") ||
+      message.includes("api key") ||
+      message.includes("expired")
     );
   }
 
@@ -84,7 +96,20 @@ function isTransientFailoverError(error: unknown): boolean {
 function getErrorDiagnostics(error: unknown): string {
   const err = error as any;
   const status = err?.status || err?.code || err?.response?.status || "unknown";
-  const message = String(err?.message || err || "Unknown error").replace(/\s+/g, " ").trim();
+  
+  let message = String(err?.message || err || "Unknown error");
+  
+  // Handle nested JSON error objects from Gemini API responses
+  try {
+    const parsed = JSON.parse(message);
+    if (parsed?.error?.message) {
+      message = parsed.error.message;
+    }
+  } catch {
+    // Not JSON, use as-is
+  }
+  
+  message = message.replace(/\s+/g, " ").trim();
   return `status=${status} message=${message.substring(0, 500)}`;
 }
 
