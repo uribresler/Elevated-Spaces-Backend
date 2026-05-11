@@ -161,6 +161,9 @@ model user_credit_purchase {
   // Cancellation fields
   cancelledAt          DateTime?      @map("cancelled_at")
   cancellationReason   String?        @map("cancellation_reason")
+  // Reminder and credit expiry fields
+  paymentReminderSentAt DateTime?     @map("payment_reminder_sent_at")
+  creditExpiresAt      DateTime?      @map("credit_expires_at")
   user                 user           @relation("CreditPurchases", fields: [user_id], references: [id])
   package              credit_package @relation("UserCreditPurchases", fields: [package_id], references: [id])
   invoices             invoice[]
@@ -274,15 +277,10 @@ model photographer_profile {
   photographer_responses      Json?     @map("photographer_responses")
   has_new_photographer_response Boolean  @default(false) @map("has_new_photographer_response")
   submission_count            Int       @default(1) @map("submission_count")
-  admin_feedback              String?   @map("admin_feedback")
-  feedback_provided_at        DateTime? @map("feedback_provided_at")
-  photographer_responses      Json?     @map("photographer_responses")
-  has_new_photographer_response Boolean  @default(false) @map("has_new_photographer_response")
-  submission_count            Int       @default(1) @map("submission_count")
   created_at                  DateTime  @default(now()) @map("created_at")
   updated_at                  DateTime  @updatedAt @map("updated_at")
   bookings                    booking[] @relation("PhotographerBookings")
-  user                        user      @relation(fields: [user_id], references: [id])
+  user                        user      @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@map("photographer_profile")
 }
@@ -502,6 +500,28 @@ model admin_content {
   @@map("admin_content")
 }
 
+model resource {
+  id             String   @id @default(uuid()) @map("id")
+  slug           String   @unique @map("slug")
+  title          String   @map("title")
+  content_html   String?  @map("content_html")
+
+  pdf            Bytes?   @map("pdf")
+  pdf_filename   String?  @map("pdf_filename")
+  pdf_mime       String?  @map("pdf_mime")
+
+  video          Bytes?   @map("video")
+  video_filename String?  @map("video_filename")
+  video_mime     String?  @map("video_mime")
+  youtube_url    String?  @map("youtube_url")
+
+  updated_by     String?  @map("updated_by")
+  created_at     DateTime @default(now()) @map("created_at")
+  updated_at     DateTime @updatedAt @map("updated_at")
+
+  @@map("resource")
+}
+
 model roles {
   id          String             @id @default(uuid()) @map("id")
   name        String             @unique @map("name")
@@ -589,18 +609,6 @@ model invoice {
   @@map("invoice")
 }
 
-model gemini_api_key_state {
-  id                     String    @id @default(uuid()) @map("id")
-  key_name               String    @unique @map("key_name")
-  last_quota_exceeded_at DateTime? @map("last_quota_exceeded_at")
-  blocked_until          DateTime? @map("blocked_until")
-  created_at             DateTime  @default(now()) @map("created_at")
-  updated_at             DateTime  @updatedAt @map("updated_at")
-
-  @@map("gemini_api_key_state")
-}
-
-
 enum image_status {
   PROCESSING
   COMPLETED
@@ -659,3 +667,4 @@ enum photographer_application_status {
 
   @@map("photographer_application_status")
 }
+

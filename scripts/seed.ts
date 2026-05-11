@@ -1,4 +1,4 @@
-import { main } from './seed.shared';
+import { main } from '../src/scripts/seed.shared';
 
 main().catch((error) => {
   console.error(error);

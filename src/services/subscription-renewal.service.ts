@@ -2,6 +2,7 @@ import prisma from "../dbConnection";
 import Stripe from "stripe";
 import { sendEmail } from "../config/mail.config";
 import InvoiceService, { InvoiceData } from "./invoice.service";
+import { sendCustomSubscriptionInvoiceEmail, sendSubscriptionStatusEmail } from "./payment.service";
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_API_VERSION = "2025-12-15.clover";
@@ -13,8 +14,23 @@ if (!STRIPE_SECRET_KEY) {
 const stripe = new Stripe(STRIPE_SECRET_KEY, { apiVersion: STRIPE_API_VERSION });
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const TEST_RENEWAL_INTERVAL_MS = (() => {
+    const value = Number(process.env.SUBSCRIPTION_RENEWAL_TEST_INTERVAL_MINUTES || 0);
+    return Number.isFinite(value) && value > 0 ? value * 60 * 1000 : null;
+})();
 
-function calculateNextRenewalDateFrom(baseDate: Date): Date {
+function calculateNextRenewalDateFrom(baseDate: Date, packageName?: string | null): Date {
+    if (TEST_RENEWAL_INTERVAL_MS) {
+        return new Date(baseDate.getTime() + TEST_RENEWAL_INTERVAL_MS);
+    }
+
+    const nextRenewalDate = new Date(baseDate);
+    if (typeof packageName === "string" && packageName.toLowerCase().includes("annual")) {
+        nextRenewalDate.setFullYear(nextRenewalDate.getFullYear() + 1);
+        return nextRenewalDate;
+    }
+
     return new Date(baseDate.getTime() + THIRTY_DAYS_MS);
 }
 
@@ -114,6 +130,11 @@ export class SubscriptionRenewalService {
                 select: {
                     id: true,
                     completed_at: true,
+                    package: {
+                        select: {
+                            name: true,
+                        },
+                    },
                 },
             });
 
@@ -125,7 +146,7 @@ export class SubscriptionRenewalService {
                 await Promise.all(
                     invalidRenewalDateSubscriptions.map((subscription) => {
                         const baseDate = subscription.completed_at || new Date();
-                        const nextRenewalDate = calculateNextRenewalDateFrom(baseDate);
+                        const nextRenewalDate = calculateNextRenewalDateFrom(baseDate, subscription.package?.name);
 
                         return prisma.user_credit_purchase.update({
                             where: { id: subscription.id },
@@ -148,6 +169,11 @@ export class SubscriptionRenewalService {
                     id: true,
                     completed_at: true,
                     nextRenewalDate: true,
+                    package: {
+                        select: {
+                            name: true,
+                        },
+                    },
                 },
             });
 
@@ -157,7 +183,7 @@ export class SubscriptionRenewalService {
                         return null;
                     }
 
-                    const expected = calculateNextRenewalDateFrom(subscription.completed_at);
+                    const expected = calculateNextRenewalDateFrom(subscription.completed_at, subscription.package?.name);
                     if (subscription.nextRenewalDate < expected) {
                         return { id: subscription.id, expected };
                     }
@@ -179,6 +205,58 @@ export class SubscriptionRenewalService {
                         })
                     )
                 );
+            }
+
+            if (TEST_RENEWAL_INTERVAL_MS) {
+                const activeSubscriptions = await prisma.user_credit_purchase.findMany({
+                    where: {
+                        autoRenewEnabled: true,
+                        cancelledAt: null,
+                        status: "completed",
+                    },
+                    select: {
+                        id: true,
+                        completed_at: true,
+                        created_at: true,
+                        nextRenewalDate: true,
+                        package: {
+                            select: {
+                                name: true,
+                            },
+                        },
+                    },
+                });
+
+                const subscriptionsToReschedule = activeSubscriptions
+                    .map((subscription) => {
+                        const baseDate = subscription.completed_at || subscription.created_at || now;
+                        const testNextRenewalDate = calculateNextRenewalDateFrom(baseDate, subscription.package?.name);
+
+                        if (!subscription.nextRenewalDate || subscription.nextRenewalDate > testNextRenewalDate) {
+                            return {
+                                id: subscription.id,
+                                nextRenewalDate: testNextRenewalDate,
+                            };
+                        }
+
+                        return null;
+                    })
+                    .filter((entry): entry is { id: string; nextRenewalDate: Date } => Boolean(entry));
+
+                if (subscriptionsToReschedule.length > 0) {
+                    console.log(
+                        `[processPendingRenewals] Test mode active. Rescheduling ${subscriptionsToReschedule.length} subscriptions to the accelerated interval.`
+                    );
+
+                    await Promise.all(
+                        subscriptionsToReschedule.map((entry) =>
+                            prisma.user_credit_purchase.update({
+                                where: { id: entry.id },
+                                data: { nextRenewalDate: entry.nextRenewalDate },
+                            })
+                        )
+                    );
+                }
             }
 
             // Find all active auto-renewal subscriptions where renewal date has passed
@@ -232,6 +310,34 @@ export class SubscriptionRenewalService {
                         error
                     );
                 }
+            }
+
+            // Clean up expired credits for cancelled subscriptions
+            try {
+                const now = new Date();
+                const expired = await prisma.user_credit_purchase.findMany({
+                    where: {
+                        creditExpiresAt: { lte: now },
+                        cancelledAt: { not: null },
+                        status: "completed",
+                    },
+                    include: { user: true },
+                });
+
+                for (const p of expired) {
+                    try {
+                        await prisma.user_credit_balance.upsert({
+                            where: { user_id: p.user_id },
+                            create: { user_id: p.user_id, balance: 0 },
+                            update: { balance: 0 },
+                        });
+                        console.log(`Cleared expired credits for user ${p.user_id} (subscription ${p.id})`);
+                    } catch (err) {
+                        console.warn(`Failed to clear expired credits for ${p.user_id}:`, err);
+                    }
+                }
+            } catch (err) {
+                console.warn("Error while cleaning expired credits:", err);
             }
 
             console.log(
@@ -297,6 +403,126 @@ export class SubscriptionRenewalService {
             }
 
             if (!defaultPaymentMethodId) {
+                // Re-fetch subscription to ensure we have reminder/expiry fields
+                const subRecord = await prisma.user_credit_purchase.findUnique({
+                    where: { id },
+                    select: {
+                        id: true,
+                        user_id: true,
+                        autoRenewEnabled: true,
+                        paymentReminderSentAt: true,
+                        completed_at: true,
+                        created_at: true,
+                        package: {
+                            select: {
+                                name: true,
+                            },
+                        },
+                    },
+                });
+
+                const now = new Date();
+
+                if (subRecord && subRecord.autoRenewEnabled === false) {
+                    const reminderSentAt = subRecord.paymentReminderSentAt ? new Date(subRecord.paymentReminderSentAt) : null;
+
+                    if (!reminderSentAt) {
+                        // Send a payment reminder using the invoice HTML template for consistency
+                        try {
+                            const invoiceData: InvoiceData = {
+                                invoiceId: `REM-${Date.now()}-${Math.random().toString(36).substr(2,6).toUpperCase()}`,
+                                subscriptionId: id,
+                                userId: user.id,
+                                packageName: creditPackage.name,
+                                credits: renewalCredits,
+                                amount: price_usd,
+                                currency: "usd",
+                                issueDate: now,
+                                dueDate: now,
+                                renewalNumber: subscription.renewalCount + 1,
+                                userName: user.name || "Valued Customer",
+                                userEmail: user.email,
+                                companyName: "Elevated Spaces",
+                            };
+
+                            const html = InvoiceService.generateInvoiceHTML(invoiceData);
+                            await sendEmail({
+                                from: "noreply@elevatedspaces.com",
+                                senderName: "Elevated Spaces",
+                                to: user.email,
+                                subject: `Action Required: Pending Subscription Payment - ${creditPackage.name}`,
+                                text: `We were unable to charge your saved payment method for your ${creditPackage.name} subscription. Please update your payment details within 24 hours to avoid cancellation.`,
+                                html: `
+                                    <h2>Payment Required: Pending Subscription</h2>
+                                    <p>Hi ${user.name || user.email},</p>
+                                    <p>We attempted to charge your saved payment method for the <strong>${creditPackage.name}</strong> subscription but could not complete the payment.</p>
+                                    <p>Please update your payment method within 24 hours to avoid automatic cancellation. If payment is not received within 24 hours, your subscription will be cancelled and any remaining credits will expire at the end of your current billing period.</p>
+                                    <hr/>
+                                    ${html}
+                                `,
+                            });
+
+                            await prisma.user_credit_purchase.update({
+                                where: { id },
+                                data: { paymentReminderSentAt: now },
+                            });
+
+                            return {
+                                success: false,
+                                message: "No saved payment method for customer; reminder sent",
+                                error: "Customer has no default/saved card",
+                            };
+                        } catch (err) {
+                            console.warn("Failed to send payment reminder:", err);
+                        }
+                    } else {
+                        // If reminder already sent, check if 24 hours elapsed -> cancel subscription
+                        if (now.getTime() - reminderSentAt.getTime() > ONE_DAY_MS) {
+                            const lastPaid = subRecord.completed_at || subRecord.created_at || new Date();
+                            const expiresAt = calculateNextRenewalDateFrom(lastPaid, subRecord.package?.name);
+
+                            await prisma.user_credit_purchase.update({
+                                where: { id },
+                                data: {
+                                    autoRenewEnabled: false,
+                                    cancelledAt: now,
+                                    cancellationReason: "Payment not received after reminder",
+                                    nextRenewalDate: null,
+                                    creditExpiresAt: expiresAt,
+                                },
+                            });
+
+                            try {
+                                await sendSubscriptionStatusEmail({
+                                    to: user.email,
+                                    userName: user.name || "Valued Customer",
+                                    packageName: creditPackage.name,
+                                    amount: price_usd,
+                                    invoiceId: `CNL-${Date.now()}-${Math.random().toString(36).substr(2,6).toUpperCase()}`,
+                                    renewalNumber: subscription.renewalCount + 1,
+                                    planChangedOn: now,
+                                    creditsAvailableUntil: expiresAt,
+                                    reason: "Payment not received after reminder",
+                                    subject: "Your Subscription Has Been Updated",
+                                });
+                            } catch (err) {
+                                console.warn("Failed to send cancellation email:", err);
+                            }
+
+                            return {
+                                success: false,
+                                message: "Subscription cancelled due to non-payment after reminder",
+                                error: "Cancelled after reminder",
+                            };
+                        }
+                        return {
+                            success: false,
+                            message: "Payment missing; reminder previously sent",
+                            error: "No default payment method",
+                        };
+                    }
+                }
+
                 return {
                     success: false,
                     message: "No saved payment method for customer",
@@ -332,7 +558,7 @@ export class SubscriptionRenewalService {
             const paidAt = paymentIntent.created
                 ? new Date(paymentIntent.created * 1000)
                 : new Date();
-            const nextRenewalDate = calculateNextRenewalDateFrom(paidAt);
+            const nextRenewalDate = calculateNextRenewalDateFrom(paidAt, creditPackage.name);
 
             await prisma.$transaction([
                 prisma.user_credit_purchase.update({
@@ -419,7 +645,16 @@ export class SubscriptionRenewalService {
         try {
             const targetSubscription = await prisma.user_credit_purchase.findUnique({
                 where: { id: subscriptionId },
-                select: { user_id: true, completed_at: true, created_at: true },
+                select: {
+                    user_id: true,
+                    completed_at: true,
+                    created_at: true,
+                    package: {
+                        select: {
+                            name: true,
+                        },
+                    },
+                },
             });
 
             if (!targetSubscription) {
@@ -446,9 +681,9 @@ export class SubscriptionRenewalService {
                 },
             });
 
-            // Calculate next renewal exactly 30 days from the user's last successful payment.
+            // Calculate next renewal from the user's last successful payment using the plan interval.
             const lastPaymentDate = targetSubscription.completed_at || targetSubscription.created_at;
-            const nextRenewalDate = calculateNextRenewalDateFrom(lastPaymentDate);
+            const nextRenewalDate = calculateNextRenewalDateFrom(lastPaymentDate, targetSubscription.package?.name);
 
             await prisma.user_credit_purchase.update({
                 where: { id: subscriptionId },
@@ -535,6 +770,10 @@ export class SubscriptionRenewalService {
 
             const now = new Date();
 
+            // Determine credit expiry from the subscription's billing interval.
+            const lastPaid = subscription.completed_at || subscription.created_at || new Date();
+            const creditExpiresAt = calculateNextRenewalDateFrom(lastPaid, subscription.package?.name);
+
             await prisma.user_credit_purchase.update({
                 where: { id: subscriptionId },
                 data: {
@@ -542,31 +781,27 @@ export class SubscriptionRenewalService {
                     cancelledAt: now,
                     cancellationReason: reason || "User requested cancellation",
                     nextRenewalDate: null,
+                    creditExpiresAt,
                 },
             });
 
-            // Send cancellation confirmation email
-            await sendEmail({
-                from: "noreply@elevatedspaces.com",
-                senderName: "Elevated Spaces",
-                to: subscription.user.email,
-                subject: "Your Subscription Has Been Cancelled",
-                text: `Your ${subscription.package.name} subscription has been cancelled. Your remaining credits will continue to work until they are exhausted.`,
-                html: `
-                    <h2>Subscription Cancellation Confirmation</h2>
-                    <p>Hi ${subscription.user.name},</p>
-                    <p>Your ${subscription.package.name} subscription has been cancelled.</p>
-                    <p><strong>Cancellation Details:</strong></p>
-                    <ul>
-                        <li>Package: ${subscription.package.name}</li>
-                        <li>Cancelled on: ${now.toLocaleDateString()}</li>
-                        <li>Remaining Credits: ${subscription.amount}</li>
-                        ${reason ? `<li>Reason: ${reason}</li>` : ""}
-                    </ul>
-                    <p>Your remaining credits will continue to work until they are exhausted.</p>
-                    <p>If you would like to reactivate your subscription, you can do so anytime from your account settings.</p>
-                `,
-            });
+            // Send cancellation confirmation email using the invoice-style template for consistency
+            try {
+                await sendSubscriptionStatusEmail({
+                    to: subscription.user.email,
+                    userName: subscription.user.name || "Valued Customer",
+                    packageName: subscription.package.name,
+                    amount: subscription.price_usd,
+                    invoiceId: `CANCEL-${Date.now()}-${Math.random().toString(36).substr(2,6).toUpperCase()}`,
+                    renewalNumber: subscription.renewalCount || 0,
+                    planChangedOn: now,
+                    creditsAvailableUntil: creditExpiresAt,
+                    reason: reason || "User requested cancellation",
+                    subject: "Your Subscription Has Been Updated",
+                });
+            } catch (err) {
+                console.warn("Failed to send cancellation email:", err);
+            }
 
             console.log(
                 `Subscription ${subscriptionId} cancelled for user ${subscription.user.id}. Reason: ${reason || "Not provided"}`
@@ -578,8 +813,13 @@ export class SubscriptionRenewalService {
                 subscriptionId,
             };
         } catch (error) {
-            const errorMessage =
-                error instanceof Error ? error.message : "Unknown error";
+            const errorMessage = error instanceof Error ? error.message : "Unknown error";
+            console.error("[SubscriptionRenewalService] cancelSubscription caught error:", {
+                message: errorMessage,
+                name: (error as any)?.name,
+                stack: (error as any)?.stack,
+                raw: error,
+            });
             return {
                 success: false,
                 message: "Failed to cancel subscription",

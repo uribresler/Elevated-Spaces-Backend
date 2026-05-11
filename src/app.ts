@@ -12,6 +12,7 @@ import projectsRoute from './api/projects.route'
 import paymentRoutes from './api/payment.routes'
 import adminLogsRoute from './api/admin-logs.route'
 import legalDocumentsRoute from './api/legal-documents.route'
+import resourceRoute from './api/resource.route'
 import subscriptionRoutes from './api/subscription.route'
 import paymentHistoryRoutes from './api/payment-history.route'
 import debugRoutes from './api/debug.route'
@@ -104,6 +105,7 @@ app.use('/api/payments', paymentHistoryRoutes)
 app.use('/api/admin/logs', adminLogsRoute)
 app.use('/api/consents', consentsRoute)
 app.use('/api/legal-documents', legalDocumentsRoute)
+app.use('/api/resources', resourceRoute)
 app.use('/api/subscriptions', subscriptionRoutes)
 app.use('/debug', debugRoutes)
 app.use('/api/photographers', photographerRoutes)

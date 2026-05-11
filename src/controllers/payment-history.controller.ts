@@ -195,6 +195,7 @@ export class PaymentHistoryController {
             }, {});
 
             const personalTransactions = subscriptions.map((sub) => {
+                const resolvedStatus = (sub.status === 'pending' && sub.stripe_session_id) ? 'in_process' : sub.status;
                 const packageName = sub.package.name;
                 const tier = getPlanTierFromPackageName(packageName);
                 const billingCycle = getBillingCycleFromPackageName(packageName);
@@ -211,7 +212,7 @@ export class PaymentHistoryController {
                 packageName: normalizePackageName(packageName),
                 credits: sub.amount,
                 amount,
-                status: sub.status,
+                status: resolvedStatus,
                 autoRenewal: sub.autoRenewEnabled,
                 renewalCount: sub.renewalCount,
                 createdAt: sub.created_at,
@@ -248,7 +249,7 @@ export class PaymentHistoryController {
                     packageName: inferred.packageName,
                     credits: inferred.isExtraSeatPurchase ? 0 : purchase.amount,
                     amount,
-                    status: purchase.status,
+                    status: (purchase.status === 'pending' && purchase.stripe_session_id) ? 'in_process' : purchase.status,
                     autoRenewal: inferred.isExtraSeatPurchase ? true : false,
                     renewalCount: 0,
                     createdAt: purchase.created_at,

@@ -92,7 +92,7 @@ async function debugSendStripeInvoice(invoiceId: string, scope: string) {
     }
 }
 
-async function sendCustomSubscriptionInvoiceEmail(params: {
+export async function sendCustomSubscriptionInvoiceEmail(params: {
     to: string;
     userName: string;
     packageName: string;
@@ -103,6 +103,7 @@ async function sendCustomSubscriptionInvoiceEmail(params: {
     dueDate?: Date;
     invoicePdfUrl?: string | null;
     hostedInvoiceUrl?: string | null;
+    subject?: string;
 }) {
     const {
         to,
@@ -115,6 +116,7 @@ async function sendCustomSubscriptionInvoiceEmail(params: {
         dueDate = new Date(),
         invoicePdfUrl,
         hostedInvoiceUrl,
+        subject,
     } = params;
 
     const invoiceHTML = InvoiceService.generateInvoiceHTML({
@@ -142,7 +144,7 @@ async function sendCustomSubscriptionInvoiceEmail(params: {
         from: "noreply@elevatedspaces.com",
         senderName: "Elevated Spaces",
         to,
-        subject: `Invoice #${invoiceId} - ${packageName} Subscription Renewal`,
+        subject: subject || `Invoice #${invoiceId} - ${packageName} Subscription Renewal`,
         text: [
             `Hi ${userName},`,
             "",
@@ -153,6 +155,162 @@ async function sendCustomSubscriptionInvoiceEmail(params: {
             "Thank you for continuing with Elevated Spaces!",
         ].filter(Boolean).join("\n"),
         html: `${invoiceHTML}${extraLinks}`,
+    });
+}
+
+export async function sendSubscriptionStatusEmail(params: {
+    to: string;
+    userName: string;
+    packageName: string;
+    amount: number;
+    invoiceId: string;
+    renewalNumber: number;
+    planChangedOn: Date;
+    creditsAvailableUntil: Date;
+    reason?: string;
+    subject?: string;
+}) {
+    const {
+        to,
+        userName,
+        packageName,
+        amount,
+        invoiceId,
+        renewalNumber,
+        planChangedOn,
+        creditsAvailableUntil,
+        reason,
+        subject,
+    } = params;
+
+    const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; }
+                .container { max-width: 900px; margin: 0 auto; padding: 40px 20px; }
+                .header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 40px; border-bottom: 2px solid #007bff; padding-bottom: 20px; }
+                .company-info h1 { font-size: 24px; color: #007bff; margin-bottom: 5px; }
+                .invoice-info { text-align: right; }
+                .invoice-info h2 { font-size: 28px; color: #333; margin-bottom: 10px; }
+                .invoice-info p { font-size: 12px; color: #666; line-height: 1.6; }
+                .customer-section { margin: 40px 0; }
+                .section-title { font-size: 12px; font-weight: bold; color: #007bff; text-transform: uppercase; margin-bottom: 8px; }
+                .customer-info { font-size: 13px; line-height: 1.6; color: #555; }
+                .items-table { width: 100%; margin: 30px 0; border-collapse: collapse; }
+                .items-table th { background-color: #f5f5f5; padding: 12px 10px; text-align: left; font-size: 12px; font-weight: 600; color: #333; border-bottom: 2px solid #007bff; }
+                .items-table td { padding: 12px 10px; font-size: 13px; border-bottom: 1px solid #ddd; }
+                .items-table tr:hover { background-color: #f9f9f9; }
+                .text-right { text-align: right; }
+                .summary { margin: 30px 0; display: flex; justify-content: flex-end; }
+                .summary-box { width: 300px; }
+                .summary-row { display: flex; justify-content: space-between; padding: 8px 0; font-size: 13px; border-bottom: 1px solid #ddd; }
+                .summary-row.total { font-weight: bold; font-size: 16px; border-bottom: 2px solid #007bff; color: #007bff; padding: 12px 0; }
+                .footer { margin-top: 50px; padding-top: 20px; border-top: 1px solid #ddd; font-size: 11px; color: #999; text-align: center; line-height: 1.6; }
+                .badge { display: inline-block; background-color: #28a745; color: white; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+                .status-badge { background-color: #f59e0b; }
+                .notice { margin-top: 18px; padding: 14px 16px; border: 1px solid #bfdbfe; background: #eff6ff; border-radius: 8px; font-size: 13px; line-height: 1.7; }
+                .notice strong { color: #1d4ed8; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <div class="company-info">
+                        <h1>Elevated Spaces</h1>
+                        <p style="font-size: 12px; color: #666;">Virtual Staging & Credit Platform</p>
+                    </div>
+                    <div class="invoice-info">
+                        <h2>PLAN UPDATE</h2>
+                        <p><strong>Reference #:</strong> ${invoiceId}</p>
+                        <p><strong>Change #:</strong> ${renewalNumber}</p>
+                        <p><strong>Plan changed:</strong> ${planChangedOn.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
+                        <p><strong>Credits available until:</strong> ${creditsAvailableUntil.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
+                        <p style="margin-top: 8px;"><span class="badge status-badge">PLAN CHANGED</span></p>
+                    </div>
+                </div>
+
+                <div class="customer-section">
+                    <div class="section-title">Account</div>
+                    <div class="customer-info">
+                        <p><strong>${userName}</strong></p>
+                        <p>${to}</p>
+                    </div>
+                </div>
+
+                <div class="notice">
+                    <p><strong>Your plan has changed.</strong></p>
+                    <p>Your ${packageName} subscription is no longer active for auto-renewal. Any remaining credits will stay available until <strong>${creditsAvailableUntil.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</strong>.</p>
+                    ${reason ? `<p style="margin-top: 8px;"><strong>Reason:</strong> ${reason}</p>` : ""}
+                </div>
+
+                <table class="items-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 50%;">Description</th>
+                            <th style="width: 20%;">Status</th>
+                            <th style="width: 15%;" class="text-right">Amount</th>
+                            <th style="width: 15%;" class="text-right">Credits</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>
+                                <strong>${packageName} Plan Change</strong><br>
+                                <span style="font-size: 12px; color: #666;">Credits remain usable until the expiry date above</span>
+                            </td>
+                            <td>Updated</td>
+                            <td class="text-right">$${amount.toFixed(2)}</td>
+                            <td class="text-right"><strong>${amount > 0 ? "Included" : "N/A"}</strong></td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="summary">
+                    <div class="summary-box">
+                        <div class="summary-row">
+                            <span>Plan status:</span>
+                            <span>Changed</span>
+                        </div>
+                        <div class="summary-row">
+                            <span>Credits available until:</span>
+                            <span>${creditsAvailableUntil.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</span>
+                        </div>
+                        <div class="summary-row total">
+                            <span>Remaining access:</span>
+                            <span>Active until expiry</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="footer">
+                    <p><strong>Thank you for using Elevated Spaces!</strong></p>
+                    <p>Your remaining credits will continue to work until the expiry date listed above.</p>
+                    <p style="margin-top: 15px; color: #666;"><strong>Elevated Spaces</strong> © 2026. All rights reserved.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+    `;
+
+    await sendEmail({
+        from: "noreply@elevatedspaces.com",
+        senderName: "Elevated Spaces",
+        to,
+        subject: subject || `Your Subscription Has Been Updated - ${packageName}`,
+        text: [
+            `Hi ${userName},`,
+            "",
+            `Your ${packageName} plan has changed.`,
+            `Credits remain available until ${creditsAvailableUntil.toLocaleDateString()}.`,
+            reason ? `Reason: ${reason}` : "",
+            "",
+            "If you have any questions, please reply to this email.",
+        ].filter(Boolean).join("\n"),
+        html,
     });
 }
 
@@ -199,7 +357,12 @@ const PRODUCT_KEY_ALIASES: Record<string, ProductKey> = {
 };
 
 function normalizeProductKey(productKey: string): string {
-    const normalized = (productKey || "").trim().toLowerCase();
+    const normalized = (productKey || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[\s-]+/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_|_$/g, "");
     if (PRODUCT_KEY_ALIASES[normalized]) {
         return PRODUCT_KEY_ALIASES[normalized];
     }
@@ -517,7 +680,7 @@ async function enforceSingleActiveAutoRenewalSubscription({
     userId: string;
     keepPurchaseId: string;
 }) {
-    await prisma.user_credit_purchase.updateMany({
+    const subscriptionsToCancel = await prisma.user_credit_purchase.findMany({
         where: {
             user_id: userId,
             id: { not: keepPurchaseId },
@@ -525,13 +688,67 @@ async function enforceSingleActiveAutoRenewalSubscription({
             autoRenewEnabled: true,
             cancelledAt: null,
         },
+        include: {
+            user: {
+                select: {
+                    id: true,
+                    email: true,
+                    name: true,
+                },
+            },
+            package: true,
+        },
+    });
+
+    if (subscriptionsToCancel.length === 0) {
+        return;
+    }
+
+    const cancelledAt = new Date();
+
+    await prisma.user_credit_purchase.updateMany({
+        where: {
+            id: { in: subscriptionsToCancel.map((subscription) => subscription.id) },
+        },
         data: {
             autoRenewEnabled: false,
             nextRenewalDate: null,
-            cancelledAt: new Date(),
+            cancelledAt,
             cancellationReason: "Replaced by newer subscription purchase",
         },
     });
+
+    await Promise.all(
+        subscriptionsToCancel.map(async (subscription) => {
+            const lastPaid = subscription.completed_at || subscription.created_at || cancelledAt;
+            const creditsAvailableUntil = new Date(lastPaid.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+            try {
+                await sendSubscriptionStatusEmail({
+                    to: subscription.user.email,
+                    userName: subscription.user.name || "Valued Customer",
+                    packageName: subscription.package.name,
+                    amount: subscription.price_usd,
+                    invoiceId: `CANCEL-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`,
+                    renewalNumber: subscription.renewalCount || 0,
+                    planChangedOn: cancelledAt,
+                    creditsAvailableUntil,
+                    reason: "Replaced by newer subscription purchase",
+                    subject: "Your Subscription Has Been Updated",
+                });
+                console.log("[PAYMENT] Sent plan-change cancellation email", {
+                    subscriptionId: subscription.id,
+                    userId: subscription.user_id,
+                });
+            } catch (error: any) {
+                console.warn("[PAYMENT] Failed to send plan-change cancellation email", {
+                    subscriptionId: subscription.id,
+                    userId: subscription.user_id,
+                    message: error?.message || error,
+                });
+            }
+        })
+    );
 }
 
 async function assertTeamOwner(teamId: string, userId: string) {
@@ -584,6 +801,7 @@ export async function createCheckoutSession({
     quantity,
     confirmPlanChange,
     seatAutoRenew,
+    autoRenewEnabled,
 }: {
     userId: string;
     productKey: string;
@@ -593,6 +811,7 @@ export async function createCheckoutSession({
     quantity?: number;
     confirmPlanChange?: boolean;
     seatAutoRenew?: boolean;
+    autoRenewEnabled?: boolean;
 }) {
     const normalizedProductKey = normalizeProductKey(productKey);
     const isSubscriptionTopUp = normalizedProductKey === "subscription_topup";
@@ -735,7 +954,21 @@ export async function createCheckoutSession({
         metadata.topUp = "true";
     } else {
         credits = calcCredits(config!, safeQuantity);
-        unitAmount = toCents(config!.unitAmountUsd);
+        // Prefer DB-stored package price for subscription plans when available (helps staging update prices)
+        if (config!.type === 'subscription' && PLAN_PRODUCT_KEYS.has(normalizeProductKey(productKey))) {
+            try {
+                const pkg = await prisma.credit_package.findFirst({ where: { name: config!.name } });
+                if (pkg && typeof pkg.price === 'number' && pkg.price > 0) {
+                    unitAmount = toCents(pkg.price);
+                } else {
+                    unitAmount = toCents(config!.unitAmountUsd);
+                }
+            } catch (err) {
+                unitAmount = toCents(config!.unitAmountUsd);
+            }
+        } else {
+            unitAmount = toCents(config!.unitAmountUsd);
+        }
         totalAmount = unitAmount * safeQuantity;
         productName = config!.name;
         metadata.productType = config!.type;
@@ -752,6 +985,10 @@ export async function createCheckoutSession({
     if (isSeatAddon) {
         metadata.seatUnits = String(safeQuantity);
         metadata.seatAutoRenew = String(shouldAutoRenewSeat);
+    }
+
+    if (typeof autoRenewEnabled === "boolean") {
+        metadata.autoRenewEnabled = String(autoRenewEnabled);
     }
 
     if (teamId) {
@@ -831,6 +1068,10 @@ export async function createCheckoutSession({
                     price_usd: totalAmount / 100,
                     status: "pending",
                     stripe_session_id: session.id,
+                    autoRenewEnabled: isSubscriptionMode
+                        ? (typeof autoRenewEnabled === "boolean" ? autoRenewEnabled : true)
+                        : false,
+                    nextRenewalDate: null,
                 },
             });
         } else {
@@ -1214,22 +1455,24 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
         return;
     }
 
-    if (session.payment_status !== "paid") {
-        // Not a successful payment, do not process further
-        console.log('[PAYMENT] Early return: Payment status is not "paid", status:', session.payment_status);
-        return;
-    }
-
-    console.log('[PAYMENT] ✅ Passed validation checks, proceeding with payment processing...');
-
-
     if (session.amount_total !== null && session.amount_total !== expectedAmount) {
         throw new Error("Amount mismatch for checkout session");
     }
 
+    // Fetch fresh session data from Stripe to ensure payment_status is up-to-date
+    // (webhook event data may have stale status due to timing)
     const detailedSession = await stripe.checkout.sessions.retrieve(session.id, {
         expand: ["invoice"],
     });
+
+    // NOW check payment_status on the fresh data
+    if (detailedSession.payment_status !== "paid") {
+        // Not a successful payment, do not process further
+        console.log('[PAYMENT] Early return: Payment status is not "paid", status:', detailedSession.payment_status);
+        return;
+    }
+
+    console.log('[PAYMENT] ✅ Passed validation checks, proceeding with payment processing...');
     const detailedInvoice = typeof detailedSession.invoice === "string" ? null : detailedSession.invoice;
     const stripeInvoicePdfUrl = detailedInvoice?.invoice_pdf || null;
     const stripeInvoiceHostedUrl = detailedInvoice?.hosted_invoice_url || null;
@@ -1239,6 +1482,14 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
     const isSubscriptionPlanPurchase =
         session.mode === "subscription" &&
         (PLAN_PRODUCT_KEYS.has(normalizedProductKey as ProductKey) || isSeatAddon);
+    
+    // Parse autoRenewEnabled from metadata (defaults to isSubscriptionPlanPurchase if not explicitly set)
+    const autoRenewEnabledFromMetadata = metadata.autoRenewEnabled;
+    let shouldAutoRenew = isSubscriptionPlanPurchase; // Default for backward compatibility
+    if (typeof autoRenewEnabledFromMetadata === "string") {
+        shouldAutoRenew = autoRenewEnabledFromMetadata === "true" ? true : false;
+    }
+    
     const subscriptionId = typeof session.subscription === "string"
         ? session.subscription
         : session.subscription?.id;
@@ -1345,6 +1596,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                 const nextRenewalDate = isSubscriptionPlanPurchase
                     ? calculateNextRenewalDate(new Date())
                     : null;
+                console.log('[PAYMENT] Processing checkout.completed - session:', session.id, 'metadata.autoRenewEnabled=', metadata.autoRenewEnabled, 'resolvedAutoRenew=', shouldAutoRenew);
 
                 operations.push(
                     prisma.user_credit_purchase.create({
@@ -1357,8 +1609,8 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                             stripe_session_id: session.id,
                             stripe_subscription_id: isSubscriptionPlanPurchase ? subscriptionId : null,
                             completed_at: new Date(),
-                            autoRenewEnabled: isSubscriptionPlanPurchase,
-                            nextRenewalDate,
+                            autoRenewEnabled: shouldAutoRenew,
+                            nextRenewalDate: shouldAutoRenew ? nextRenewalDate : null,
                             renewalCount: 0,
                         },
                     })
@@ -1367,6 +1619,8 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                 const nextRenewalDate = isSubscriptionPlanPurchase
                     ? calculateNextRenewalDate(new Date())
                     : null;
+
+                console.log('[PAYMENT] Completing pending purchase - session:', session.id, 'metadata.autoRenewEnabled=', metadata.autoRenewEnabled, 'resolvedAutoRenew=', shouldAutoRenew, 'existingPurchaseId=', existing.id);
 
                 const completionResult = await prisma.user_credit_purchase.updateMany({
                     where: {
@@ -1377,8 +1631,8 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                         status: "completed",
                         completed_at: new Date(),
                         stripe_subscription_id: isSubscriptionPlanPurchase ? subscriptionId : null,
-                        autoRenewEnabled: isSubscriptionPlanPurchase,
-                        nextRenewalDate,
+                        autoRenewEnabled: shouldAutoRenew,
+                        nextRenewalDate: shouldAutoRenew ? nextRenewalDate : null,
                     },
                 });
 
@@ -1439,7 +1693,31 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                     orderBy: { created_at: "desc" },
                 });
 
-                if (session.mode === "subscription" && completedPurchase) {
+                if (session.mode === "subscription" && completedPurchase && isSubscriptionPlanPurchase) {
+                    // For annual plans, allocate credits monthly (total / 12)
+                    // Check if this is an annual plan
+                    const packageRecord = await prisma.credit_package.findUnique({
+                        where: { id: completedPurchase.package_id },
+                    });
+                    const isAnnualPlan = packageRecord?.name && packageRecord.name.toLowerCase().includes('annual');
+                    
+                    if (isAnnualPlan && credits > 0) {
+                        // Store original credits for monthly allocation
+                        const monthlyCredits = Math.floor(credits / 12);
+                        await prisma.user_credit_purchase.update({
+                            where: { id: completedPurchase.id },
+                            data: {
+                                amount: monthlyCredits, // This becomes the monthly allocation
+                                metadata: {
+                                    totalAnnualCredits: credits,
+                                    monthlyAllocation: monthlyCredits,
+                                    isAnnualPlan: true,
+                                },
+                            },
+                        });
+                        console.log(`[PAYMENT] Annual plan setup - total: ${credits}, monthly: ${monthlyCredits}`);
+                    }
+                    
                     await enforceSingleActiveAutoRenewalSubscription({
                         userId,
                         keepPurchaseId: completedPurchase.id,
@@ -1500,7 +1778,8 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
     }
 
     // Send receipt email after successful payment processing
-    if (userEmail && session.mode !== "subscription") {
+    // Send emails for both subscription and one-time purchases
+    if (userEmail && (session.mode !== "subscription" || isSubscriptionPlanPurchase)) {
         let emailSent = false;
         let emailError: string | undefined = undefined;
         let emailSentAt: Date | undefined = undefined;
@@ -1508,37 +1787,57 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
         console.log('[PAYMENT] ===== ENTERING EMAIL SECTION =====');
         console.log('[PAYMENT] userEmail:', userEmail);
         console.log('[PAYMENT] credits:', credits);
+        console.log('[PAYMENT] isSubscriptionPlanPurchase:', isSubscriptionPlanPurchase);
         console.log('[PAYMENT] sessionId:', session.id);
 
         try {
-            console.log(`[EMAIL-DEBUG] User and email found, preparing to send receipt to ${userEmail}`);
-            await sendEmail({
-                from: "hello@elevatespacesai.com",
-                senderName: "Elevated Spaces",
-                to: userEmail,
-                subject: stripeInvoicePdfUrl || stripeInvoiceHostedUrl
-                    ? "Your Stripe Invoice and Payment Confirmation"
-                    : "Your Payment Receipt - Elevated Spaces",
-                text: [
-                    "Thank you for your payment!",
-                    "",
-                    `Product: ${productName}`,
-                    `Credits: ${credits}`,
-                    `Amount Paid: $${((session.amount_total || 0) / 100).toFixed(2)}`,
-                    stripeInvoiceHostedUrl ? `Stripe invoice: ${stripeInvoiceHostedUrl}` : "",
-                    stripeInvoicePdfUrl ? `Stripe invoice PDF: ${stripeInvoicePdfUrl}` : "",
-                    "",
-                    "If you have any questions, contact support@elevatespacesai.com.",
-                ].filter(Boolean).join("\n"),
-                html: `
-                    <h2>Thank you for your payment!</h2>
-                    <p><b>Product:</b> ${productName}<br/><b>Credits:</b> ${credits}<br/><b>Amount Paid:</b> $${((session.amount_total || 0) / 100).toFixed(2)}</p>
-                    ${stripeInvoiceHostedUrl ? `<p><b>Stripe invoice:</b> <a href="${stripeInvoiceHostedUrl}">${stripeInvoiceHostedUrl}</a></p>` : ""}
-                    ${stripeInvoicePdfUrl ? `<p><b>Stripe invoice PDF:</b> <a href="${stripeInvoicePdfUrl}">${stripeInvoicePdfUrl}</a></p>` : ""}
-                    <p>If you have any questions, contact <a href='mailto:support@elevatespacesai.com'>support@elevatespacesai.com</a>.</p>
-                `,
-            });
-            console.log(`[EMAIL-DEBUG] Payment receipt sent to ${userEmail} successfully.`);
+            console.log(`[EMAIL-DEBUG] User and email found, preparing to send email to ${userEmail}`);
+            
+            // Use custom subscription invoice template for plan subscriptions
+            if (isSubscriptionPlanPurchase && userName) {
+                await sendCustomSubscriptionInvoiceEmail({
+                    to: userEmail,
+                    userName,
+                    packageName: productName,
+                    amount: (session.amount_total || 0) / 100,
+                    invoiceId: `INV-${session.id}`,
+                    renewalNumber: 0,
+                    issueDate: new Date(),
+                    dueDate: new Date(),
+                    invoicePdfUrl: stripeInvoicePdfUrl,
+                    hostedInvoiceUrl: stripeInvoiceHostedUrl,
+                });
+                console.log(`[EMAIL-DEBUG] Subscription invoice email sent to ${userEmail} successfully.`);
+            } else {
+                // Send standard receipt email for non-subscription purchases
+                await sendEmail({
+                    from: "hello@elevatespacesai.com",
+                    senderName: "Elevated Spaces",
+                    to: userEmail,
+                    subject: stripeInvoicePdfUrl || stripeInvoiceHostedUrl
+                        ? "Your Stripe Invoice and Payment Confirmation"
+                        : "Your Payment Receipt - Elevated Spaces",
+                    text: [
+                        "Thank you for your payment!",
+                        "",
+                        `Product: ${productName}`,
+                        `Credits: ${credits}`,
+                        `Amount Paid: $${((session.amount_total || 0) / 100).toFixed(2)}`,
+                        stripeInvoiceHostedUrl ? `Stripe invoice: ${stripeInvoiceHostedUrl}` : "",
+                        stripeInvoicePdfUrl ? `Stripe invoice PDF: ${stripeInvoicePdfUrl}` : "",
+                        "",
+                        "If you have any questions, contact support@elevatespacesai.com.",
+                    ].filter(Boolean).join("\n"),
+                    html: `
+                        <h2>Thank you for your payment!</h2>
+                        <p><b>Product:</b> ${productName}<br/><b>Credits:</b> ${credits}<br/><b>Amount Paid:</b> $${((session.amount_total || 0) / 100).toFixed(2)}</p>
+                        ${stripeInvoiceHostedUrl ? `<p><b>Stripe invoice:</b> <a href="${stripeInvoiceHostedUrl}">${stripeInvoiceHostedUrl}</a></p>` : ""}
+                        ${stripeInvoicePdfUrl ? `<p><b>Stripe invoice PDF:</b> <a href="${stripeInvoicePdfUrl}">${stripeInvoicePdfUrl}</a></p>` : ""}
+                        <p>If you have any questions, contact <a href='mailto:support@elevatespacesai.com'>support@elevatespacesai.com</a>.</p>
+                    `,
+                });
+                console.log(`[EMAIL-DEBUG] Payment receipt sent to ${userEmail} successfully.`);
+            }
             emailSent = true;
             emailSentAt = new Date();
         } catch (emailErr) {
@@ -1639,6 +1938,11 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
     const userId = metadata.userId;
     const teamId = metadata.teamId;
     const quantity = Number(metadata.quantity || 1);
+    const autoRenewEnabledFromMetadata = metadata.autoRenewEnabled;
+    const shouldAutoRenew =
+        autoRenewEnabledFromMetadata === "false"
+            ? false
+            : true;
 
     console.error('[WEBHOOK] Extracted metadata - productKey:', productKey, 'purchaseFor:', purchaseFor, 'userId:', userId, 'teamId:', teamId, 'quantity:', quantity);
 
@@ -1841,6 +2145,8 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
             return;
         }
 
+        const nextRenewalDate = shouldAutoRenew ? calculateNextRenewalDate(new Date()) : null;
+
         await prisma.$transaction([
             recentPurchase
                 ? prisma.user_credit_purchase.update({
@@ -1851,6 +2157,8 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
                         status: "completed",
                         stripe_invoice_id: invoice.id,
                         completed_at: new Date(),
+                        autoRenewEnabled: shouldAutoRenew,
+                        nextRenewalDate,
                     },
                 })
                 : prisma.user_credit_purchase.create({
@@ -1862,6 +2170,9 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
                         status: "completed",
                         stripe_invoice_id: invoice.id,
                         completed_at: new Date(),
+                        autoRenewEnabled: shouldAutoRenew,
+                        nextRenewalDate,
+                        renewalCount: 0,
                     },
                 }),
             applyCreditsToUser(userId, credits),
@@ -2099,7 +2410,15 @@ export async function processPendingPurchases() {
                         session.mode === "subscription" ||
                         PLAN_PRODUCT_KEYS.has(normalizedProductKey as any) ||
                         SUBSCRIPTION_PLAN_PACKAGE_NAMES.includes(purchase.package?.name || "");
-                    const nextRenewalDate = calculateNextRenewalDate(new Date());
+                    const autoRenewEnabledFromMetadata = metadata.autoRenewEnabled;
+                    const shouldAutoRenew = !isSubscriptionPlan
+                        ? false
+                        : autoRenewEnabledFromMetadata === "false"
+                            ? false
+                            : typeof autoRenewEnabledFromMetadata === "string"
+                                ? true
+                                : purchase.autoRenewEnabled;
+                    const nextRenewalDate = shouldAutoRenew ? calculateNextRenewalDate(new Date()) : null;
 
                     const demoTransferCredits = await getOneTimeDemoTransferCredits({
                         userId: purchase.user_id,
@@ -2115,8 +2434,8 @@ export async function processPendingPurchases() {
                         data: {
                             status: "completed",
                             completed_at: new Date(),
-                            autoRenewEnabled: isSubscriptionPlan,
-                            nextRenewalDate: isSubscriptionPlan ? nextRenewalDate : null,
+                            autoRenewEnabled: shouldAutoRenew,
+                            nextRenewalDate,
                             renewalCount: 0,
                         },
                     });
@@ -2158,7 +2477,7 @@ export async function processPendingPurchases() {
 
                     await prisma.$transaction(operations);
 
-                    if (isSubscriptionPlan) {
+                    if (shouldAutoRenew) {
                         await enforceSingleActiveAutoRenewalSubscription({
                             userId: purchase.user_id,
                             keepPurchaseId: purchase.id,
@@ -2171,6 +2490,8 @@ export async function processPendingPurchases() {
                         productKey: rawProductKey,
                         normalizedProductKey,
                         isSubscriptionPlan,
+                        metadataAutoRenewEnabled: autoRenewEnabledFromMetadata,
+                        shouldAutoRenew,
                         credits: purchase.amount,
                         transferredDemoCredits: demoTransferCredits,
                     });

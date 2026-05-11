@@ -41,6 +41,14 @@ export async function createProjectService({
         throw new Error("Project name is required");
     }
 
+    // Require an active paid subscription to create projects
+    const hasActivePurchase = await prisma.user_credit_purchase.findFirst({
+        where: { user_id: userId, status: "completed", cancelledAt: null },
+    });
+    if (!hasActivePurchase) {
+        throw new Error("Creating projects requires an active paid subscription. Please subscribe to a plan.");
+    }
+
     // Sanitize teamId - treat empty strings, "null", "undefined" as null
     const sanitizedTeamId = teamId && teamId !== 'null' && teamId !== 'undefined' && teamId.trim() !== '' 
         ? teamId.trim() 

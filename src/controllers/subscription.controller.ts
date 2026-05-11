@@ -249,8 +249,10 @@ export class SubscriptionController {
             });
         } catch (error) {
             console.error("Error cancelling subscription:", error);
+            const errorMessage = error instanceof Error ? error.message : "Unknown error";
             return res.status(500).json({
                 error: "Failed to cancel subscription",
+                details: errorMessage,
             });
         }
     }

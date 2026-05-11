@@ -32,8 +32,20 @@ export async function createTeam(req: Request, res: Response) {
             return res.status(404).json({ message: error.message });
         }
 
+        // Surface plan/seat related errors to frontend with suitable status codes
+        const isPlanRequired = error.code === "TEAM_PLAN_REQUIRED";
+        const isSeatLimit = error.code === "TEAM_SEAT_LIMIT_REACHED";
+        if (isPlanRequired || isSeatLimit) {
+            console.warn("Team create blocked:", { code: error.code, message: error.message });
+            return res.status(409).json({
+                message: error.message || "Team creation not allowed",
+                ...(error.code ? { code: error.code } : {}),
+                ...(error.details ? { details: error.details } : {}),
+            });
+        }
+
         console.error(error);
-        return res.status(500).json({ message: "Something went wrong" });
+        return res.status(500).json({ message: error.message || "Something went wrong" });
     }
 }
 

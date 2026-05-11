@@ -136,7 +136,7 @@ function buildTeamSeatLimitError(params: {
 
 function buildTeamPlanRequiredError() {
     const error: any = new Error(
-        "Team collaboration isn't available on the Starter plan. Upgrade to Pro, Team, or Enterprise to invite team members."
+        "Team collaboration isn't available on the Starter plan. Upgrade to Pro, Team, or Enterprise to create a team & invite team members."
     );
     error.code = "TEAM_PLAN_REQUIRED";
     error.details = {
@@ -842,6 +842,20 @@ export async function createTeamService(
         const err: any = new Error("User doesnot exists, please create a normal account first");
         err.code = "USER_NOT_FOUND";
         throw err;
+    }
+    // Require at least one active paid subscription to create a team
+    // Include the package relation so we can inspect the plan tier (Starter/Pro/Team/etc.)
+    const activePurchase = await prisma.user_credit_purchase.findFirst({
+        where: { user_id: userId, status: "completed", cancelledAt: null },
+        include: { package: true },
+        orderBy: { completed_at: "desc" },
+    });
+
+    // If no active purchase or the active package is Starter (monthly/annual), disallow team creation
+    const packageName = activePurchase?.package?.name || "";
+    const normalizedPackage = String(packageName).toLowerCase();
+    if (!activePurchase || normalizedPackage.includes("starter")) {
+        throw buildTeamPlanRequiredError();
     }
     const team = await prisma.teams.create({
         data: {

@@ -13,7 +13,7 @@ export async function createCheckoutSessionHandler(req: Request, res: Response) 
             return res.status(401).json({ message: "Unauthorized" });
         }
 
-        const { productKey, uiUnitAmountUsd, purchaseFor, teamId, quantity, confirmPlanChange, seatAutoRenew } = req.body;
+        const { productKey, uiUnitAmountUsd, purchaseFor, teamId, quantity, confirmPlanChange, seatAutoRenew, autoRenewEnabled } = req.body;
         console.log("📋 Checkout session request:", {
             userId,
             productKey,
@@ -23,6 +23,7 @@ export async function createCheckoutSessionHandler(req: Request, res: Response) 
             quantity,
             confirmPlanChange,
             seatAutoRenew,
+            autoRenewEnabled,
             requestBody: req.body,
         });
         if (!productKey || !purchaseFor) {
@@ -38,6 +39,7 @@ export async function createCheckoutSessionHandler(req: Request, res: Response) 
             quantity,
             confirmPlanChange,
             seatAutoRenew,
+            autoRenewEnabled,
         });
 
         return res.status(200).json(result);

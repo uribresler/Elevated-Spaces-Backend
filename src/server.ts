@@ -82,7 +82,7 @@ app.listen(PORT, async () => {
     console.warn('⚠️  Server running but database-dependent services are disabled');
   }
 
-  // Start cron job for processing subscription renewals (daily at 8 AM UTC)
+  // Start cron job for processing subscription renewals
   scheduleSubscriptionRenewalsCron();
 
   // Process pending purchases on startup
@@ -110,10 +110,49 @@ app.listen(PORT, async () => {
 });
 
 /**
- * Schedules subscription renewals to run daily at 8 AM UTC
- * This ensures subscriptions are processed once per day at a predictable time
+ * Schedules subscription renewals.
+ * In production this runs daily at 8 AM UTC.
+ * In test mode, SUBSCRIPTION_RENEWAL_TEST_INTERVAL_MINUTES switches it to a short interval.
  */
 function scheduleSubscriptionRenewalsCron() {
+  const testIntervalMinutes = Number(process.env.SUBSCRIPTION_RENEWAL_TEST_INTERVAL_MINUTES || 0);
+
+  async function runRenewalCycle() {
+    console.log(`[CRON] Running subscription renewal processing at ${new Date().toISOString()}`);
+
+    const result = await processSubscriptionRenewals();
+
+    console.log(
+      `[CRON] Subscription renewal completed: ${result.processed} processed, ${result.successful} successful, ${result.failed} failed`
+    );
+
+    const seatResult = await processTeamPaidExtraSeatsDaily();
+
+    console.log(
+      `[CRON] Team paid-seat reconciliation completed: ${seatResult.processed} processed, ${seatResult.failed} failed`
+    );
+  }
+
+  if (Number.isFinite(testIntervalMinutes) && testIntervalMinutes > 0) {
+    const intervalMs = testIntervalMinutes * 60 * 1000;
+
+    console.log(
+      `[CRON] Subscription renewals test mode enabled. Running every ${testIntervalMinutes} minute(s).`
+    );
+
+    void runRenewalCycle().catch((err) => {
+      console.error('[CRON] Initial test renewal processing failed:', err);
+    });
+
+    setInterval(() => {
+      void runRenewalCycle().catch((err) => {
+        console.error('[CRON] Scheduled test renewal processing failed:', err);
+      });
+    }, intervalMs);
+
+    return;
+  }
+
   function calculateNextRunTime(): Date {
     const now = new Date();
     // Create a date for 8 AM UTC today
@@ -136,23 +175,9 @@ function scheduleSubscriptionRenewalsCron() {
     );
     
     setTimeout(() => {
-      console.log(`[CRON] Running subscription renewal processing at ${new Date().toISOString()}`);
-      processSubscriptionRenewals()
-        .then((result) => {
-          console.log(
-            `[CRON] Subscription renewal completed: ${result.processed} processed, ${result.successful} successful, ${result.failed} failed`
-          );
-          return processTeamPaidExtraSeatsDaily();
-        })
-        .then((seatResult) => {
-          console.log(
-            `[CRON] Team paid-seat reconciliation completed: ${seatResult.processed} processed, ${seatResult.failed} failed`
-          );
-        })
-        .catch((err) => {
+      void runRenewalCycle().catch((err) => {
           console.error('[CRON] Scheduled subscription renewal processing failed:', err);
-        })
-        .finally(() => {
+        }).finally(() => {
           // Schedule the next run
           scheduleNextRun();
         });
