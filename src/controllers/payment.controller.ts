@@ -403,18 +403,23 @@ export async function testPaymentLogHandler(req: Request, res: Response) {
 
 export async function contactSalesHandler(req: Request, res: Response) {
     try {
-        const { email, message, companyName, teamSize, billingPreference, phone } = req.body;
+        const { email, fullName, message, companyName, teamSize, billingPreference, phone, preferredContactMethod, estimatedMonthlyCreditVolume, primaryUseCase, preferredStartDate } = req.body;
         if (!email || typeof email !== "string") {
             return res.status(400).json({ message: "Email is required" });
         }
 
         await sendContactSalesInquiry({
             email,
+            fullName: typeof fullName === "string" ? fullName : undefined,
             message: typeof message === "string" ? message : undefined,
             companyName: typeof companyName === "string" ? companyName : undefined,
             teamSize: typeof teamSize === "string" ? teamSize : undefined,
             billingPreference: typeof billingPreference === "string" ? billingPreference : undefined,
             phone: typeof phone === "string" ? phone : undefined,
+            preferredContactMethod: typeof preferredContactMethod === "string" ? preferredContactMethod : undefined,
+            estimatedMonthlyCreditVolume: typeof estimatedMonthlyCreditVolume === "string" ? estimatedMonthlyCreditVolume : undefined,
+            primaryUseCase: typeof primaryUseCase === "string" ? primaryUseCase : undefined,
+            preferredStartDate: typeof preferredStartDate === "string" ? preferredStartDate : undefined,
             userId: req.user?.id,
         });
 
@@ -431,11 +436,7 @@ export async function contactSalesHandler(req: Request, res: Response) {
 
 export async function supportRequestHandler(req: Request, res: Response) {
     try {
-        const { fullName, email, briefDescription, orderNumber, additionalContext, screenshots } = req.body;
-
-        if (!fullName || typeof fullName !== "string") {
-            return res.status(400).json({ message: "Full name is required" });
-        }
+        const { fullName, companyName, email, briefDescription, orderNumber, additionalContext, screenshots } = req.body;
 
         if (!email || typeof email !== "string") {
             return res.status(400).json({ message: "Email is required" });
@@ -448,7 +449,8 @@ export async function supportRequestHandler(req: Request, res: Response) {
         const caseNumber = `CASE-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 
         await sendSupportInquiry({
-            fullName,
+            fullName: typeof fullName === "string" ? fullName : undefined,
+            companyName: typeof companyName === "string" ? companyName : undefined,
             email,
             briefDescription,
             orderNumber: typeof orderNumber === "string" ? orderNumber : undefined,

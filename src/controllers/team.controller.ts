@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { createTeamSchema } from "../utils/teamSchema";
-import { acceptInvitationService, createTeamService, invitationService, reinviteService, removeTeamMemberService, updateTeamMemberRoleService, leaveTeamService, transferCreditsBeforeLeavingService, completeLeaveTeamService, deleteTeamService, cancelInvitationService, enforceTeamSeatCapacityForExistingMembers } from "../services/teams.service";
+import { acceptInvitationService, createTeamService, invitationService, reinviteService, removeTeamMemberService, updateTeamMemberRoleService, leaveTeamService, transferCreditsBeforeLeavingService, completeLeaveTeamService, deleteTeamService, cancelInvitationService, enforceTeamSeatCapacityForExistingMembers, getTeamEligibilityService } from "../services/teams.service";
 import prisma from "../dbConnection";
 
 export async function createTeam(req: Request, res: Response) {
@@ -167,32 +167,64 @@ export async function getMyTeams(req: Request, res: Response) {
             });
         }
 
-        const ownedTeamIds = await prisma.teams.findMany({
-            where: {
-                owner_id: userId,
-                deleted_at: null,
-            },
-            select: { id: true },
-        });
-
-        await Promise.all(
-            ownedTeamIds.map((team) => enforceTeamSeatCapacityForExistingMembers(team.id))
-        );
-
         const teams = await prisma.teams.findMany({
             where: {
                 owner_id: userId,
                 deleted_at: null,
             },
             include: {
-                teamInvites: true,
-                owner: true,
+                teamInvites: {
+                    where: {
+                        OR: [
+                            { status: "PENDING" },
+                            { status: "FAILED" },
+                            { status: "ACCEPTED" },
+                        ],
+                    },
+                    select: {
+                        id: true,
+                        email: true,
+                        team_id: true,
+                        team_role_id: true,
+                        status: true,
+                        invited_by_user_id: true,
+                        credit_limit: true,
+                        token: true,
+                        invited_at: true,
+                        expires_at: true,
+                        accepted_at: true,
+                        accepted_by_user_id: true,
+                        created_at: true,
+                        updated_at: true,
+                    },
+                },
+                owner: {
+                    select: {
+                        id: true,
+                        name: true,
+                        email: true,
+                        avatar_url: true,
+                        created_at: true,
+                    },
+                },
                 members: {
                     where: { deleted_at: null },
-                    include: { role: true, user: true }
+                    include: {
+                        role: { select: { id: true, name: true, description: true } },
+                        user: { select: { id: true, name: true, email: true, avatar_url: true, created_at: true } },
+                    }
                 },
-                purchases: true,
-                usage_log: true
+                purchases: {
+                    where: { status: "completed" },
+                    select: {
+                        id: true,
+                        team_id: true,
+                        amount: true,
+                        price_usd: true,
+                        status: true,
+                        completed_at: true,
+                    },
+                },
             }
         })
         if (!teams) {
@@ -237,19 +269,6 @@ export async function getMyTeamsWithCredits(req: Request, res: Response) {
                 message: "User not authenticated"
             });
         }
-
-        // Get teams where user is owner
-        const ownedTeamIds = await prisma.teams.findMany({
-            where: {
-                owner_id: userId,
-                deleted_at: null,
-            },
-            select: { id: true },
-        });
-
-        await Promise.all(
-            ownedTeamIds.map((team) => enforceTeamSeatCapacityForExistingMembers(team.id))
-        );
 
         const ownedTeams = await prisma.teams.findMany({
             where: {
@@ -401,21 +420,6 @@ export async function getTeamsByUserId(req: Request, res: Response) {
             })
         }
 
-        const activeMemberships = await prisma.team_membership.findMany({
-            where: {
-                user_id: userId,
-                deleted_at: null,
-            },
-            select: {
-                team_id: true,
-            },
-        });
-
-        const uniqueTeamIds = Array.from(new Set(activeMemberships.map((membership) => membership.team_id)));
-        await Promise.all(
-            uniqueTeamIds.map((teamId) => enforceTeamSeatCapacityForExistingMembers(teamId))
-        );
-
         const memberships = await prisma.team_membership.findMany({
             where: {
                 user_id: userId,
@@ -424,14 +428,40 @@ export async function getTeamsByUserId(req: Request, res: Response) {
             include: {
                 team: {
                     include: {
-                        teamInvites: true,
-                        owner: true,
+                        teamInvites: {
+                            select: {
+                                id: true,
+                                email: true,
+                                team_id: true,
+                                team_role_id: true,
+                                status: true,
+                                invited_by_user_id: true,
+                                credit_limit: true,
+                                token: true,
+                                invited_at: true,
+                                expires_at: true,
+                                accepted_at: true,
+                                accepted_by_user_id: true,
+                                created_at: true,
+                                updated_at: true,
+                            },
+                        },
+                        owner: {
+                            select: {
+                                id: true,
+                                name: true,
+                                email: true,
+                                avatar_url: true,
+                                created_at: true,
+                            },
+                        },
                         members: {
                             where: { deleted_at: null },
-                            include: { role: true, user: true }
+                            include: {
+                                role: { select: { id: true, name: true, description: true } },
+                                user: { select: { id: true, name: true, email: true, avatar_url: true, created_at: true } },
+                            }
                         },
-                        purchases: true,
-                        usage_log: true,
                     }
                 }
             }
@@ -584,5 +614,20 @@ export async function deleteTeam(req: Request, res: Response) {
     } catch (error: any) {
         console.error(error);
         return res.status(400).json({ message: error.message || "Failed to delete team" });
+    }
+}
+
+export async function getTeamEligibility(req: Request, res: Response) {
+    try {
+        const teamId = req.params.teamId;
+        const userId = req.user?.id;
+        if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
+        if (!teamId) return res.status(400).json({ success: false, message: 'teamId is required' });
+
+        const result = await getTeamEligibilityService({ teamId, userId });
+        return res.status(200).json(result);
+    } catch (error: any) {
+        console.error('GET_TEAM_ELIGIBILITY_ERROR:', error);
+        return res.status(500).json({ success: false, message: error?.message || 'Failed to get eligibility' });
     }
 }

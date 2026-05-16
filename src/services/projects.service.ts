@@ -1,5 +1,34 @@
 import prisma from "../dbConnection";
 
+const GRACE_PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
+
+function isSubscriptionEffectivelyActive(purchase: { completed_at: Date | null; cancelledAt: Date | null; autoRenewEnabled: boolean }): boolean {
+  const now = new Date();
+  
+  // If not cancelled and auto-renew enabled, it's active
+  if (!purchase.cancelledAt && purchase.autoRenewEnabled) {
+    return true;
+  }
+  
+  // If cancelled or auto-renew disabled, check if within 30-day grace period from completed_at
+  if (purchase.completed_at) {
+    const graceExpiry = new Date(purchase.completed_at.getTime() + GRACE_PERIOD_MS);
+    return now < graceExpiry;
+  }
+  
+  return false;
+}
+
+async function hasActiveOrNotExpiredPersonalPurchase(userId: string) {
+    const now = new Date();
+    const purchase = await prisma.user_credit_purchase.findFirst({
+        where: { user_id: userId, status: 'completed' },
+        orderBy: { completed_at: 'desc' },
+    });
+    if (!purchase) return false;
+    return isSubscriptionEffectivelyActive(purchase);
+}
+
 async function getTeamRole({ teamId, userId }: { teamId: string; userId: string }) {
     const team = await prisma.teams.findUnique({ where: { id: teamId } });
     if (!team) {
@@ -41,14 +70,6 @@ export async function createProjectService({
         throw new Error("Project name is required");
     }
 
-    // Require an active paid subscription to create projects
-    const hasActivePurchase = await prisma.user_credit_purchase.findFirst({
-        where: { user_id: userId, status: "completed", cancelledAt: null },
-    });
-    if (!hasActivePurchase) {
-        throw new Error("Creating projects requires an active paid subscription. Please subscribe to a plan.");
-    }
-
     // Sanitize teamId - treat empty strings, "null", "undefined" as null
     const sanitizedTeamId = teamId && teamId !== 'null' && teamId !== 'undefined' && teamId.trim() !== '' 
         ? teamId.trim() 
@@ -64,28 +85,70 @@ export async function createProjectService({
         team = teamData.team;
         roleName = teamData.roleName;
 
-        if (!["TEAM_OWNER", "TEAM_ADMIN", "TEAM_AGENT"].includes(roleName)) {
+        if (!["TEAM_OWNER", "TEAM_ADMIN", "TEAM_MEMBER"].includes(roleName)) {
             throw new Error("You are not allowed to create projects for this team");
         }
 
-        // Validate photographer BEFORE creating the project (team projects only)
-        if (photographerEmail) {
-            const photographer = await prisma.user.findUnique({ where: { email: photographerEmail } });
-            if (!photographer) {
-                throw new Error("Photographer not found. Invite them to the team first.");
+        // Check if TEAM has an active subscription OR user has an active personal subscription
+        const teamHasActivePurchase = await prisma.team_purchase.findFirst({
+            where: { team_id: sanitizedTeamId, status: "completed" },
+        });
+
+        const userHasActivePurchase = await hasActiveOrNotExpiredPersonalPurchase(userId);
+
+        // If team has no active purchase and current user doesn't have a personal active purchase,
+        // allow creation when the team's owner has a personal active Pro/Pro+ purchase.
+        let ownerHasActivePurchase = false;
+        if (!teamHasActivePurchase) {
+            const owner = await prisma.teams.findUnique({ where: { id: sanitizedTeamId }, select: { owner_id: true } });
+            if (owner?.owner_id) {
+                ownerHasActivePurchase = await hasActiveOrNotExpiredPersonalPurchase(owner.owner_id);
             }
-
-            const photographerMembership = await prisma.team_membership.findUnique({
-                where: { team_id_user_id: { team_id: team.id, user_id: photographer.id } },
-                include: { role: true },
-            });
-
-            if (!photographerMembership || photographerMembership.deleted_at || photographerMembership.role.name !== "TEAM_PHOTOGRAPHER") {
-                throw new Error("Photographer must be a team member with photographer role");
-            }
-
-            photographerId = photographer.id;
         }
+
+        if (!teamHasActivePurchase && !userHasActivePurchase && !ownerHasActivePurchase) {
+            throw new Error("Creating projects requires either the team or your personal account (or the team owner) to have an active paid subscription. Please subscribe to a plan.");
+        }
+    } else {
+        // For personal projects, user must have an active subscription
+        const hasActivePurchase = await hasActiveOrNotExpiredPersonalPurchase(userId);
+        if (!hasActivePurchase) {
+            throw new Error("Creating projects requires an active paid subscription. Please subscribe to a plan.");
+        }
+    }
+
+    // Validate photographer BEFORE creating the project (team projects only)
+    if (sanitizedTeamId && photographerEmail) {
+        const photographer = await prisma.user.findUnique({ where: { email: photographerEmail } });
+        console.log('[DEBUG] Looking for photographer with email:', photographerEmail, '- Found:', !!photographer);
+        if (!photographer) {
+            throw new Error("Photographer not found. Invite them to the team first.");
+        }
+
+        const photographerMembership = await prisma.team_membership.findUnique({
+            where: { team_id_user_id: { team_id: team!.id, user_id: photographer.id } },
+            include: { role: true },
+        });
+
+        console.log('[DEBUG] Photographer membership found:', !!photographerMembership);
+        console.log('[DEBUG] Membership deleted_at:', photographerMembership?.deleted_at);
+        console.log('[DEBUG] Membership role full object:', photographerMembership?.role);
+
+        if (!photographerMembership || photographerMembership.deleted_at) {
+            throw new Error("Photographer must be a team member with photographer role");
+        }
+
+        const membershipRoleName = String(photographerMembership.role?.name || "").toUpperCase();
+        console.log('[DEBUG] Photographer membership role name (original):', photographerMembership.role?.name);
+        console.log('[DEBUG] Photographer membership role name (uppercase):', membershipRoleName);
+        console.log('[DEBUG] Checking if role is TEAM_PHOTOGRAPHER or PHOTOGRAPHER:', membershipRoleName === "TEAM_PHOTOGRAPHER" || membershipRoleName === "PHOTOGRAPHER");
+
+        if (membershipRoleName !== "TEAM_PHOTOGRAPHER" && membershipRoleName !== "PHOTOGRAPHER") {
+            console.error('[ERROR] Invalid photographer role:', membershipRoleName);
+            throw new Error("Photographer must be a team member with photographer role");
+        }
+
+        photographerId = photographer.id;
     }
 
     // Create project (team or personal)
@@ -132,10 +195,10 @@ export async function getMyProjectsService({ userId }: { userId: string }) {
 
     const ownerTeamIds = ownedTeams.map((team) => team.id);
     const adminTeamIds = memberships.filter((m) => m.role.name === "TEAM_ADMIN").map((m) => m.team_id);
-    const agentTeamIds = memberships.filter((m) => m.role.name === "TEAM_AGENT").map((m) => m.team_id);
+    const agentTeamIds = memberships.filter((m) => m.role.name === "TEAM_MEMBER").map((m) => m.team_id);
     const photographerTeamIds = memberships.filter((m) => m.role.name === "TEAM_PHOTOGRAPHER").map((m) => m.team_id);
 
-    const fullAccessTeamIds = Array.from(new Set([...ownerTeamIds, ...adminTeamIds]));
+    const fullAccessTeamIds = Array.from(new Set([...ownerTeamIds]));
 
     const orFilters: any[] = [];
 
@@ -201,7 +264,7 @@ export async function addProjectPhotographerService({
     }
 
     const { team, roleName } = await getTeamRole({ teamId: project.team_id, userId });
-    if (!["TEAM_OWNER", "TEAM_ADMIN", "TEAM_AGENT"].includes(roleName)) {
+    if (!["TEAM_OWNER", "TEAM_ADMIN", "TEAM_MEMBER"].includes(roleName)) {
         throw new Error("You are not allowed to add photographers");
     }
 
@@ -246,19 +309,28 @@ export async function getProjectImagesService({
         throw new Error("Project not found");
     }
 
-    // Check access - user must be project creator or team member (if team project)
+    // Check access - project creator, team member, or team owner can view team projects
     if (project.created_by_user_id !== userId) {
         if (project.team_id) {
-            // Verify team access
-            const membership = await prisma.team_membership.findFirst({
-                where: {
-                    team_id: project.team_id,
-                    user_id: userId,
-                },
+            const team = await prisma.teams.findUnique({
+                where: { id: project.team_id },
+                select: { owner_id: true },
             });
 
-            if (!membership || membership.deleted_at) {
-                throw new Error("You don't have access to this project");
+            if (team?.owner_id === userId) {
+                // Team owner has full access to all projects created under their team
+            } else {
+                // Verify team membership for non-owners
+                const membership = await prisma.team_membership.findFirst({
+                    where: {
+                        team_id: project.team_id,
+                        user_id: userId,
+                    },
+                });
+
+                if (!membership || membership.deleted_at) {
+                    throw new Error("You don't have access to this project");
+                }
             }
         } else {
             throw new Error("You don't have access to this project");

@@ -7,6 +7,7 @@ interface BatchStageJob {
   originalPath: string;
   roomType: string;
   stagingStyle: string;
+  areaType?: string;
   customPrompt?: string;
 }
 

@@ -188,15 +188,22 @@ class OAuthService {
 
     createData[providerIdFields[provider]] = providerId;
 
-    const user = await prisma.user.create({ data: createData });
+    const user = await prisma.user.upsert({
+      where: { email },
+      create: createData,
+      update: {},
+    });
 
     const defaultRole = await prisma.roles.findUnique({ where: { name: "USER" } });
     if (defaultRole) {
-      await prisma.user_roles.create({
-        data: {
-          user_id: user.id,
-          role_id: defaultRole.id,
-        },
+      await prisma.user_roles.createMany({
+        data: [
+          {
+            user_id: user.id,
+            role_id: defaultRole.id,
+          },
+        ],
+        skipDuplicates: true,
       });
     }
 

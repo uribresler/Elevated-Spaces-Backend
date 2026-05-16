@@ -9,6 +9,7 @@ interface BatchStageJob {
     originalPath: string;
     roomType: string;
     stagingStyle: string;
+    areaType?: string;
     customPrompt?: string;
 }
 
@@ -33,10 +34,10 @@ const isQuotaExhaustedError = (error: unknown): boolean => {
 };
 
 export async function processBatchImage(job: BatchStageJob): Promise<void> {
-    const { imageId, originalPath, roomType, stagingStyle, customPrompt } = job;
+    const { imageId, originalPath, roomType, stagingStyle, areaType, customPrompt } = job;
     const jobStartTime = Date.now();
     const fileName = originalPath.split('/').pop() || originalPath.split('\\').pop() || 'unknown';
-    logger(`[JOB][${imageId.slice(0, 8)}] START ${fileName.substring(0, 30)} (staging in parallel mode)`);
+    logger(`[JOB][${imageId.slice(0, 8)}] START ${fileName.substring(0, 30)} (staging in parallel mode, areaType=${areaType || 'interior'})`);
 
     try {
         const baseImage = await prisma.image.findUnique({ where: { id: imageId } });

@@ -10,9 +10,27 @@ dotenv.config();
 
 // const INVITE_EXPIRY_MS = 24 * 60 * 60 * 1000;
 const INVITE_EXPIRY_MS = 24 * 60 * 60 * 1000;
+const GRACE_PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
 const STRIPE_API_VERSION = "2025-12-15.clover";
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY, { apiVersion: STRIPE_API_VERSION }) : null;
+
+function isSubscriptionEffectivelyActive(purchase: { completed_at: Date | null; cancelledAt: Date | null; autoRenewEnabled: boolean }): boolean {
+  const now = new Date();
+  
+  // If not cancelled and auto-renew enabled, it's active
+  if (!purchase.cancelledAt && purchase.autoRenewEnabled) {
+    return true;
+  }
+  
+  // If cancelled or auto-renew disabled, check if within 30-day grace period from completed_at
+  if (purchase.completed_at) {
+    const graceExpiry = new Date(purchase.completed_at.getTime() + GRACE_PERIOD_MS);
+    return now < graceExpiry;
+  }
+  
+  return false;
+}
 
 const ACTIVE_SUBSCRIPTION_STATUSES = new Set([
     "active",
@@ -495,9 +513,13 @@ async function assertTeamSeatCapacityForAcceptance(teamId: string): Promise<void
 }
 
 const TEAM_ROLE_ALIASES: Record<string, string> = {
-    TEAM_ADMIN: "ADMIN",
-    TEAM_AGENT: "MEMBER",
-    TEAM_PHOTOGRAPHER: "PHOTOGRAPHER",
+    ADMIN: "TEAM_ADMIN",
+    TEAM_ADMIN: "TEAM_ADMIN",
+    MEMBER: "TEAM_MEMBER",
+    TEAM_MEMBER: "TEAM_MEMBER",
+    // TEAM_MEMBER: "TEAM_MEMBER",
+    PHOTOGRAPHER: "TEAM_PHOTOGRAPHER",
+    TEAM_PHOTOGRAPHER: "TEAM_PHOTOGRAPHER",
 };
 
 function normalizeTeamRoleName(roleName: string) {
@@ -519,7 +541,7 @@ const DEFAULT_TEAM_ROLE_DEFINITIONS: Record<string, { description: string; permi
             manage_wallet: true,
         },
     },
-    ADMIN: {
+    TEAM_ADMIN: {
         description: "Admin control over the team",
         permissions: {
             manage_team: true,
@@ -532,7 +554,7 @@ const DEFAULT_TEAM_ROLE_DEFINITIONS: Record<string, { description: string; permi
             manage_wallet: false,
         },
     },
-    MEMBER: {
+    TEAM_MEMBER: {
         description: "Member role with project creation and invite permissions",
         permissions: {
             manage_team: false,
@@ -545,7 +567,7 @@ const DEFAULT_TEAM_ROLE_DEFINITIONS: Record<string, { description: string; permi
             manage_wallet: false,
         },
     },
-    PHOTOGRAPHER: {
+    TEAM_PHOTOGRAPHER: {
         description: "Photographer role with project access",
         permissions: {
             manage_team: false,
@@ -775,10 +797,10 @@ async function assertEmailNotAlreadyPartOfTeam(teamId: string, email: string): P
 
 function resolveInviteRoleName(roleName?: string) {
     const normalized = roleName ? normalizeTeamRoleName(roleName) : null;
-    const allowedRoles = ["MEMBER", "PHOTOGRAPHER", "ADMIN"];
+    const allowedRoles = ["TEAM_MEMBER", "TEAM_PHOTOGRAPHER", "TEAM_ADMIN"];
 
     if (!normalized) {
-        return "MEMBER";
+        return "TEAM_MEMBER";
     }
 
     if (!allowedRoles.includes(normalized)) {
@@ -792,12 +814,12 @@ function canInviteRole(inviterRole: string, requestedRole: string) {
     const normalizedInviterRole = normalizeTeamRoleName(inviterRole);
     const normalizedRequestedRole = normalizeTeamRoleName(requestedRole);
 
-    if (normalizedInviterRole === "TEAM_OWNER" || normalizedInviterRole === "ADMIN") {
+    if (normalizedInviterRole === "TEAM_OWNER" || normalizedInviterRole === "TEAM_ADMIN") {
         return normalizedRequestedRole !== "TEAM_OWNER";
     }
 
-    if (normalizedInviterRole === "MEMBER") {
-        return normalizedRequestedRole === "PHOTOGRAPHER";
+    if (normalizedInviterRole === "TEAM_MEMBER") {
+        return normalizedRequestedRole === "TEAM_PHOTOGRAPHER";
     }
 
     return false;
@@ -805,7 +827,7 @@ function canInviteRole(inviterRole: string, requestedRole: string) {
 
 function normalizeAssignableRole(roleName: string) {
     const normalized = normalizeTeamRoleName(roleName);
-    const allowedRoles = ["ADMIN", "MEMBER", "PHOTOGRAPHER"];
+    const allowedRoles = ["TEAM_ADMIN", "TEAM_MEMBER", "TEAM_PHOTOGRAPHER"];
     if (!allowedRoles.includes(normalized)) {
         throw new Error("Invalid team role assignment");
     }
@@ -821,8 +843,8 @@ function canAssignRole(assignerRole: string, requestedRole: string) {
         return true;
     }
 
-    if (normalizedAssignerRole === "ADMIN") {
-        return ["PHOTOGRAPHER", "MEMBER"].includes(normalizedRequestedRole);
+    if (normalizedAssignerRole === "TEAM_ADMIN") {
+        return ["TEAM_PHOTOGRAPHER", "TEAM_MEMBER"].includes(normalizedRequestedRole);
     }
 
     return false;
@@ -845,14 +867,16 @@ export async function createTeamService(
     }
     // Require at least one active paid subscription to create a team
     // Include the package relation so we can inspect the plan tier (Starter/Pro/Team/etc.)
-    const activePurchase = await prisma.user_credit_purchase.findFirst({
-        where: { user_id: userId, status: "completed", cancelledAt: null },
+    const activePurchaseRecord = await prisma.user_credit_purchase.findFirst({
+        where: { user_id: userId, status: "completed" },
         include: { package: true },
         orderBy: { completed_at: "desc" },
     });
 
+    const activePurchase = activePurchaseRecord && isSubscriptionEffectivelyActive(activePurchaseRecord);
+
     // If no active purchase or the active package is Starter (monthly/annual), disallow team creation
-    const packageName = activePurchase?.package?.name || "";
+    const packageName = activePurchaseRecord?.package?.name || "";
     const normalizedPackage = String(packageName).toLowerCase();
     if (!activePurchase || normalizedPackage.includes("starter")) {
         throw buildTeamPlanRequiredError();
@@ -870,6 +894,49 @@ export async function createTeamService(
         message: "Team created successfully",
         team
     }
+}
+
+export async function getTeamEligibilityService({ teamId, userId }: { teamId: string; userId: string }) {
+    const team = await prisma.teams.findUnique({ where: { id: teamId }, include: { owner: true } });
+    if (!team) {
+        const err: any = new Error('Team not found');
+        err.code = 'TEAM_NOT_FOUND';
+        throw err;
+    }
+
+    const teamHasActivePurchase = !!(await prisma.team_purchase.findFirst({ where: { team_id: teamId, status: 'completed' } }));
+
+    const now = new Date();
+    const ownerPurchase = await prisma.user_credit_purchase.findFirst({ where: { user_id: team.owner_id, status: 'completed' }, orderBy: { completed_at: 'desc' } });
+    const ownerHasActivePersonal = !!(ownerPurchase && isSubscriptionEffectivelyActive(ownerPurchase));
+
+    const userPurchase = await prisma.user_credit_purchase.findFirst({ where: { user_id: userId, status: 'completed' }, orderBy: { completed_at: 'desc' } });
+    const userHasActivePersonal = !!(userPurchase && isSubscriptionEffectivelyActive(userPurchase));
+
+    // Check if user already has access to any project in this team
+    const userHasProjectInTeam = !!(await prisma.team_project.findFirst({
+        where: {
+            team_id: teamId,
+            OR: [
+                { created_by_user_id: userId },
+                { members: { some: { user_id: userId } } },
+            ],
+        },
+    }));
+
+    const ownerExpiry = ownerPurchase?.completed_at ? new Date(ownerPurchase.completed_at.getTime() + GRACE_PERIOD_MS) : null;
+    const userExpiry = userPurchase?.completed_at ? new Date(userPurchase.completed_at.getTime() + GRACE_PERIOD_MS) : null;
+
+    return {
+        success: true,
+        teamId,
+        teamHasActivePurchase,
+        ownerHasActivePersonal,
+        userHasActivePersonal,
+        userHasProjectInTeam,
+        ownerExpiry,
+        userExpiry,
+    };
 }
 
 export async function invitationService({ email, userId, subject, text, teamId, roleName }: { email: string, userId: string, subject: string, text: string, teamId: string, roleName?: string }) {
@@ -1472,7 +1539,7 @@ export async function cancelInvitationService({ inviteId, userId }: { inviteId: 
         include: { role: true }
     });
 
-    const isTeamAdmin = normalizeTeamRoleName(membership?.role?.name || "") === "ADMIN";
+    const isTeamAdmin = normalizeTeamRoleName(membership?.role?.name || "") === "TEAM_ADMIN";
 
     if (!isTeamOwner && !isTeamAdmin) {
         throw new Error("Only team owner or admin can cancel invitations");

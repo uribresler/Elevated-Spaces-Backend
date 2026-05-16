@@ -69,7 +69,7 @@ export async function allocateCreditsToUsers({
             });
         }
 
-        if (allocatorRoleName === "TEAM_AGENT" && activeMembership.role.name !== "TEAM_PHOTOGRAPHER") {
+        if (allocatorRoleName === "TEAM_MEMBER" && activeMembership.role.name !== "TEAM_PHOTOGRAPHER") {
             throw new Error("Agents can only allocate credits to photographers");
         }
 
@@ -100,7 +100,7 @@ export async function allocateCreditsToUsers({
             }
         }
 
-        if (allocatorRoleName === "TEAM_AGENT") {
+        if (allocatorRoleName === "TEAM_MEMBER") {
             const allocatorMembership = await prisma.team_membership.findUnique({
                 where: { team_id_user_id: { team_id, user_id: userId } },
             });

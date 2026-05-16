@@ -39,6 +39,8 @@ export interface RenewalResult {
     message: string;
     subscriptionId?: string;
     error?: string;
+    creditExpiresAt?: string | null;
+    packageName?: string;
 }
 
 function isDatabaseUnavailableError(error: any): boolean {
@@ -811,6 +813,8 @@ export class SubscriptionRenewalService {
                 success: true,
                 message: "Subscription cancelled successfully",
                 subscriptionId,
+                creditExpiresAt: creditExpiresAt?.toISOString() || null,
+                packageName: subscription.package.name,
             };
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "Unknown error";

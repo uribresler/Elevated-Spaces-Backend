@@ -246,6 +246,8 @@ export class SubscriptionController {
                 success: true,
                 message: result.message,
                 subscriptionId: result.subscriptionId,
+                creditExpiresAt: result.creditExpiresAt,
+                packageName: result.packageName,
             });
         } catch (error) {
             console.error("Error cancelling subscription:", error);

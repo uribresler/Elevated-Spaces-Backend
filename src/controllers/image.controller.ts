@@ -1728,6 +1728,7 @@ export async function generateMultipleImages(
   // Parse per-image styles if provided as JSON strings
   let roomTypesList: string[] = [];
   let stagingStylesList: string[] = [];
+  let areaTypesList: string[] = [];
   
   try {
     if (req.body.roomTypes && typeof req.body.roomTypes === 'string') {
@@ -1748,10 +1749,21 @@ export async function generateMultipleImages(
   } catch (e) {
     logger(`Failed to parse stagingStyles: ${e}`);
   }
+
+  try {
+    if (req.body.areaTypes && typeof req.body.areaTypes === 'string') {
+      areaTypesList = JSON.parse(req.body.areaTypes);
+    } else if (Array.isArray(req.body.areaTypes)) {
+      areaTypesList = req.body.areaTypes;
+    }
+  } catch (e) {
+    logger(`Failed to parse areaTypes: ${e}`);
+  }
   
   // Use per-image settings if provided, otherwise use single values for all
   roomTypesList = roomTypesList.length > 0 ? roomTypesList : Array(req.files?.length || 1).fill(roomType);
   stagingStylesList = stagingStylesList.length > 0 ? stagingStylesList : Array(req.files?.length || 1).fill(stagingStyle);
+  areaTypesList = areaTypesList.length > 0 ? areaTypesList : Array(req.files?.length || 1).fill("interior");
   
   let teamId: string | null = req.body.teamId || null;
   let projectId: string | null = req.body.projectId || null;
@@ -1960,6 +1972,7 @@ export async function generateMultipleImages(
       originalPath: originalsWithUrls[index].file.path,
       roomType: roomTypesList[index] || roomType,
       stagingStyle: stagingStylesList[index] || stagingStyle,
+      areaType: areaTypesList[index] || "interior",
       customPrompt: prompt,
     });
   });
@@ -2142,6 +2155,7 @@ export async function generateMultipleImages(
               originalPath: originalsWithUrls[originalIndex].file.path,
               roomType: roomTypesList[originalIndex] || roomType,
               stagingStyle: stagingStylesList[originalIndex] || stagingStyle,
+              areaType: areaTypesList[originalIndex] || "interior",
               customPrompt: prompt,
             });
           });

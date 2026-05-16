@@ -42,9 +42,10 @@ export async function updateResourceHandler(req: Request, res: Response) {
     if (!isAdmin(req)) return res.status(403).json({ success: false, message: "Admin access required" });
 
     const { slug } = req.params;
-    const { title, contentHtml, youtubeUrl } = req.body as { title?: string; contentHtml?: string; youtubeUrl?: string };
+    const { title, contentHtml, youtubeUrl, removePdf } = req.body as { title?: string; contentHtml?: string; youtubeUrl?: string; removePdf?: string | boolean };
     const files = (req as any).files;
-    const updated = await updateResource(slug, { title, contentHtml, youtubeUrl }, files, req.user?.email);
+    const normalizedRemovePdf = removePdf === true || removePdf === "true";
+    const updated = await updateResource(slug, { title, contentHtml, youtubeUrl, removePdf: normalizedRemovePdf }, files, req.user?.email);
     return res.status(200).json({ success: true, data: updated });
   } catch (error: any) {
     return res.status(500).json({ success: false, message: error.message || "Failed to update resource" });

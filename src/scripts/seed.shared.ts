@@ -95,30 +95,30 @@ async function seedTeamRoles() {
   });
 
   await prisma.team_roles.upsert({
-    where: { name: "ADMIN" },
+    where: { name: "TEAM_ADMIN" },
     update: { permissions: teamAdminPermissions },
     create: {
-      name: "ADMIN",
+      name: "TEAM_ADMIN",
       description: "Admin control over the team",
       permissions: teamAdminPermissions,
     },
   });
 
   await prisma.team_roles.upsert({
-    where: { name: "MEMBER" },
+    where: { name: "TEAM_MEMBER" },
     update: { permissions: teamAgentPermissions },
     create: {
-      name: "MEMBER",
+      name: "TEAM_MEMBER",
       description: "Member role with project creation and invite permissions",
       permissions: teamAgentPermissions,
     },
   });
 
   await prisma.team_roles.upsert({
-    where: { name: "PHOTOGRAPHER" },
+    where: { name: "TEAM_PHOTOGRAPHER" },
     update: { permissions: teamPhotographerPermissions },
     create: {
-      name: "PHOTOGRAPHER",
+      name: "TEAM_PHOTOGRAPHER",
       description: "Photographer role with project access",
       permissions: teamPhotographerPermissions,
     },

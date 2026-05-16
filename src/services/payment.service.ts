@@ -97,12 +97,22 @@ export async function sendCustomSubscriptionInvoiceEmail(params: {
     userName: string;
     packageName: string;
     amount: number;
+    credits?: number;
     invoiceId: string;
     renewalNumber: number;
     issueDate?: Date;
     dueDate?: Date;
     invoicePdfUrl?: string | null;
     hostedInvoiceUrl?: string | null;
+    subscriptionId?: string;
+    userId?: string;
+    billingCycle?: "monthly" | "annual" | "one_time";
+    planFor?: "personal" | "team";
+    autoRenewal?: boolean;
+    seatCapacityLabel?: string;
+    teamName?: string | null;
+    dateSubscribed?: Date;
+    validTill?: Date | null;
     subject?: string;
 }) {
     const {
@@ -110,6 +120,7 @@ export async function sendCustomSubscriptionInvoiceEmail(params: {
         userName,
         packageName,
         amount,
+        credits = 0,
         invoiceId,
         renewalNumber,
         issueDate = new Date(),
@@ -117,6 +128,15 @@ export async function sendCustomSubscriptionInvoiceEmail(params: {
         invoicePdfUrl,
         hostedInvoiceUrl,
         subject,
+        billingCycle = "monthly",
+        planFor = "personal",
+        autoRenewal = true,
+        seatCapacityLabel = "Subscription Plan",
+        teamName = null,
+        dateSubscribed = issueDate,
+        validTill = dueDate,
+        subscriptionId,
+        userId,
     } = params;
 
     const invoiceHTML = InvoiceService.generateInvoiceHTML({
@@ -124,7 +144,7 @@ export async function sendCustomSubscriptionInvoiceEmail(params: {
         subscriptionId: invoiceId,
         userId: "",
         packageName,
-        credits: 0,
+        credits: credits,
         amount,
         currency: "usd",
         issueDate,
@@ -133,6 +153,14 @@ export async function sendCustomSubscriptionInvoiceEmail(params: {
         userName,
         userEmail: to,
         companyName: "Elevated Spaces",
+        billingCycle,
+        planFor,
+        autoRenewal,
+        seatCapacityLabel,
+        dateSubscribed,
+        validTill,
+        hostedInvoiceUrl,
+        invoicePdfUrl,
     });
 
     const extraLinks = [
@@ -156,6 +184,92 @@ export async function sendCustomSubscriptionInvoiceEmail(params: {
         ].filter(Boolean).join("\n"),
         html: `${invoiceHTML}${extraLinks}`,
     });
+
+    if (subscriptionId && userId) {
+        console.error(`[EMAIL] ✓ Upserting invoice record - subscriptionId: ${subscriptionId}, userId: ${userId}, credits: ${credits}, billingCycle: ${billingCycle}, planFor: ${planFor}`);
+        await upsertInvoiceRecord({
+            subscriptionId,
+            userId,
+            amount,
+            htmlContent: `${invoiceHTML}${extraLinks}`,
+            metadata: {
+                invoiceId,
+                invoiceNumber: invoiceId,
+                packageName,
+                credits,
+                amount,
+                renewalNumber,
+                issueDate: issueDate.toISOString(),
+                dueDate: dueDate.toISOString(),
+                billingCycle,
+                planFor,
+                autoRenewal,
+                seatCapacityLabel,
+                teamName,
+                dateSubscribed: dateSubscribed.toISOString(),
+                validTill: validTill ? validTill.toISOString() : null,
+                stripeInvoicePdfUrl: invoicePdfUrl || null,
+                stripeInvoiceHostedUrl: hostedInvoiceUrl || null,
+            },
+        });
+    } else {
+        console.error(`[EMAIL] ⚠️ SKIPPING invoice record - missing subscriptionId: ${!!subscriptionId}, userId: ${!!userId}`);
+    }
+}
+
+async function upsertInvoiceRecord(params: {
+    subscriptionId: string;
+    userId: string;
+    amount: number;
+    htmlContent: string;
+    metadata: Record<string, unknown>;
+}) {
+    try {
+        const jsonMetadata = params.metadata as Prisma.InputJsonValue;
+        const existing = await prisma.invoice.findFirst({
+            where: {
+                subscription_id: params.subscriptionId,
+                user_id: params.userId,
+            },
+        });
+
+        if (existing) {
+            console.error(`[INVOICE] Found existing invoice, updating ID: ${existing.id}`);
+            await prisma.invoice.update({
+                where: { id: existing.id },
+                data: {
+                    amount: params.amount,
+                    html_content: params.htmlContent,
+                    metadata: jsonMetadata,
+                },
+            });
+            console.error(`[INVOICE] ✓ Successfully updated invoice ${existing.id}`);
+            return existing.id;
+        }
+
+        const created = await prisma.invoice.create({
+            data: {
+                subscription_id: params.subscriptionId,
+                user_id: params.userId,
+                amount: params.amount,
+                status: "generated",
+                html_content: params.htmlContent,
+                metadata: jsonMetadata,
+            },
+        });
+
+        console.error(`[INVOICE] ✓ Successfully created invoice ${created.id}`);
+        return created.id;
+    } catch (error: any) {
+        console.error(`[INVOICE] ❌ Error upserting invoice record:`, {
+            subscriptionId: params.subscriptionId,
+            userId: params.userId,
+            error: error?.message,
+            code: error?.code,
+            details: error?.meta,
+        });
+        throw error;
+    }
 }
 
 export async function sendSubscriptionStatusEmail(params: {
@@ -1107,19 +1221,29 @@ function applyCreditsToTeam(teamId: string, credits: number) {
 
 export async function sendContactSalesInquiry({
     email,
+    fullName,
     message,
     companyName,
     teamSize,
     billingPreference,
     phone,
+    preferredContactMethod,
+    estimatedMonthlyCreditVolume,
+    primaryUseCase,
+    preferredStartDate,
     userId,
 }: {
     email: string;
+    fullName?: string;
     message?: string;
     companyName?: string;
     teamSize?: string;
     billingPreference?: string;
     phone?: string;
+    preferredContactMethod?: string;
+    estimatedMonthlyCreditVolume?: string;
+    primaryUseCase?: string;
+    preferredStartDate?: string;
     userId?: string;
 }) {
     const senderEmail = (email || "").trim();
@@ -1133,6 +1257,11 @@ export async function sendContactSalesInquiry({
     const safeTeamSize = (teamSize || "").trim();
     const safeBillingPreference = (billingPreference || "").trim();
     const safePhone = (phone || "").trim();
+    const safeFullName = (fullName || "").trim();
+    const safePreferredContactMethod = (preferredContactMethod || "").trim();
+    const safeEstimatedMonthlyCreditVolume = (estimatedMonthlyCreditVolume || "").trim();
+    const safePrimaryUseCase = (primaryUseCase || "").trim();
+    const safePreferredStartDate = (preferredStartDate || "").trim();
     const submittedAt = new Date().toISOString();
 
     const subject = `Enterprise plan inquiry${userId ? ` (user: ${userId})` : ""}`;
@@ -1140,11 +1269,16 @@ export async function sendContactSalesInquiry({
         "New Contact Sales request",
         `Submitted at: ${submittedAt}`,
         `User ID: ${userId || "N/A"}`,
+        `Full Name: ${safeFullName || "N/A"}`,
         `Email: ${senderEmail}`,
         `Company: ${safeCompanyName || "N/A"}`,
         `Team Size: ${safeTeamSize || "N/A"}`,
         `Billing Preference: ${safeBillingPreference || "N/A"}`,
         `Phone: ${safePhone || "N/A"}`,
+        `Preferred Contact Method: ${safePreferredContactMethod || "N/A"}`,
+        `Estimated Monthly Credit Volume: ${safeEstimatedMonthlyCreditVolume || "N/A"}`,
+        `Primary Use Case: ${safePrimaryUseCase || "N/A"}`,
+        `Preferred Start Date: ${safePreferredStartDate || "N/A"}`,
         "",
         "Message:",
         safeMessage || "Please contact me about enterprise pricing.",
@@ -1154,11 +1288,16 @@ export async function sendContactSalesInquiry({
         <h2>New Contact Sales request</h2>
         <p><strong>Submitted at:</strong> ${submittedAt}</p>
         <p><strong>User ID:</strong> ${userId || "N/A"}</p>
+        <p><strong>Full Name:</strong> ${safeFullName || "N/A"}</p>
         <p><strong>Email:</strong> ${senderEmail}</p>
         <p><strong>Company:</strong> ${safeCompanyName || "N/A"}</p>
         <p><strong>Team Size:</strong> ${safeTeamSize || "N/A"}</p>
         <p><strong>Billing Preference:</strong> ${safeBillingPreference || "N/A"}</p>
         <p><strong>Phone:</strong> ${safePhone || "N/A"}</p>
+        <p><strong>Preferred Contact Method:</strong> ${safePreferredContactMethod || "N/A"}</p>
+        <p><strong>Estimated Monthly Credit Volume:</strong> ${safeEstimatedMonthlyCreditVolume || "N/A"}</p>
+        <p><strong>Primary Use Case:</strong> ${safePrimaryUseCase || "N/A"}</p>
+        <p><strong>Preferred Start Date:</strong> ${safePreferredStartDate || "N/A"}</p>
         <p><strong>Message:</strong></p>
         <p>${(safeMessage || "Please contact me about enterprise pricing.").replace(/\n/g, "<br />")}</p>
     `;
@@ -1178,6 +1317,7 @@ export async function sendContactSalesInquiry({
 
 export async function sendSupportInquiry({
     fullName,
+    companyName,
     email,
     briefDescription,
     orderNumber,
@@ -1186,7 +1326,8 @@ export async function sendSupportInquiry({
     userId,
     caseNumber,
 }: {
-    fullName: string;
+    fullName?: string;
+    companyName?: string;
     email: string;
     briefDescription: string;
     orderNumber?: string;
@@ -1205,10 +1346,6 @@ export async function sendSupportInquiry({
     const safeOrderNumber = (orderNumber || "").trim();
     const safeContext = (additionalContext || "").trim();
 
-    if (!senderName) {
-        throw new Error("Full name is required");
-    }
-
     if (!senderEmail) {
         throw new Error("Email is required");
     }
@@ -1221,13 +1358,16 @@ export async function sendSupportInquiry({
     const submittedAt = new Date().toISOString();
     const safeAttachments = (screenshots || []).slice(0, 3);
 
+    const safeCompanyName = (companyName || "").trim();
+
     const subject = `Support request ${caseNumber}${userId ? ` (user: ${userId})` : ""}`;
     const text = [
         "New Support request",
         `Case Number: ${caseNumber}`,
         `Submitted at: ${submittedAt}`,
         `User ID: ${userId || "N/A"}`,
-        `Full Name: ${senderName}`,
+        `Full Name: ${senderName || "N/A"}`,
+        `Company: ${safeCompanyName || "N/A"}`,
         `Email: ${senderEmail}`,
         `Order Number: ${safeOrderNumber || "N/A"}`,
         "",
@@ -1245,7 +1385,8 @@ export async function sendSupportInquiry({
         <p><strong>Case Number:</strong> ${caseNumber}</p>
         <p><strong>Submitted at:</strong> ${submittedAt}</p>
         <p><strong>User ID:</strong> ${userId || "N/A"}</p>
-        <p><strong>Full Name:</strong> ${senderName}</p>
+        <p><strong>Full Name:</strong> ${senderName || "N/A"}</p>
+        <p><strong>Company:</strong> ${safeCompanyName || "N/A"}</p>
         <p><strong>Email:</strong> ${senderEmail}</p>
         <p><strong>Order Number:</strong> ${safeOrderNumber || "N/A"}</p>
         <p><strong>Brief Description:</strong></p>
@@ -1795,17 +1936,26 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
             
             // Use custom subscription invoice template for plan subscriptions
             if (isSubscriptionPlanPurchase && userName) {
+                console.error(`[EMAIL-DEBUG] Sending subscription invoice with credits: ${credits}`);
                 await sendCustomSubscriptionInvoiceEmail({
                     to: userEmail,
                     userName,
                     packageName: productName,
                     amount: (session.amount_total || 0) / 100,
+                    credits,
                     invoiceId: `INV-${session.id}`,
                     renewalNumber: 0,
                     issueDate: new Date(),
                     dueDate: new Date(),
                     invoicePdfUrl: stripeInvoicePdfUrl,
                     hostedInvoiceUrl: stripeInvoiceHostedUrl,
+                    subscriptionId,
+                    userId,
+                    billingCycle: normalizedProductKey.includes("annual") ? "annual" : "monthly",
+                    planFor: purchaseFor === "team" ? "team" : "personal",
+                    autoRenewal: shouldAutoRenew,
+                    dateSubscribed: new Date((session.created || Math.floor(Date.now() / 1000)) * 1000),
+                    validTill: new Date(new Date((session.created || Math.floor(Date.now() / 1000)) * 1000).getTime() + (normalizedProductKey.includes("annual") ? 365 : 30) * 24 * 60 * 60 * 1000),
                 });
                 console.log(`[EMAIL-DEBUG] Subscription invoice email sent to ${userEmail} successfully.`);
             } else {
@@ -2084,17 +2234,26 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
         });
 
         if (user?.email) {
+            console.error('[WEBHOOK] Sending team plan invoice email with credits:', credits);
             await sendCustomSubscriptionInvoiceEmail({
                 to: user.email,
                 userName: user.name || "Valued Customer",
                 packageName: config.name,
                 amount: invoice.amount_paid / 100,
+                credits,
                 invoiceId: invoice.number || invoice.id,
                 renewalNumber: ((subscription as any).renewalCount ?? 0) + 1,
                 issueDate: new Date(),
                 dueDate: new Date(),
                 invoicePdfUrl: invoice.invoice_pdf,
                 hostedInvoiceUrl: invoice.hosted_invoice_url,
+                subscriptionId,
+                userId,
+                billingCycle: productKey.toLowerCase().includes("annual") ? "annual" : "monthly",
+                planFor: "team",
+                autoRenewal: shouldAutoRenew,
+                dateSubscribed: new Date((subscription.created || Math.floor(Date.now() / 1000)) * 1000),
+                validTill: new Date(new Date((subscription.created || Math.floor(Date.now() / 1000)) * 1000).getTime() + (productKey.toLowerCase().includes("annual") ? 365 : 30) * 24 * 60 * 60 * 1000),
             });
         } else {
             console.error('[WEBHOOK] Skipping custom invoice email for team plan - no user email found');
@@ -2225,17 +2384,26 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
         });
 
         if (user?.email) {
+            console.error('[WEBHOOK] Sending personal plan invoice email with credits:', credits);
             await sendCustomSubscriptionInvoiceEmail({
                 to: user.email,
                 userName: user.name || "Valued Customer",
                 packageName: config.name,
                 amount: invoice.amount_paid / 100,
+                credits,
                 invoiceId: invoice.number || invoice.id,
                 renewalNumber: ((subscription as any).renewalCount ?? 0) + 1,
                 issueDate: new Date(),
                 dueDate: new Date(),
                 invoicePdfUrl: invoice.invoice_pdf,
                 hostedInvoiceUrl: invoice.hosted_invoice_url,
+                subscriptionId,
+                userId,
+                billingCycle: productKey.toLowerCase().includes("annual") ? "annual" : "monthly",
+                planFor: "personal",
+                autoRenewal: shouldAutoRenew,
+                dateSubscribed: new Date((subscription.created || Math.floor(Date.now() / 1000)) * 1000),
+                validTill: new Date(new Date((subscription.created || Math.floor(Date.now() / 1000)) * 1000).getTime() + (productKey.toLowerCase().includes("annual") ? 365 : 30) * 24 * 60 * 60 * 1000),
             });
         } else {
             console.error('[WEBHOOK] Skipping custom invoice email for personal plan - no user email found');
@@ -2392,6 +2560,9 @@ export async function processPendingPurchases() {
                 const session = await stripe.checkout.sessions.retrieve(purchase.stripe_session_id, {
                     expand: ["invoice"],
                 });
+                    const sessionSubscriptionId = typeof session.subscription === "string"
+                        ? session.subscription
+                        : session.subscription?.id;
 
                 console.log(`[PENDING-PROCESSOR] Checking session ${session.id}:`, {
                     paymentStatus: session.payment_status,
@@ -2512,17 +2683,28 @@ export async function processPendingPurchases() {
                     if (isSubscriptionPlan && invoiceId && purchase.user_id) {
                         const user = await prisma.user.findUnique({ where: { id: purchase.user_id } });
                         if (user?.email) {
+                            console.error(`[PENDING-PROCESSOR] Sending invoice email with credits: ${purchase.amount}`);
                             await sendCustomSubscriptionInvoiceEmail({
                                 to: user.email,
                                 userName: user.name || "Valued Customer",
                                 packageName: purchase.package?.name || "Subscription",
                                 amount: purchase.price_usd,
+                                credits: purchase.amount,
                                 invoiceId: invoiceObject?.number || invoiceId,
                                 renewalNumber: 0,
                                 issueDate: new Date(),
                                 dueDate: new Date(),
                                 invoicePdfUrl: invoiceObject?.invoice_pdf || null,
                                 hostedInvoiceUrl: invoiceObject?.hosted_invoice_url || null,
+                                subscriptionId: sessionSubscriptionId || invoiceId,
+                                userId: purchase.user_id,
+                                billingCycle: String(purchase.package?.name || "").toLowerCase().includes("annual") ? "annual" : "monthly",
+                                planFor: "personal",
+                                autoRenewal: !!purchase.autoRenewEnabled,
+                                dateSubscribed: purchase.completed_at || purchase.created_at || new Date(),
+                                validTill: purchase.completed_at
+                                  ? new Date(new Date(purchase.completed_at).getTime() + (String(purchase.package?.name || "").toLowerCase().includes("annual") ? 365 : 30) * 24 * 60 * 60 * 1000)
+                                  : null,
                             });
                             console.log(`[PENDING-PROCESSOR] Custom invoice email sent for purchase ${purchase.id}`);
                         } else {
@@ -2675,17 +2857,27 @@ export async function processPendingPurchases() {
                                 : null;
 
                             if (owner?.email) {
+                                console.error(`[PENDING-PROCESSOR-TEAM] Sending invoice email with credits: ${purchase.amount}`);
                                 await sendCustomSubscriptionInvoiceEmail({
                                     to: owner.email,
                                     userName: owner.name || "Valued Customer",
                                     packageName: team?.name || "Team Plan",
                                     amount: purchase.price_usd,
+                                    credits: purchase.amount,
                                     invoiceId: invoiceObject?.number || invoiceId,
                                     renewalNumber: 0,
                                     issueDate: new Date(),
                                     dueDate: new Date(),
                                     invoicePdfUrl: invoiceObject?.invoice_pdf || null,
                                     hostedInvoiceUrl: invoiceObject?.hosted_invoice_url || null,
+                                    subscriptionId: subscriptionId || invoiceId,
+                                    userId: purchase.team_id,
+                                    billingCycle: "monthly",
+                                    planFor: "team",
+                                    autoRenewal: true,
+                                    dateSubscribed: purchase.completed_at || purchase.created_at || new Date(),
+                                    validTill: purchase.completed_at ? new Date(new Date(purchase.completed_at).getTime() + 30 * 24 * 60 * 60 * 1000) : null,
+                                    teamName: team?.name || null,
                                 });
                                 console.log(`[PENDING-PROCESSOR-TEAM] Custom invoice email sent for purchase ${purchase.id}`);
                             } else {

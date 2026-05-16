@@ -14,7 +14,7 @@ export async function getResourceBySlug(slug: string) {
 
 export async function updateResource(
   slug: string,
-  payload: { title?: string; contentHtml?: string; youtubeUrl?: string },
+  payload: { title?: string; contentHtml?: string; youtubeUrl?: string; removePdf?: boolean },
   files: any,
   updatedBy?: string
 ) {
@@ -22,15 +22,16 @@ export async function updateResource(
 
   const normalizedYoutubeUrl = payload.youtubeUrl?.trim() || null;
   const pdfUpload = files?.pdf?.[0] || null;
+  const shouldRemovePdf = Boolean(payload.removePdf) && !pdfUpload;
 
   const data: any = {
     title: payload.title ?? existing?.title ?? "",
     content_html: payload.contentHtml ?? existing?.content_html ?? null,
     youtube_url: normalizedYoutubeUrl,
     updated_by: updatedBy ?? existing?.updated_by ?? null,
-    pdf: pdfUpload ? pdfUpload.buffer : existing?.pdf ?? null,
-    pdf_filename: pdfUpload ? pdfUpload.originalname : existing?.pdf_filename ?? null,
-    pdf_mime: pdfUpload ? pdfUpload.mimetype : existing?.pdf_mime ?? null,
+    pdf: pdfUpload ? pdfUpload.buffer : shouldRemovePdf ? null : existing?.pdf ?? null,
+    pdf_filename: pdfUpload ? pdfUpload.originalname : shouldRemovePdf ? null : existing?.pdf_filename ?? null,
+    pdf_mime: pdfUpload ? pdfUpload.mimetype : shouldRemovePdf ? null : existing?.pdf_mime ?? null,
   };
 
   if (existing) {
