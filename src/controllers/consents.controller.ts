@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import prisma from '../dbConnection';
 import { loggingService } from '../services/logging.service';
 
 export async function recordAiGenerationConsentHandler(req: Request, res: Response) {
@@ -12,6 +13,37 @@ export async function recordAiGenerationConsentHandler(req: Request, res: Respon
       language,
       acknowledgedAt,
     } = req.body || {};
+
+    const acknowledgedDate = acknowledgedAt ? new Date(acknowledgedAt) : new Date();
+    const safeAcknowledgedDate = Number.isNaN(acknowledgedDate.getTime()) ? new Date() : acknowledgedDate;
+
+    const userRecord = user?.id
+      ? await prisma.user.findUnique({
+          where: { id: user.id },
+          select: {
+            id: true,
+            ai_generation_consent_first_at: true,
+          },
+        })
+      : email
+        ? await prisma.user.findUnique({
+            where: { email },
+            select: {
+              id: true,
+              ai_generation_consent_first_at: true,
+            },
+          })
+        : null;
+
+    if (userRecord) {
+      await prisma.user.update({
+        where: { id: userRecord.id },
+        data: {
+          ai_generation_consent_first_at: userRecord.ai_generation_consent_first_at || safeAcknowledgedDate,
+          ai_generation_consent_last_at: safeAcknowledgedDate,
+        },
+      });
+    }
 
     await loggingService.logRequest({
       method: 'CONSENT',
@@ -32,7 +64,7 @@ export async function recordAiGenerationConsentHandler(req: Request, res: Respon
       },
       metadata: {
         consentType: 'ai_generated_staging',
-        acknowledgedAt: acknowledgedAt || new Date().toISOString(),
+        acknowledgedAt: safeAcknowledgedDate.toISOString(),
         source: 'generate_modal',
       },
     });

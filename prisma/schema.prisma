@@ -13,6 +13,8 @@ model user {
   name                  String?                @map("name")
   created_at            DateTime               @default(now()) @map("created_at")
   updated_at            DateTime               @updatedAt @map("updated_at")
+  ai_generation_consent_first_at DateTime?      @map("ai_generation_consent_first_at")
+  ai_generation_consent_last_at  DateTime?      @map("ai_generation_consent_last_at")
   stripe_customer_id    String?                @map("stripe_customer_id")
   deleted_at            DateTime?              @map("deleted_at")
   auth_provider         auth_provider          @default(LOCAL) @map("auth_provider")
@@ -48,6 +50,7 @@ model user {
   sent_direct_messages      direct_message[]      @relation("DirectMessageSender")
   received_direct_messages  direct_message[]      @relation("DirectMessageReceiver")
 
+  @@index([ai_generation_consent_last_at])
   @@map("user")
 }
 

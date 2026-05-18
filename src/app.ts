@@ -11,6 +11,7 @@ import teamsCreditRoute from './api/teams.credits.route'
 import projectsRoute from './api/projects.route'
 import paymentRoutes from './api/payment.routes'
 import adminLogsRoute from './api/admin-logs.route'
+import adminUsersRoute from './api/admin-users.route'
 import legalDocumentsRoute from './api/legal-documents.route'
 import resourceRoute from './api/resource.route'
 import subscriptionRoutes from './api/subscription.route'
@@ -107,6 +108,7 @@ app.use('/api/projects', projectsRoute)
 app.use('/api/payment', paymentRoutes)
 app.use('/api/payments', paymentHistoryRoutes)
 app.use('/api/admin/logs', adminLogsRoute)
+app.use('/api/admin/users', adminUsersRoute)
 app.use('/api/consents', consentsRoute)
 app.use('/api/legal-documents', legalDocumentsRoute)
 app.use('/api/resources', resourceRoute)
