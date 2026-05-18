@@ -35,9 +35,10 @@ const isQuotaExhaustedError = (error: unknown): boolean => {
 
 export async function processBatchImage(job: BatchStageJob): Promise<void> {
     const { imageId, originalPath, roomType, stagingStyle, areaType, customPrompt } = job;
+    const normalizedAreaType: "interior" | "exterior" = areaType === "exterior" ? "exterior" : "interior";
     const jobStartTime = Date.now();
     const fileName = originalPath.split('/').pop() || originalPath.split('\\').pop() || 'unknown';
-    logger(`[JOB][${imageId.slice(0, 8)}] START ${fileName.substring(0, 30)} (staging in parallel mode, areaType=${areaType || 'interior'})`);
+    logger(`[JOB][${imageId.slice(0, 8)}] START ${fileName.substring(0, 30)} (staging in parallel mode, areaType=${normalizedAreaType})`);
 
     try {
         const baseImage = await prisma.image.findUnique({ where: { id: imageId } });
@@ -74,7 +75,8 @@ export async function processBatchImage(job: BatchStageJob): Promise<void> {
                 stagingStyle,
                 VARIATIONS_PER_IMAGE,
                 customPrompt,
-                false
+                false,
+                normalizedAreaType
             );
             generatedVariations.push(...fullSet.slice(0, VARIATIONS_PER_IMAGE));
         } catch (firstPassError) {
@@ -99,7 +101,8 @@ export async function processBatchImage(job: BatchStageJob): Promise<void> {
                             stagingStyle,
                             customPrompt,
                             false,
-                            variationModel
+                            variationModel,
+                            normalizedAreaType
                         );
                         if (variationBuffer) {
                             break;

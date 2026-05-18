@@ -25,6 +25,7 @@ import { requestLoggingMiddleware } from "./middlewares/requestLogging.middlewar
 import cors from "cors";
 
 const app = express();
+const SUPPORT_REQUEST_JSON_LIMIT = process.env.SUPPORT_REQUEST_JSON_LIMIT || "5mb";
 
 /* =======================
    CORS CONFIG (FIXED)
@@ -67,6 +68,9 @@ app.use(
 // Stripe webhook requires raw body
 app.post("/api/payment/webhook", express.raw({ type: "application/json" }),
     stripeWebhookHandler);
+
+// Support requests can include base64 screenshots, so allow a larger JSON payload on this endpoint only.
+app.use("/api/payment/support-request", express.json({ limit: SUPPORT_REQUEST_JSON_LIMIT }));
 
 app.use(express.json());
 app.use(cookieParser());

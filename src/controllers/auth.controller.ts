@@ -216,6 +216,50 @@ export async function getAvailableProviders(req: Request, res: Response) {
   });
 }
 
+export async function getCurrentUser(req: Request, res: Response) {
+  try {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+    });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    const userRole = await prisma.user_roles.findFirst({
+      where: { user_id: user.id },
+      include: { role: true },
+    });
+
+    if (!userRole) {
+      return res.status(404).json({ success: false, message: "Invalid Role" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: userRole.role.name,
+        avatar_url: user.avatar_url,
+        created_at: user.created_at,
+      },
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error?.message || "Failed to fetch current user",
+    });
+  }
+}
+
 export async function updateProfileImage(req: Request, res: Response) {
   try {
     const userId = req.user?.id;

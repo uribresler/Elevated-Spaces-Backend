@@ -2,7 +2,11 @@ import prisma from "../dbConnection";
 
 const GRACE_PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
 
-function isSubscriptionEffectivelyActive(purchase: { completed_at: Date | null; cancelledAt: Date | null; autoRenewEnabled: boolean }): boolean {
+function isSubscriptionEffectivelyActive(purchase: { status?: string; completed_at: Date | null; cancelledAt: Date | null; autoRenewEnabled: boolean }): boolean {
+  if (purchase.status && purchase.status !== "completed") {
+    return false;
+  }
+
   const now = new Date();
   
   // If not cancelled and auto-renew enabled, it's active
@@ -195,28 +199,30 @@ export async function getMyProjectsService({ userId }: { userId: string }) {
 
     const ownerTeamIds = ownedTeams.map((team) => team.id);
     const adminTeamIds = memberships.filter((m) => m.role.name === "TEAM_ADMIN").map((m) => m.team_id);
-    const agentTeamIds = memberships.filter((m) => m.role.name === "TEAM_MEMBER").map((m) => m.team_id);
+    const memberTeamIds = memberships.filter((m) => m.role.name === "TEAM_MEMBER").map((m) => m.team_id);
     const photographerTeamIds = memberships.filter((m) => m.role.name === "TEAM_PHOTOGRAPHER").map((m) => m.team_id);
 
-    const fullAccessTeamIds = Array.from(new Set([...ownerTeamIds]));
+    const ownerOrAdminTeamIds = Array.from(new Set([...ownerTeamIds, ...adminTeamIds]));
 
     const orFilters: any[] = [];
 
-    // Include personal projects (no team)
+    // Include personal projects (no team) created by the user
     orFilters.push({ team_id: null, created_by_user_id: userId });
 
-    if (fullAccessTeamIds.length > 0) {
-        orFilters.push({ team_id: { in: fullAccessTeamIds } });
+    // Owners and admins can see all projects in their teams
+    if (ownerOrAdminTeamIds.length > 0) {
+        orFilters.push({ team_id: { in: ownerOrAdminTeamIds } });
     }
 
-    if (agentTeamIds.length > 0) {
-        orFilters.push({ team_id: { in: agentTeamIds }, created_by_user_id: userId });
+    // Team members can only see projects they created in those teams
+    if (memberTeamIds.length > 0) {
         orFilters.push({
-            team_id: { in: agentTeamIds },
-            members: { some: { user_id: userId } },
+            team_id: { in: memberTeamIds },
+            created_by_user_id: userId,
         });
     }
 
+    // Photographers can see projects where they were explicitly added
     if (photographerTeamIds.length > 0) {
         orFilters.push({
             team_id: { in: photographerTeamIds },
@@ -263,8 +269,8 @@ export async function addProjectPhotographerService({
         throw new Error("Project must belong to a team to add photographers");
     }
 
-    const { team, roleName } = await getTeamRole({ teamId: project.team_id, userId });
-    if (!["TEAM_OWNER", "TEAM_ADMIN", "TEAM_MEMBER"].includes(roleName)) {
+    const { team } = await getTeamRole({ teamId: project.team_id, userId });
+    if (team.owner_id !== userId && project.created_by_user_id !== userId) {
         throw new Error("You are not allowed to add photographers");
     }
 
@@ -291,6 +297,51 @@ export async function addProjectPhotographerService({
         success: true,
         message: "Photographer added to project",
         member,
+    };
+}
+
+export async function deleteProjectPhotographerService({
+    projectId,
+    userId,
+    photographerId,
+}: {
+    projectId: string;
+    userId: string;
+    photographerId: string;
+}) {
+    const project = await prisma.team_project.findUnique({
+        where: { id: projectId },
+        include: { team: true },
+    });
+
+    if (!project) {
+        throw new Error("Project not found");
+    }
+
+    if (!project.team_id) {
+        throw new Error("Project must belong to a team to remove photographers");
+    }
+
+    const { team } = await getTeamRole({ teamId: project.team_id, userId });
+    if (team.owner_id !== userId && project.created_by_user_id !== userId) {
+        throw new Error("You are not allowed to remove photographers");
+    }
+
+    const membership = await prisma.team_project_member.findUnique({
+        where: { project_id_user_id: { project_id: project.id, user_id: photographerId } },
+    });
+
+    if (!membership) {
+        throw new Error("Photographer is not assigned to this project");
+    }
+
+    await prisma.team_project_member.delete({
+        where: { id: membership.id },
+    });
+
+    return {
+        success: true,
+        message: "Photographer removed from project",
     };
 }
 

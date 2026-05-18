@@ -408,9 +408,13 @@ export async function contactSalesHandler(req: Request, res: Response) {
             return res.status(400).json({ message: "Email is required" });
         }
 
+        if (!fullName || typeof fullName !== "string") {
+            return res.status(400).json({ message: "Full name is required" });
+        }
+
         await sendContactSalesInquiry({
             email,
-            fullName: typeof fullName === "string" ? fullName : undefined,
+            fullName,
             message: typeof message === "string" ? message : undefined,
             companyName: typeof companyName === "string" ? companyName : undefined,
             teamSize: typeof teamSize === "string" ? teamSize : undefined,
@@ -438,6 +442,10 @@ export async function supportRequestHandler(req: Request, res: Response) {
     try {
         const { fullName, companyName, email, briefDescription, orderNumber, additionalContext, screenshots } = req.body;
 
+        if (!fullName || typeof fullName !== "string") {
+            return res.status(400).json({ message: "Full name is required" });
+        }
+
         if (!email || typeof email !== "string") {
             return res.status(400).json({ message: "Email is required" });
         }
@@ -449,7 +457,7 @@ export async function supportRequestHandler(req: Request, res: Response) {
         const caseNumber = `CASE-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 
         await sendSupportInquiry({
-            fullName: typeof fullName === "string" ? fullName : undefined,
+            fullName,
             companyName: typeof companyName === "string" ? companyName : undefined,
             email,
             briefDescription,

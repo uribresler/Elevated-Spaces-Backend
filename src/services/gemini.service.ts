@@ -400,23 +400,32 @@ class GeminiService {
     roomType: string,
     stagingStyle: string,
     prompt?: string,
-    variationCount: number = 1
+    variationCount: number = 1,
+    areaType: "interior" | "exterior" = "interior"
   ): string {
     const groundingRules =
-      "Use the PROVIDED IMAGE as the only source scene. Keep the exact same room geometry, camera angle, walls, windows, doors, floor, and lighting direction. Do not generate a new or unrelated room. Return exactly ONE full-frame staged image. Do NOT create a collage, split-screen, multi-panel, contact sheet, or multiple views in one image.";
+      areaType === "exterior"
+        ? "Use the PROVIDED IMAGE as the only source scene. Keep the exact same exterior facade, roofline, windows, doors, driveway, landscaping, and camera angle. Do NOT change the layout, structure, or architectural elements in any way — do not move walls, change rooflines, or add/remove major structural elements. Do not turn this into an indoor room or create a new building. Return exactly ONE full-frame exterior staged image. Do NOT create a collage, split-screen, multi-panel, contact sheet, or multiple views in one image."
+        : "Use the PROVIDED IMAGE as the only source scene. Keep the exact same room geometry, camera angle, walls, windows, doors, floor, and lighting direction. Do not generate a new or unrelated room. Return exactly ONE full-frame staged image. Do NOT create a collage, split-screen, multi-panel, contact sheet, or multiple views in one image.";
 
     let stagingPrompt: string;
 
     if (prompt) {
-      const doNotRemove =
-        "ABSOLUTELY DO NOT REMOVE, HIDE, OR ALTER ANY EXISTING PAINTINGS, WALL ART, OR DECORATIVE ITEMS. THIS IS CRITICAL. ONLY ADD OR IMPROVE, NEVER REMOVE. DO NOT REMOVE ANYTHING FROM THE ORIGINAL IMAGE UNLESS I EXPLICITLY SAY SO.";
-      const lowerPrompt = prompt.toLowerCase();
-      const userRequestsRemoval = /remove|delete|empty|clear|no decor|no painting|no wall art/.test(lowerPrompt);
-      if (userRequestsRemoval) {
-        stagingPrompt = prompt;
+      if (areaType === "exterior") {
+        stagingPrompt = `This is an EXTERIOR property staging request. Keep the scene outside the house and preserve the facade, roofline, windows, doors, driveway, landscaping, and perspective. DO NOT change layout, move structural elements, or alter the architecture. ${prompt}`;
       } else {
-        stagingPrompt = `${doNotRemove}\n${prompt}\n${doNotRemove}`;
+        const doNotRemove =
+          "ABSOLUTELY DO NOT REMOVE, HIDE, OR ALTER ANY EXISTING PAINTINGS, WALL ART, OR DECORATIVE ITEMS. THIS IS CRITICAL. ONLY ADD OR IMPROVE, NEVER REMOVE. DO NOT REMOVE ANYTHING FROM THE ORIGINAL IMAGE UNLESS I EXPLICITLY SAY SO.";
+        const lowerPrompt = prompt.toLocaleLowerCase()
+        const userRequestsRemoval = /remove|delete|empty|clear|no decor|no painting|no wall art/.test(lowerPrompt);
+        if (userRequestsRemoval) {
+          stagingPrompt = prompt;
+        } else {
+          stagingPrompt = `${doNotRemove}\n${prompt}\n${doNotRemove}`;
+        }
       }
+    } else if (areaType === "exterior") {
+      stagingPrompt = `Virtually stage this exterior property in ${stagingStyle} style. Focus on curb appeal, facade details, entryway, patio/porch, landscaping, outdoor furniture, and tasteful exterior decor. Keep the architecture, camera angle, and structure unchanged.`;
     } else if (STAGING_STYLE_PROMPTS[stagingStyle?.toLowerCase()]) {
       stagingPrompt = STAGING_STYLE_PROMPTS[stagingStyle.toLowerCase()](roomType);
     } else {
@@ -424,7 +433,11 @@ class GeminiService {
     }
 
     if (variationCount > 1) {
-      return `${groundingRules}\n\n${stagingPrompt}\n\nGenerate ${variationCount} distinct staged variations in one response. Each variation must keep the same architecture and camera perspective, while varying furniture layout, decor accents, and styling details.`;
+      const variationInstruction =
+        areaType === "exterior"
+          ? `Generate ${variationCount} distinct staged variations in one response. Each variation must keep the same exterior architecture and camera perspective, while varying outdoor furniture, landscaping details, lighting accents, and curb-appeal styling.`
+          : `Generate ${variationCount} distinct staged variations in one response. Each variation must keep the same architecture and camera perspective, while varying furniture layout, decor accents, and styling details.`;
+      return `${groundingRules}\n\n${stagingPrompt}\n\n${variationInstruction}`;
     }
 
     return `${groundingRules}\n\n${stagingPrompt}`;
@@ -436,13 +449,14 @@ class GeminiService {
     stagingStyle: string,
     prompt?: string,
     variationCount: number = 1,
-    removeFurniture?: boolean
+    removeFurniture?: boolean,
+    areaType: "interior" | "exterior" = "interior"
   ): Promise<Buffer[]> {
     const safeVariationCount = Math.max(1, Math.min(variationCount, 8));
     const { buffer: imageBuffer, mimeType } = await this.prepareImageForGemini(inputImagePath);
     const base64Image = imageBuffer.toString("base64");
 
-    const stagingPrompt = this.buildStagingPrompt(roomType, stagingStyle, prompt, safeVariationCount);
+    const stagingPrompt = this.buildStagingPrompt(roomType, stagingStyle, prompt, safeVariationCount, areaType);
     const singleCallPrompt = `${stagingPrompt}\n\nReturn exactly ${safeVariationCount} final staged IMAGE outputs in this single response. Each output must be one full-frame image only (no collage or split). Keep the original architecture unchanged.`;
 
     return this.executeWithRetry(async () => {
@@ -700,7 +714,8 @@ class GeminiService {
     roomType: string,
     stagingStyle: string,
     prompt?: string,
-    removeFurniture?: boolean
+    removeFurniture?: boolean,
+    areaType: "interior" | "exterior" = "interior"
   ): Promise<Buffer> {
     const images = await this.generateStagedImages(
       inputImagePath,
@@ -708,7 +723,8 @@ class GeminiService {
       stagingStyle,
       prompt,
       1,
-      removeFurniture
+      removeFurniture,
+      areaType
     );
     return images[0];
   }
@@ -719,11 +735,12 @@ class GeminiService {
     stagingStyle: string,
     prompt: string | undefined,
     removeFurniture: boolean | undefined,
-    model: string
+    model: string,
+    areaType: "interior" | "exterior" = "interior"
   ): Promise<Buffer> {
     const { buffer: imageBuffer, mimeType } = await this.prepareImageForGemini(inputImagePath);
     const base64Image = imageBuffer.toString("base64");
-    const stagingPrompt = this.buildStagingPrompt(roomType, stagingStyle, prompt, 1);
+    const stagingPrompt = this.buildStagingPrompt(roomType, stagingStyle, prompt, 1, areaType);
 
     return this.executeWithRetry(async () => {
       await geminiRateLimiter.acquire(`stageImageWithModel:${model}`);
@@ -783,7 +800,8 @@ class GeminiService {
     stagingStyle: string,
     variationCount: number,
     prompt?: string,
-    removeFurniture?: boolean
+    removeFurniture?: boolean,
+    areaType: "interior" | "exterior" = "interior"
   ): Promise<Buffer[]> {
     return this.generateStagedImages(
       inputImagePath,
@@ -791,7 +809,8 @@ class GeminiService {
       stagingStyle,
       prompt,
       variationCount,
-      removeFurniture
+      removeFurniture,
+      areaType
     );
   }
 

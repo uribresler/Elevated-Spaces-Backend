@@ -9,7 +9,11 @@ const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY, { apiVersion: S
 // 30-day grace period for expired/cancelled subscriptions (in milliseconds)
 const GRACE_PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
 
-function isSubscriptionEffectivelyActive(purchase: { completed_at: Date | null; cancelledAt: Date | null; autoRenewEnabled: boolean }): boolean {
+function isSubscriptionEffectivelyActive(purchase: { status?: string; completed_at: Date | null; cancelledAt: Date | null; autoRenewEnabled: boolean }): boolean {
+  if (purchase.status && purchase.status !== "completed") {
+    return false;
+  }
+
   const now = new Date();
   
   // If not cancelled and auto-renew enabled, it's active
@@ -110,6 +114,31 @@ function resolveAmountWithFallback(params: {
 function isExtraSeatPackageName(packageName?: string | null): boolean {
     const normalized = String(packageName || "").toLowerCase();
     return normalized.includes("extra") && normalized.includes("seat");
+}
+
+function resolveDisplayStatus(record: {
+    status: string;
+    completed_at?: Date | null;
+    stripe_session_id?: string | null;
+    stripe_subscription_id?: string | null;
+    stripe_invoice_id?: string | null;
+}, paidOrCompleteSessionIds?: Set<string>): string {
+    if (record.status !== "pending") {
+        return record.status;
+    }
+
+    // If Stripe confirms the checkout session is paid/complete, surface this as in-process.
+    if (record.stripe_session_id && paidOrCompleteSessionIds?.has(record.stripe_session_id)) {
+        return "in_process";
+    }
+
+    // Pending with only a checkout session means user started checkout but did not pay yet.
+    // Move to "in_process" only when there is payment evidence and final completion is still pending.
+    const hasPaymentEvidence = Boolean(
+        record.completed_at || record.stripe_subscription_id || record.stripe_invoice_id
+    );
+
+    return hasPaymentEvidence ? "in_process" : "pending";
 }
 
 function inferTeamPurchaseMeta(params: { amount: number; priceUsd: number }) {
@@ -214,8 +243,39 @@ export class PaymentHistoryController {
                 return acc;
             }, {});
 
+            const paidOrCompleteSessionIds = new Set<string>();
+            if (stripe) {
+                const pendingSessionIds = Array.from(
+                    new Set(
+                        ([] as Array<string | null | undefined>)
+                            .concat(
+                                subscriptions
+                                    .filter((sub) => sub.status === "pending")
+                                    .map((sub) => sub.stripe_session_id),
+                                teamPurchases
+                                    .filter((purchase) => purchase.status === "pending")
+                                    .map((purchase) => purchase.stripe_session_id)
+                            )
+                            .filter((id): id is string => Boolean(id))
+                    )
+                );
+
+                await Promise.all(
+                    pendingSessionIds.map(async (sessionId) => {
+                        try {
+                            const session = await stripe.checkout.sessions.retrieve(sessionId);
+                            if (session.payment_status === "paid" || session.status === "complete") {
+                                paidOrCompleteSessionIds.add(sessionId);
+                            }
+                        } catch (error) {
+                            console.error("Failed to retrieve Stripe session for status mapping:", sessionId, error);
+                        }
+                    })
+                );
+            }
+
             const personalTransactions = subscriptions.map((sub) => {
-                const resolvedStatus = (sub.status === 'pending' && sub.stripe_session_id) ? 'in_process' : sub.status;
+                const resolvedStatus = resolveDisplayStatus(sub, paidOrCompleteSessionIds);
                 const packageName = sub.package.name;
                 const tier = getPlanTierFromPackageName(packageName);
                 const billingCycle = getBillingCycleFromPackageName(packageName);
@@ -269,7 +329,7 @@ export class PaymentHistoryController {
                     packageName: inferred.packageName,
                     credits: inferred.isExtraSeatPurchase ? 0 : purchase.amount,
                     amount,
-                    status: (purchase.status === 'pending' && purchase.stripe_session_id) ? 'in_process' : purchase.status,
+                    status: resolveDisplayStatus(purchase, paidOrCompleteSessionIds),
                     autoRenewal: inferred.isExtraSeatPurchase ? true : false,
                     renewalCount: 0,
                     createdAt: purchase.created_at,
@@ -798,9 +858,10 @@ export class PaymentHistoryController {
             const pending = purchases.filter((p) => p.status === "pending");
             const failed = purchases.filter((p) => p.status === "failed");
             const activeCandidates = purchases.filter(
-                (p) => isSubscriptionEffectivelyActive(p)
+                (p) => p.status === "completed" && isSubscriptionEffectivelyActive(p)
             );
             const active: typeof activeCandidates = [];
+            const hasInFlightPlanChangeCheckout = pending.some((p) => Boolean(p.stripe_session_id));
 
             console.log('[DEBUG] getPaymentSummary - completed purchases:', completed.length);
             console.log('[DEBUG] getPaymentSummary - activeCandidates:', activeCandidates.map(p => ({
@@ -814,6 +875,12 @@ export class PaymentHistoryController {
             })));
 
             for (const purchase of activeCandidates) {
+                if (hasInFlightPlanChangeCheckout) {
+                    console.log('[DEBUG] Skipping Stripe sync while plan-change checkout is in progress:', purchase.id);
+                    active.push(purchase);
+                    continue;
+                }
+
                 if (!purchase.stripe_session_id) {
                     console.log('[DEBUG] Marking purchase as cancelled - no stripe_session_id:', purchase.id);
                     await prisma.user_credit_purchase.updateMany({

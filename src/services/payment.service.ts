@@ -39,12 +39,12 @@ function getSubscriptionStatusPriority(status: string): number {
 }
 
 const PLAN_PRODUCT_KEYS = new Set([
-    "starter",
-    "pro",
-    "team",
-    "starter_annual",
-    "pro_annual",
-    "team_annual",
+    "plan_starter",
+    "plan_pro",
+    "plan_team",
+    "plan_starter_annual",
+    "plan_pro_annual",
+    "plan_team_annual",
 ]);
 
 async function debugSendStripeInvoice(invoiceId: string, scope: string) {
@@ -430,14 +430,14 @@ export async function sendSubscriptionStatusEmail(params: {
 
 function getPlanTierPriority(productKey?: string | null): number {
     switch (productKey) {
-        case "starter":
-        case "starter_annual":
+        case "plan_starter":
+        case "plan_starter_annual":
             return 1;
-        case "pro":
-        case "pro_annual":
+        case "plan_pro":
+        case "plan_pro_annual":
             return 2;
-        case "team":
-        case "team_annual":
+        case "plan_team":
+        case "plan_team_annual":
             return 3;
         default:
             return 0;
@@ -446,12 +446,12 @@ function getPlanTierPriority(productKey?: string | null): number {
 
 export type PurchaseFor = "individual" | "team";
 export type ProductKey =
-    | "starter"
-    | "pro"
-    | "team"
-    | "starter_annual"
-    | "pro_annual"
-    | "team_annual"
+    | "plan_starter"
+    | "plan_pro"
+    | "plan_team"
+    | "plan_starter_annual"
+    | "plan_pro_annual"
+    | "plan_team_annual"
     | "virtual_staging"
     | "furnishing_addon"
     | "extra_credits_50"
@@ -462,12 +462,15 @@ export type ProductKey =
     | "team_extra_user_seat";
 
 const PRODUCT_KEY_ALIASES: Record<string, ProductKey> = {
-    starterannual: "starter_annual",
-    proannual: "pro_annual",
-    teamannual: "team_annual",
-    "starter-annual": "starter_annual",
-    "pro-annual": "pro_annual",
-    "team-annual": "team_annual",
+    starter: "plan_starter",
+    pro: "plan_pro",
+    team: "plan_team",
+    starterannual: "plan_starter_annual",
+    proannual: "plan_pro_annual",
+    teamannual: "plan_team_annual",
+    "starter-annual": "plan_starter_annual",
+    "pro-annual": "plan_pro_annual",
+    "team-annual": "plan_team_annual",
 };
 
 function normalizeProductKey(productKey: string): string {
@@ -491,12 +494,12 @@ const PRODUCT_CATALOG: Record<ProductKey, {
     creditsPerUnit?: number;
     interval?: "month" | "year";
 }> = {
-    starter: { name: "Starter", type: "subscription", unitAmountUsd: 29, credits: 60, interval: "month" },
-    pro: { name: "Pro", type: "subscription", unitAmountUsd: 69, credits: 160, interval: "month" },
-    team: { name: "Team", type: "subscription", unitAmountUsd: 139, credits: 360, interval: "month" },
-    starter_annual: { name: "Starter Annual", type: "subscription", unitAmountUsd: 300, credits: 720, interval: "year" },
-    pro_annual: { name: "Pro Annual", type: "subscription", unitAmountUsd: 744, credits: 1920, interval: "year" },
-    team_annual: { name: "Team Annual", type: "subscription", unitAmountUsd: 1500, credits: 4320, interval: "year" },
+    plan_starter: { name: "Starter", type: "subscription", unitAmountUsd: 29, credits: 60, interval: "month" },
+    plan_pro: { name: "Pro", type: "subscription", unitAmountUsd: 69, credits: 160, interval: "month" },
+    plan_team: { name: "Team", type: "subscription", unitAmountUsd: 139, credits: 360, interval: "month" },
+    plan_starter_annual: { name: "Starter Annual", type: "subscription", unitAmountUsd: 300, credits: 720, interval: "year" },
+    plan_pro_annual: { name: "Pro Annual", type: "subscription", unitAmountUsd: 744, credits: 1920, interval: "year" },
+    plan_team_annual: { name: "Team Annual", type: "subscription", unitAmountUsd: 1500, credits: 4320, interval: "year" },
     virtual_staging: { name: "Full Home Virtual Staging", type: "one_time", unitAmountUsd: 99.99 },
     furnishing_addon: { name: "Physical Furnishing Add-On", type: "one_time", unitAmountUsd: 39.99 },
     extra_credits_50: { name: "Extra Credits (50)", type: "one_time", unitAmountUsd: 22, credits: 50 },
@@ -881,29 +884,26 @@ async function assertTeamOwner(teamId: string, userId: string) {
     return team;
 }
 
-async function ensureCreditPackage({
-    name,
-    credits,
-    price,
+async function findCreditPackage({
+    productKey,
 }: {
-    name: string;
-    credits: number;
-    price: number;
+    productKey: string;
 }) {
-    const existing = await prisma.credit_package.findFirst({ where: { name } });
-    if (existing) {
-        return existing;
-    }
-
-    return prisma.credit_package.create({
-        data: {
-            name,
-            credits,
-            price,
-            currency: "usd",
-            active: true,
+    // Normalize the product key to match seeded package names
+    const normalizedKey = normalizeProductKey(productKey);
+    
+    // Look for package by the normalized product key (which matches seeded names)
+    const existing = await prisma.credit_package.findFirst({
+        where: {
+            name: normalizedKey,
         },
     });
+
+    if (!existing) {
+        throw new Error(`Credit package not found for product: ${normalizedKey}. Please ensure it is seeded in the database.`);
+    }
+
+    return existing;
 }
 
 export async function createCheckoutSession({
@@ -978,8 +978,8 @@ export async function createCheckoutSession({
 
         const activePlanKey = activePlan.metadata?.productKey;
         const validForPlan =
-            (normalizedProductKey === "pro_extra_user_seat" && (activePlanKey === "pro" || activePlanKey === "pro_annual")) ||
-            (normalizedProductKey === "team_extra_user_seat" && (activePlanKey === "team" || activePlanKey === "team_annual"));
+            (normalizedProductKey === "pro_extra_user_seat" && (activePlanKey === "plan_pro" || activePlanKey === "plan_pro_annual")) ||
+            (normalizedProductKey === "team_extra_user_seat" && (activePlanKey === "plan_team" || activePlanKey === "plan_team_annual"));
 
         if (!validForPlan) {
             throw new Error("Selected extra user seat add-on does not match your active team plan");
@@ -1114,17 +1114,17 @@ export async function createCheckoutSession({
     }
 
     const isSubscriptionMode = !isSubscriptionTopUp && config!.type === "subscription";
-    
+
     const safeUiUnitAmountUsd = typeof uiUnitAmountUsd === "number" && Number.isFinite(uiUnitAmountUsd) && uiUnitAmountUsd > 0
         ? uiUnitAmountUsd
         : null;
     // Only override unitAmount for one-time purchases, NOT for subscriptions
     // Subscriptions must use the catalog prices to ensure correct recurring amounts
-    const isOneTimeNonPlanPurchase = safeUiUnitAmountUsd && !isSubscriptionTopUp && !isSubscriptionMode && 
-        !(normalizedProductKey === "starter" || normalizedProductKey === "pro" || normalizedProductKey === "team" || 
-          normalizedProductKey === "starter_annual" || normalizedProductKey === "pro_annual" || normalizedProductKey === "team_annual" ||
-          normalizedProductKey === "pro_extra_user_seat" || normalizedProductKey === "team_extra_user_seat");
-    
+    const isOneTimeNonPlanPurchase = safeUiUnitAmountUsd && !isSubscriptionTopUp && !isSubscriptionMode &&
+        !(normalizedProductKey === "plan_starter" || normalizedProductKey === "plan_pro" || normalizedProductKey === "plan_team" ||
+            normalizedProductKey === "plan_starter_annual" || normalizedProductKey === "plan_pro_annual" || normalizedProductKey === "plan_team_annual" ||
+            normalizedProductKey === "pro_extra_user_seat" || normalizedProductKey === "team_extra_user_seat");
+
     if (isOneTimeNonPlanPurchase) {
         unitAmount = toCents(safeUiUnitAmountUsd);
         totalAmount = unitAmount * safeQuantity;
@@ -1157,10 +1157,10 @@ export async function createCheckoutSession({
     });
 
     if (purchaseFor === "team" && teamId) {
-            await prisma.team_purchase.create({
+        await prisma.team_purchase.create({
             data: {
                 team_id: teamId,
-                    amount: isSeatAddon ? safeQuantity : credits,
+                amount: isSeatAddon ? safeQuantity : credits,
                 price_usd: totalAmount / 100,
                 status: "pending",
                 stripe_session_id: session.id,
@@ -1168,10 +1168,8 @@ export async function createCheckoutSession({
         });
     } else {
         if (credits > 0) {
-            const packageRecord = await ensureCreditPackage({
-                name: isSubscriptionTopUp ? "plan_subscription_topup" : `plan_${productKey}`,
-                credits,
-                price: totalAmount / 100,
+            const packageRecord = await findCreditPackage({
+                productKey: isSubscriptionTopUp ? "subscription_topup" : productKey,
             });
 
             await prisma.user_credit_purchase.create({
@@ -1220,8 +1218,8 @@ function applyCreditsToTeam(teamId: string, credits: number) {
 }
 
 export async function sendContactSalesInquiry({
-    email,
     fullName,
+    email,
     message,
     companyName,
     teamSize,
@@ -1233,8 +1231,8 @@ export async function sendContactSalesInquiry({
     preferredStartDate,
     userId,
 }: {
+    fullName: string;
     email: string;
-    fullName?: string;
     message?: string;
     companyName?: string;
     teamSize?: string;
@@ -1246,7 +1244,12 @@ export async function sendContactSalesInquiry({
     preferredStartDate?: string;
     userId?: string;
 }) {
+    const senderName = (fullName || "").trim();
     const senderEmail = (email || "").trim();
+    if (!senderName) {
+        throw new Error("Full name is required");
+    }
+
     if (!senderEmail) {
         throw new Error("Email is required");
     }
@@ -1257,7 +1260,6 @@ export async function sendContactSalesInquiry({
     const safeTeamSize = (teamSize || "").trim();
     const safeBillingPreference = (billingPreference || "").trim();
     const safePhone = (phone || "").trim();
-    const safeFullName = (fullName || "").trim();
     const safePreferredContactMethod = (preferredContactMethod || "").trim();
     const safeEstimatedMonthlyCreditVolume = (estimatedMonthlyCreditVolume || "").trim();
     const safePrimaryUseCase = (primaryUseCase || "").trim();
@@ -1269,16 +1271,16 @@ export async function sendContactSalesInquiry({
         "New Contact Sales request",
         `Submitted at: ${submittedAt}`,
         `User ID: ${userId || "N/A"}`,
-        `Full Name: ${safeFullName || "N/A"}`,
+        `Full Name: ${senderName}`,
         `Email: ${senderEmail}`,
         `Company: ${safeCompanyName || "N/A"}`,
-        `Team Size: ${safeTeamSize || "N/A"}`,
-        `Billing Preference: ${safeBillingPreference || "N/A"}`,
-        `Phone: ${safePhone || "N/A"}`,
         `Preferred Contact Method: ${safePreferredContactMethod || "N/A"}`,
+        `Team Size: ${safeTeamSize || "N/A"}`,
         `Estimated Monthly Credit Volume: ${safeEstimatedMonthlyCreditVolume || "N/A"}`,
         `Primary Use Case: ${safePrimaryUseCase || "N/A"}`,
         `Preferred Start Date: ${safePreferredStartDate || "N/A"}`,
+        `Billing Preference: ${safeBillingPreference || "N/A"}`,
+        `Phone: ${safePhone || "N/A"}`,
         "",
         "Message:",
         safeMessage || "Please contact me about enterprise pricing.",
@@ -1288,16 +1290,16 @@ export async function sendContactSalesInquiry({
         <h2>New Contact Sales request</h2>
         <p><strong>Submitted at:</strong> ${submittedAt}</p>
         <p><strong>User ID:</strong> ${userId || "N/A"}</p>
-        <p><strong>Full Name:</strong> ${safeFullName || "N/A"}</p>
+        <p><strong>Full Name:</strong> ${senderName}</p>
         <p><strong>Email:</strong> ${senderEmail}</p>
         <p><strong>Company:</strong> ${safeCompanyName || "N/A"}</p>
-        <p><strong>Team Size:</strong> ${safeTeamSize || "N/A"}</p>
-        <p><strong>Billing Preference:</strong> ${safeBillingPreference || "N/A"}</p>
-        <p><strong>Phone:</strong> ${safePhone || "N/A"}</p>
         <p><strong>Preferred Contact Method:</strong> ${safePreferredContactMethod || "N/A"}</p>
+        <p><strong>Team Size:</strong> ${safeTeamSize || "N/A"}</p>
         <p><strong>Estimated Monthly Credit Volume:</strong> ${safeEstimatedMonthlyCreditVolume || "N/A"}</p>
         <p><strong>Primary Use Case:</strong> ${safePrimaryUseCase || "N/A"}</p>
         <p><strong>Preferred Start Date:</strong> ${safePreferredStartDate || "N/A"}</p>
+        <p><strong>Billing Preference:</strong> ${safeBillingPreference || "N/A"}</p>
+        <p><strong>Phone:</strong> ${safePhone || "N/A"}</p>
         <p><strong>Message:</strong></p>
         <p>${(safeMessage || "Please contact me about enterprise pricing.").replace(/\n/g, "<br />")}</p>
     `;
@@ -1326,7 +1328,7 @@ export async function sendSupportInquiry({
     userId,
     caseNumber,
 }: {
-    fullName?: string;
+    fullName: string;
     companyName?: string;
     email: string;
     briefDescription: string;
@@ -1346,6 +1348,10 @@ export async function sendSupportInquiry({
     const safeOrderNumber = (orderNumber || "").trim();
     const safeContext = (additionalContext || "").trim();
 
+    if (!senderName) {
+        throw new Error("Full name is required");
+    }
+
     if (!senderEmail) {
         throw new Error("Email is required");
     }
@@ -1358,16 +1364,13 @@ export async function sendSupportInquiry({
     const submittedAt = new Date().toISOString();
     const safeAttachments = (screenshots || []).slice(0, 3);
 
-    const safeCompanyName = (companyName || "").trim();
-
     const subject = `Support request ${caseNumber}${userId ? ` (user: ${userId})` : ""}`;
     const text = [
         "New Support request",
         `Case Number: ${caseNumber}`,
         `Submitted at: ${submittedAt}`,
         `User ID: ${userId || "N/A"}`,
-        `Full Name: ${senderName || "N/A"}`,
-        `Company: ${safeCompanyName || "N/A"}`,
+        `Full Name: ${senderName}`,
         `Email: ${senderEmail}`,
         `Order Number: ${safeOrderNumber || "N/A"}`,
         "",
@@ -1385,8 +1388,7 @@ export async function sendSupportInquiry({
         <p><strong>Case Number:</strong> ${caseNumber}</p>
         <p><strong>Submitted at:</strong> ${submittedAt}</p>
         <p><strong>User ID:</strong> ${userId || "N/A"}</p>
-        <p><strong>Full Name:</strong> ${senderName || "N/A"}</p>
-        <p><strong>Company:</strong> ${safeCompanyName || "N/A"}</p>
+        <p><strong>Full Name:</strong> ${senderName}</p>
         <p><strong>Email:</strong> ${senderEmail}</p>
         <p><strong>Order Number:</strong> ${safeOrderNumber || "N/A"}</p>
         <p><strong>Brief Description:</strong></p>
@@ -1623,14 +1625,14 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
     const isSubscriptionPlanPurchase =
         session.mode === "subscription" &&
         (PLAN_PRODUCT_KEYS.has(normalizedProductKey as ProductKey) || isSeatAddon);
-    
+
     // Parse autoRenewEnabled from metadata (defaults to isSubscriptionPlanPurchase if not explicitly set)
     const autoRenewEnabledFromMetadata = metadata.autoRenewEnabled;
     let shouldAutoRenew = isSubscriptionPlanPurchase; // Default for backward compatibility
     if (typeof autoRenewEnabledFromMetadata === "string") {
         shouldAutoRenew = autoRenewEnabledFromMetadata === "true" ? true : false;
     }
-    
+
     const subscriptionId = typeof session.subscription === "string"
         ? session.subscription
         : session.subscription?.id;
@@ -1669,8 +1671,8 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                 operations.push(
                     prisma.team_purchase.update({
                         where: { id: existing.id },
-                        data: { 
-                            status: "completed", 
+                        data: {
+                            status: "completed",
                             completed_at: new Date(),
                             stripe_subscription_id: subscriptionId,
                         },
@@ -1705,10 +1707,8 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
             }
         }
     } else if (credits > 0) {
-        const packageRecord = await ensureCreditPackage({
-            name: `plan_${productKey}`,
-            credits,
-            price: (session.amount_total || 0) / 100,
+        const packageRecord = await findCreditPackage({
+            productKey,
         });
 
         const existing = await prisma.user_credit_purchase.findFirst({
@@ -1841,7 +1841,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                         where: { id: completedPurchase.package_id },
                     });
                     const isAnnualPlan = packageRecord?.name && packageRecord.name.toLowerCase().includes('annual');
-                    
+
                     if (isAnnualPlan && credits > 0) {
                         // Store original credits for monthly allocation
                         const monthlyCredits = Math.floor(credits / 12);
@@ -1858,7 +1858,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                         });
                         console.log(`[PAYMENT] Annual plan setup - total: ${credits}, monthly: ${monthlyCredits}`);
                     }
-                    
+
                     await enforceSingleActiveAutoRenewalSubscription({
                         userId,
                         keepPurchaseId: completedPurchase.id,
@@ -1933,7 +1933,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
 
         try {
             console.log(`[EMAIL-DEBUG] User and email found, preparing to send email to ${userEmail}`);
-            
+
             // Use custom subscription invoice template for plan subscriptions
             if (isSubscriptionPlanPurchase && userName) {
                 console.error(`[EMAIL-DEBUG] Sending subscription invoice with credits: ${credits}`);
@@ -2066,11 +2066,11 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
     console.error('[WEBHOOK] Invoice ID:', invoice.id);
     console.error('[WEBHOOK] Invoice Number:', invoice.number);
     console.error('[WEBHOOK] Invoice Status:', invoice.status);
-    
+
     const rawSubscription = (invoice as any).subscription as string | { id: string } | null;
     const subscriptionId = typeof rawSubscription === "string" ? rawSubscription : rawSubscription?.id;
     console.error('[WEBHOOK] Subscription ID:', subscriptionId);
-    
+
     if (!subscriptionId) {
         console.error('[WEBHOOK] NO SUBSCRIPTION ID - RETURNING EARLY');
         return;
@@ -2081,7 +2081,7 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
 
     const subscription = await stripe.subscriptions.retrieve(subscriptionId);
     console.error('[WEBHOOK] Subscription retrieved, metadata:', subscription.metadata);
-    
+
     const metadata = subscription.metadata || {};
     const productKey = metadata.productKey;
     const purchaseFor = metadata.purchaseFor as PurchaseFor | undefined;
@@ -2144,7 +2144,7 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
             if (!recentPurchase.stripe_invoice_id || !recentPurchase.stripe_subscription_id) {
                 await prisma.team_purchase.update({
                     where: { id: recentPurchase.id },
-                    data: { 
+                    data: {
                         stripe_invoice_id: invoice.id,
                         stripe_subscription_id: subscriptionId,
                     },
@@ -2264,11 +2264,9 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
 
     if (credits > 0) {
         console.error('[WEBHOOK] PERSONAL PLAN PATH - userId:', userId, 'credits:', credits);
-        
-        const packageRecord = await ensureCreditPackage({
-            name: `plan_${productKey}`,
-            credits,
-            price: invoice.amount_paid / 100,
+
+        const packageRecord = await findCreditPackage({
+            productKey,
         });
 
         const existingByInvoice = await prisma.user_credit_purchase.findFirst({
@@ -2411,7 +2409,7 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
 
         return;
     }
-    
+
     console.error('[WEBHOOK] ========== INVOICE PAID WEBHOOK COMPLETED SUCCESSFULLY ==========');
 }
 
@@ -2560,9 +2558,9 @@ export async function processPendingPurchases() {
                 const session = await stripe.checkout.sessions.retrieve(purchase.stripe_session_id, {
                     expand: ["invoice"],
                 });
-                    const sessionSubscriptionId = typeof session.subscription === "string"
-                        ? session.subscription
-                        : session.subscription?.id;
+                const sessionSubscriptionId = typeof session.subscription === "string"
+                    ? session.subscription
+                    : session.subscription?.id;
 
                 console.log(`[PENDING-PROCESSOR] Checking session ${session.id}:`, {
                     paymentStatus: session.payment_status,
@@ -2703,8 +2701,8 @@ export async function processPendingPurchases() {
                                 autoRenewal: !!purchase.autoRenewEnabled,
                                 dateSubscribed: purchase.completed_at || purchase.created_at || new Date(),
                                 validTill: purchase.completed_at
-                                  ? new Date(new Date(purchase.completed_at).getTime() + (String(purchase.package?.name || "").toLowerCase().includes("annual") ? 365 : 30) * 24 * 60 * 60 * 1000)
-                                  : null,
+                                    ? new Date(new Date(purchase.completed_at).getTime() + (String(purchase.package?.name || "").toLowerCase().includes("annual") ? 365 : 30) * 24 * 60 * 60 * 1000)
+                                    : null,
                             });
                             console.log(`[PENDING-PROCESSOR] Custom invoice email sent for purchase ${purchase.id}`);
                         } else {
@@ -2721,7 +2719,7 @@ export async function processPendingPurchases() {
 
         // Process pending team purchases
         console.log("[PENDING-PROCESSOR] Processing pending team purchases...");
-        
+
         try {
             const pendingTeamPurchases = await prisma.team_purchase.findMany({
                 where: { status: "pending" },
@@ -2795,8 +2793,8 @@ export async function processPendingPurchases() {
 
                     if (session.payment_status === "paid") {
                         // Extract subscription ID if this is a subscription
-                        const subscriptionId = typeof session.subscription === "string" 
-                            ? session.subscription 
+                        const subscriptionId = typeof session.subscription === "string"
+                            ? session.subscription
                             : session.subscription?.id;
 
                         const completionResult = await prisma.team_purchase.updateMany({

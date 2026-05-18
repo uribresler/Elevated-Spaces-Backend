@@ -12,14 +12,16 @@ const rolesArray = [
 ];
 
 const packages = [
-  { name: "Starter", credits: 60, price: 29 },
-  { name: "Starter Annual", credits: 720, price: 300 },
-  { name: "Pro", credits: 160, price: 69 },
-  { name: "Pro Annual", credits: 1920, price: 744 },
-  { name: "Team", credits: 360, price: 139 },
-  { name: "Team Annual", credits: 4320, price: 1500 },
-  { name: "Enterprise", credits: 999999, price: 0 },
-  { name: "Pay Per Image", credits: 1, price: 0.5 },
+  { name: "plan_starter", credits: 60, price: 29 },
+  { name: "plan_starter_annual", credits: 720, price: 300 },
+  { name: "plan_pro", credits: 160, price: 69 },
+  { name: "plan_pro_annual", credits: 1920, price: 744 },
+  { name: "plan_team", credits: 360, price: 139 },
+  { name: "plan_team_annual", credits: 4320, price: 1500 },
+  { name: "subscription_topup", credits: 1, price: 0 },
+  { name: "pay_per_image", credits: 1, price: 0.5 },
+  { name: "extra_credits_50", credits: 50, price: 22 },
+  { name: "extra_credits_100", credits: 100, price: 40 },
 ];
 
 const teamOwnerPermissions = {

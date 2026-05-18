@@ -243,6 +243,7 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
 
   try {
     const { stagedId, prompt, roomType = "living-room", stagingStyle = "modern", keepLocalFiles = false, removeFurniture = false } = req.body;
+    const areaType = typeof req.body.areaType === "string" ? req.body.areaType.toLowerCase() : "interior";
 
     // Determine if user is in demo mode (for watermarking, NOT for blocking)
     // Restaging is FREE and doesn't consume demo credits
@@ -340,7 +341,9 @@ export async function restageImage(req: Request, res: Response): Promise<void> {
         tempPath,
         roomType.toLowerCase(),
         stagingStyle.toLowerCase(),
-        prompt
+        prompt,
+        removeFurniture,
+        areaType
       );
     } catch (aiError) {
       if (aiError instanceof ImageProcessingError) {
@@ -849,6 +852,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
       stagingStyle = "modern",
       keepLocalFiles = false
     } = req.body;
+    const areaType = typeof req.body.areaType === "string" ? req.body.areaType.toLowerCase() : "interior";
 
     // Validate room type
     if (!VALID_ROOM_TYPES.includes(roomType.toLowerCase())) {
@@ -915,7 +919,9 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
         roomType.toLowerCase(),
         stagingStyle.toLowerCase(),
         NUM_VARIATIONS,
-        prompt
+        prompt,
+        false,
+        areaType
       );
 
       for (let i = 0; i < generatedVariations.length; i++) {
@@ -1244,9 +1250,11 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
     }
 
     const { prompt, roomType = "living-room", stagingStyle = "modern" } = req.body;
+    const areaType = typeof req.body.areaType === "string" ? req.body.areaType.toLowerCase() : "interior";
     await stagingTrace.append("request.parsed", {
       roomType,
       stagingStyle,
+      areaType,
       promptLength: typeof prompt === "string" ? prompt.length : 0,
     });
 
@@ -1274,7 +1282,7 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
       return;
     }
 
-    logger(`[DUAL_MODEL] stageSingleImageWithFallback START | roomType=${roomType} | style=${stagingStyle} | userId=${userId || 'guest'} | isDemo=${isDemo}`);
+    logger(`[DUAL_MODEL] stageSingleImageWithFallback START | roomType=${roomType} | style=${stagingStyle} | areaType=${areaType} | userId=${userId || 'guest'} | isDemo=${isDemo}`);
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -1338,7 +1346,9 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
         inputImagePath,
         roomType.toLowerCase(),
         stagingStyle.toLowerCase(),
-        prompt
+        prompt,
+        false,
+        areaType
       );
       const primaryDuration = Date.now() - primaryStartTime;
       logger(`[DUAL_MODEL] PHASE1_GEMINI_SUCCESS durationMs=${primaryDuration} sizeBytes=${primaryImageBuffer.length}`);

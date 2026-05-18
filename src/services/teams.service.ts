@@ -15,7 +15,11 @@ const STRIPE_API_VERSION = "2025-12-15.clover";
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY, { apiVersion: STRIPE_API_VERSION }) : null;
 
-function isSubscriptionEffectivelyActive(purchase: { completed_at: Date | null; cancelledAt: Date | null; autoRenewEnabled: boolean }): boolean {
+function isSubscriptionEffectivelyActive(purchase: { status?: string; completed_at: Date | null; cancelledAt: Date | null; autoRenewEnabled: boolean }): boolean {
+  if (purchase.status && purchase.status !== "completed") {
+    return false;
+  }
+
   const now = new Date();
   
   // If not cancelled and auto-renew enabled, it's active
@@ -66,11 +70,13 @@ type TeamSeatPolicy = {
 };
 
 function getTeamSeatPolicyForProductKey(productKey?: string | null): TeamSeatPolicy | null {
-    switch (productKey) {
+    switch (String(productKey || "").toLowerCase()) {
         case "starter":
+        case "plan_starter":
         case "starter_annual":
+        case "plan_starter_annual":
             return {
-                planKey: productKey,
+                planKey: String(productKey || "").startsWith("plan_") ? String(productKey) : `plan_${String(productKey || "")}`,
                 planLabel: "Starter",
                 freeAdditionalUsers: 0,
                 extraSeatPriceUsdMonthly: null,
@@ -78,9 +84,11 @@ function getTeamSeatPolicyForProductKey(productKey?: string | null): TeamSeatPol
                 unlimited: false,
             };
         case "pro":
+        case "plan_pro":
         case "pro_annual":
+        case "plan_pro_annual":
             return {
-                planKey: productKey,
+                planKey: String(productKey || "").startsWith("plan_") ? String(productKey) : `plan_${String(productKey || "")}`,
                 planLabel: "Pro",
                 freeAdditionalUsers: 2,
                 extraSeatPriceUsdMonthly: 20,
@@ -88,9 +96,11 @@ function getTeamSeatPolicyForProductKey(productKey?: string | null): TeamSeatPol
                 unlimited: false,
             };
         case "team":
+        case "plan_team":
         case "team_annual":
+        case "plan_team_annual":
             return {
-                planKey: productKey,
+                planKey: String(productKey || "").startsWith("plan_") ? String(productKey) : `plan_${String(productKey || "")}`,
                 planLabel: "Team",
                 freeAdditionalUsers: 5,
                 extraSeatPriceUsdMonthly: 15,
@@ -98,9 +108,11 @@ function getTeamSeatPolicyForProductKey(productKey?: string | null): TeamSeatPol
                 unlimited: false,
             };
         case "enterprise":
+        case "plan_enterprise":
         case "enterprise_annual":
+        case "plan_enterprise_annual":
             return {
-                planKey: productKey,
+                planKey: String(productKey || "").startsWith("plan_") ? String(productKey) : `plan_${String(productKey || "")}`,
                 planLabel: "Enterprise",
                 freeAdditionalUsers: Number.MAX_SAFE_INTEGER,
                 extraSeatPriceUsdMonthly: null,

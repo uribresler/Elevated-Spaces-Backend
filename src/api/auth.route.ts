@@ -8,6 +8,7 @@ import {
   oauthCallback,
   oauthFailure,
   getAvailableProviders,
+  getCurrentUser,
   updateProfileImage,
   deleteProfileImage,
 } from "../controllers/auth.controller";
@@ -79,6 +80,7 @@ const getCookieFromHeader = (rawCookieHeader: unknown, name: string): string | n
 
 router.post("/signup", signup);
 router.post("/login", login);
+router.get("/me", requireAuth, getCurrentUser);
 router.patch("/profile-image", requireAuth, uploadImage, updateProfileImage);
 router.delete("/profile-image", requireAuth, deleteProfileImage);
 
