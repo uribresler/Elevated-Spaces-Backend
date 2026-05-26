@@ -606,7 +606,7 @@ export class PaymentHistoryController {
                 };
             });
 
-            const teamInvoices = teamPurchases.map((purchase, index) => {
+            const teamInvoices = await Promise.all(teamPurchases.map(async (purchase, index) => {
                 const inferred = inferTeamPurchaseMeta({ amount: purchase.amount, priceUsd: purchase.price_usd });
                 const amount = resolveAmountWithFallback({
                     amount: Number(purchase.price_usd || 0),
@@ -615,12 +615,28 @@ export class PaymentHistoryController {
                 });
                 const dateSubscribed = purchase.created_at || purchase.completed_at || new Date();
                 let validTill: Date | null = null;
+                let stripeInvoicePdfUrl: string | null = null;
+                let stripeInvoiceHostedUrl: string | null = null;
                 if (dateSubscribed) {
                     const base = new Date(dateSubscribed);
                     if (inferred.billingCycle === "monthly") {
                         validTill = new Date(base.getTime() + 30 * 24 * 60 * 60 * 1000);
                     } else if (inferred.billingCycle === "annual") {
                         validTill = new Date(base.getTime() + 365 * 24 * 60 * 60 * 1000);
+                    }
+                }
+
+                if (purchase.stripe_invoice_id && stripe) {
+                    try {
+                        const invoice = await stripe.invoices.retrieve(purchase.stripe_invoice_id);
+                        stripeInvoicePdfUrl = invoice.invoice_pdf || null;
+                        stripeInvoiceHostedUrl = invoice.hosted_invoice_url || null;
+                    } catch (error) {
+                        console.error("Failed to fetch Stripe invoice for team purchase:", {
+                            purchaseId: purchase.id,
+                            stripeInvoiceId: purchase.stripe_invoice_id,
+                            error,
+                        });
                     }
                 }
 
@@ -651,9 +667,11 @@ export class PaymentHistoryController {
                         isExtraSeatPurchase: inferred.isExtraSeatPurchase,
                         seatUnits: inferred.seatUnits,
                     }),
-                    previewAvailable: false,
+                    previewAvailable: Boolean(stripeInvoicePdfUrl || stripeInvoiceHostedUrl),
+                    stripeInvoicePdfUrl,
+                    stripeInvoiceHostedUrl,
                 };
-            });
+            }));
 
             const addonInvoices = addonPayments.map((payment, index) => {
                 const dateSubscribed = payment.created_at || new Date();

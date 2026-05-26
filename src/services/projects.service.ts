@@ -2,6 +2,10 @@ import prisma from "../dbConnection";
 
 const GRACE_PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
 
+function normalizeProjectName(name: string) {
+    return name.trim().replace(/\s+/g, " ");
+}
+
 function isSubscriptionEffectivelyActive(purchase: { status?: string; completed_at: Date | null; cancelledAt: Date | null; autoRenewEnabled: boolean }): boolean {
   if (purchase.status && purchase.status !== "completed") {
     return false;
@@ -70,7 +74,9 @@ export async function createProjectService({
     userId: string;
     photographerEmail?: string;
 }) {
-    if (!name.trim()) {
+    const normalizedName = normalizeProjectName(name);
+
+    if (!normalizedName) {
         throw new Error("Project name is required");
     }
 
@@ -112,6 +118,20 @@ export async function createProjectService({
 
         if (!teamHasActivePurchase && !userHasActivePurchase && !ownerHasActivePurchase) {
             throw new Error("Creating projects requires either the team or your personal account (or the team owner) to have an active paid subscription. Please subscribe to a plan.");
+        }
+
+        const existingTeamProject = await prisma.team_project.findFirst({
+            where: {
+                team_id: sanitizedTeamId,
+                name: { equals: normalizedName, mode: "insensitive" },
+            },
+            select: { id: true },
+        });
+
+        if (existingTeamProject) {
+            const error: any = new Error("A project with this name already exists in this team. Please choose a different name.");
+            error.code = "PROJECT_NAME_TAKEN";
+            throw error;
         }
     } else {
         // For personal projects, user must have an active subscription
@@ -159,7 +179,7 @@ export async function createProjectService({
     const project = await prisma.team_project.create({
         data: {
             team_id: sanitizedTeamId,
-            name: name.trim(),
+            name: normalizedName,
             address: address?.trim() || null,
             description: description?.trim() || null,
             created_by_user_id: userId,
@@ -182,6 +202,7 @@ export async function createProjectService({
         message: sanitizedTeamId 
             ? "Team project created successfully" 
             : "Personal project created successfully",
+        project,
         data: { project },
     };
 }

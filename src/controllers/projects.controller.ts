@@ -22,6 +22,9 @@ export async function createProject(req: Request, res: Response) {
         return res.status(201).json(result);
     } catch (error: any) {
         console.error(error);
+        if (error?.code === "PROJECT_NAME_TAKEN") {
+            return res.status(409).json({ message: error.message || "A project with this name already exists in this team." });
+        }
         return res.status(400).json({ message: error.message || "Failed to create project" });
     }
 }

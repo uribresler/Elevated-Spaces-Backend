@@ -645,6 +645,9 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     }
   } else if (userId && !teamId) {
     // Logged in but no teamId provided - check personal credits first
+    const requestedCreditSource = typeof req.body.creditSource === "string"
+      ? req.body.creditSource.toLowerCase()
+      : "";
     const personalCredits = await prisma.user_credit_balance.findUnique({
       where: { user_id: userId }
     });
@@ -654,6 +657,17 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     // If user has personal credits, they're not in demo mode
     // If they don't have credits, we'll check demo eligibility below
     const hasPersonalCredits = personalCredits && personalCredits.balance > 0;
+
+    if (requestedCreditSource === "personal" && !hasPersonalCredits) {
+      res.status(403).json({
+        success: false,
+        error: {
+          code: 'INSUFFICIENT_CREDITS',
+          message: 'You have no personal credits available. Please purchase credits or select team credits to continue.',
+        },
+      });
+      return;
+    }
 
     if (!hasPersonalCredits) {
       // No personal credits - check if they have purchased credits before
@@ -689,6 +703,9 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
 
   // If logged in, check if they have purchased credits or personal credit balance
   if (userId) {
+    const requestedCreditSource = typeof req.body.creditSource === "string"
+      ? req.body.creditSource.toLowerCase()
+      : "";
     const personalCredits = await prisma.user_credit_balance.findUnique({
       where: { user_id: userId }
     });
@@ -705,6 +722,15 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     if (usingTeamCredits) {
       // Team wallet/member allocations are paid credits and should never be treated as demo.
       isDemo = false;
+    } else if (requestedCreditSource === "personal" && !hasPersonalCredits) {
+      res.status(403).json({
+        success: false,
+        error: {
+          code: 'INSUFFICIENT_CREDITS',
+          message: 'You have no personal credits available. Please purchase credits or select team credits to continue.',
+        },
+      });
+      return;
     } else
     // User is NOT in demo mode if they have personal credits OR have purchased before
     // User IS in demo mode if they have never purchased and no personal credits
@@ -1157,6 +1183,9 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
   let guestId: string | null = null;
 
   if (userId) {
+    const requestedCreditSource = typeof req.body.creditSource === "string"
+      ? req.body.creditSource.toLowerCase()
+      : "";
     const personalCredits = await prisma.user_credit_balance.findUnique({
       where: { user_id: userId }
     });
@@ -1169,6 +1198,15 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
     if (usingTeamCredits) {
       // Team wallet/member allocations are paid credits and should never be treated as demo.
       isDemo = false;
+    } else if (requestedCreditSource === "personal" && !hasPersonalCredits) {
+      res.status(403).json({
+        success: false,
+        error: {
+          code: 'INSUFFICIENT_CREDITS',
+          message: 'You have no personal credits available. Please purchase credits or select team credits to continue.',
+        },
+      });
+      return;
     } else if (!hasPersonalCredits && !hasPurchasedCredits) {
       isDemo = true;
     } else {
