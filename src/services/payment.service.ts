@@ -4,6 +4,7 @@ import prisma from "../dbConnection";
 import { sendEmail } from "../config/mail.config";
 import { loggingService } from "./logging.service";
 import { InvoiceService } from "./invoice.service";
+import { enforceTeamSeatCapacityForExistingMembers } from "./teams.service";
 import { DEMO_LIMIT, isNewMonth } from "../utils/demoTracking";
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
@@ -38,10 +39,107 @@ function getSubscriptionStatusPriority(status: string): number {
     }
 }
 
+function getPositiveInt(value: string | null | undefined, fallback = 0): number {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+        return fallback;
+    }
+    return Math.max(0, Math.floor(parsed));
+}
+
+function isFutureDate(value: Date | null | undefined, now: Date): boolean {
+    return value instanceof Date && value.getTime() > now.getTime();
+}
+
+function getTeamSeatPolicyForProductKey(productKey?: string | null, metadata?: Record<string, string>) {
+    const normalizedProductKey = String(productKey || "").toLowerCase();
+    if (normalizedProductKey === "plan_enterprise_manual" || normalizedProductKey === "plan_enterprise_annual_manual") {
+        return {
+            planKey: String(productKey || "plan_enterprise_manual"),
+            planLabel: "Enterprise",
+            freeAdditionalUsers: getPositiveInt(metadata?.enterpriseNormalSeats, 0),
+            freePhotographerUsers: getPositiveInt(metadata?.enterprisePhotographerSeats, 0),
+            extraSeatPriceUsdMonthly: null,
+            extraSeatProductKey: null,
+            unlimited: false,
+        };
+    }
+
+    switch (normalizedProductKey) {
+        case "starter":
+        case "plan_starter":
+        case "starter_annual":
+        case "plan_starter_annual":
+            return {
+                planKey: String(productKey || "").startsWith("plan_") ? String(productKey) : `plan_${String(productKey || "")}`,
+                planLabel: "Starter",
+                freeAdditionalUsers: 0,
+                freePhotographerUsers: 0,
+                extraSeatPriceUsdMonthly: null,
+                extraSeatProductKey: null,
+                unlimited: false,
+            };
+        case "pro":
+        case "plan_pro":
+        case "pro_annual":
+        case "plan_pro_annual":
+            return {
+                planKey: String(productKey || "").startsWith("plan_") ? String(productKey) : `plan_${String(productKey || "")}`,
+                planLabel: "Pro",
+                freeAdditionalUsers: 2,
+                freePhotographerUsers: 2,
+                extraSeatPriceUsdMonthly: 20,
+                extraSeatProductKey: "pro_extra_user_seat",
+                unlimited: false,
+            };
+        case "team":
+        case "plan_team":
+        case "team_annual":
+        case "plan_team_annual":
+            return {
+                planKey: String(productKey || "").startsWith("plan_") ? String(productKey) : `plan_${String(productKey || "")}`,
+                planLabel: "Team",
+                freeAdditionalUsers: 5,
+                freePhotographerUsers: 3,
+                extraSeatPriceUsdMonthly: 15,
+                extraSeatProductKey: "team_extra_user_seat",
+                unlimited: false,
+            };
+        case "enterprise":
+        case "plan_enterprise":
+        case "enterprise_annual":
+        case "plan_enterprise_annual":
+            return {
+                planKey: String(productKey || "").startsWith("plan_") ? String(productKey) : `plan_${String(productKey || "")}`,
+                planLabel: "Enterprise",
+                freeAdditionalUsers: Number.MAX_SAFE_INTEGER,
+                freePhotographerUsers: Number.MAX_SAFE_INTEGER,
+                extraSeatPriceUsdMonthly: null,
+                extraSeatProductKey: null,
+                unlimited: true,
+            };
+        default:
+            if (normalizedProductKey.includes("enterprise")) {
+                return {
+                    planKey: String(productKey || ""),
+                    planLabel: "Enterprise",
+                    freeAdditionalUsers: Number.MAX_SAFE_INTEGER,
+                    freePhotographerUsers: Number.MAX_SAFE_INTEGER,
+                    extraSeatPriceUsdMonthly: null,
+                    extraSeatProductKey: null,
+                    unlimited: true,
+                };
+            }
+            return null;
+    }
+}
+
 const PLAN_PRODUCT_KEYS = new Set([
     "plan_starter",
     "plan_pro",
     "plan_team",
+    "plan_enterprise_manual",
+    "plan_enterprise_annual_manual",
     "plan_starter_annual",
     "plan_pro_annual",
     "plan_team_annual",
@@ -185,13 +283,28 @@ export async function sendCustomSubscriptionInvoiceEmail(params: {
         html: `${invoiceHTML}${extraLinks}`,
     });
 
-    if (subscriptionId && userId) {
-        console.error(`[EMAIL] ✓ Upserting invoice record - subscriptionId: ${subscriptionId}, userId: ${userId}, credits: ${credits}, billingCycle: ${billingCycle}, planFor: ${planFor}`);
+    let invoiceSubscriptionId = subscriptionId;
+    let invoiceUserId = userId;
+
+    if (planFor === "team" && !invoiceSubscriptionId && invoiceUserId) {
+        try {
+            invoiceSubscriptionId = await getOrCreateTeamInvoiceAnchorSubscriptionId(invoiceUserId);
+        } catch (error: any) {
+            console.error("[EMAIL] Failed to resolve team invoice anchor subscription", {
+                userId: invoiceUserId,
+                message: error?.message || String(error),
+            });
+        }
+    }
+
+    if (invoiceSubscriptionId && invoiceUserId) {
+        console.error(`[EMAIL] ✓ Upserting invoice record - subscriptionId: ${invoiceSubscriptionId}, userId: ${invoiceUserId}, credits: ${credits}, billingCycle: ${billingCycle}, planFor: ${planFor}`);
         await upsertInvoiceRecord({
-            subscriptionId,
-            userId,
+            subscriptionId: invoiceSubscriptionId,
+            userId: invoiceUserId,
             amount,
             htmlContent: `${invoiceHTML}${extraLinks}`,
+            stripeInvoicePdfUrl: invoicePdfUrl || null,
             metadata: {
                 invoiceId,
                 invoiceNumber: invoiceId,
@@ -213,7 +326,11 @@ export async function sendCustomSubscriptionInvoiceEmail(params: {
             },
         });
     } else {
-        console.error(`[EMAIL] ⚠️ SKIPPING invoice record - missing subscriptionId: ${!!subscriptionId}, userId: ${!!userId}`);
+        if (planFor === "team") {
+            console.error(`[EMAIL] ℹ️ Skipping personal invoice upsert for team plan (team invoices are sourced from team purchases/Stripe).`);
+        } else {
+            console.error(`[EMAIL] ⚠️ SKIPPING invoice record - missing subscriptionId: ${!!invoiceSubscriptionId}, userId: ${!!invoiceUserId}`);
+        }
     }
 }
 
@@ -222,44 +339,92 @@ async function upsertInvoiceRecord(params: {
     userId: string;
     amount: number;
     htmlContent: string;
+    stripeInvoicePdfUrl?: string | null;
     metadata: Record<string, unknown>;
 }) {
     try {
-        const jsonMetadata = params.metadata as Prisma.InputJsonValue;
-        const existing = await prisma.invoice.findFirst({
+        const linkedPersonalSubscription = await prisma.user_credit_purchase.findFirst({
             where: {
-                subscription_id: params.subscriptionId,
+                id: params.subscriptionId,
                 user_id: params.userId,
             },
+            select: { id: true },
         });
+
+        if (!linkedPersonalSubscription) {
+            console.error(`[INVOICE] ⚠️ Skipping invoice upsert: subscriptionId does not map to user_credit_purchase`, {
+                subscriptionId: params.subscriptionId,
+                userId: params.userId,
+            });
+            return null;
+        }
+
+        const invoiceId = `INV-${Date.now()}`;
+        const metadataJson = JSON.stringify(params.metadata || {});
+        const [columnCheck] = await prisma.$queryRaw<Array<{ exists: boolean }>>`
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'invoice'
+                  AND column_name = 'stripe_invoice_pdf_url'
+            ) AS "exists"
+        `;
+        const hasStripePdfColumn = Boolean(columnCheck?.exists);
+
+        const existingRows = await prisma.$queryRaw<Array<{ id: string }>>`
+            SELECT id
+            FROM "invoice"
+            WHERE subscription_id = ${params.subscriptionId}
+              AND user_id = ${params.userId}
+            LIMIT 1
+        `;
+        const existing = existingRows[0];
 
         if (existing) {
             console.error(`[INVOICE] Found existing invoice, updating ID: ${existing.id}`);
-            await prisma.invoice.update({
-                where: { id: existing.id },
-                data: {
-                    amount: params.amount,
-                    html_content: params.htmlContent,
-                    metadata: jsonMetadata,
-                },
-            });
+            if (hasStripePdfColumn) {
+                await prisma.$executeRaw`
+                    UPDATE "invoice"
+                    SET amount = ${params.amount},
+                        html_content = ${params.htmlContent},
+                        stripe_invoice_pdf_url = ${params.stripeInvoicePdfUrl || null},
+                        metadata = CAST(${metadataJson} AS jsonb),
+                        updated_at = NOW()
+                    WHERE id = ${existing.id}
+                `;
+            } else {
+                await prisma.$executeRaw`
+                    UPDATE "invoice"
+                    SET amount = ${params.amount},
+                        html_content = ${params.htmlContent},
+                        metadata = CAST(${metadataJson} AS jsonb),
+                        updated_at = NOW()
+                    WHERE id = ${existing.id}
+                `;
+            }
             console.error(`[INVOICE] ✓ Successfully updated invoice ${existing.id}`);
             return existing.id;
         }
 
-        const created = await prisma.invoice.create({
-            data: {
-                subscription_id: params.subscriptionId,
-                user_id: params.userId,
-                amount: params.amount,
-                status: "generated",
-                html_content: params.htmlContent,
-                metadata: jsonMetadata,
-            },
-        });
+        if (hasStripePdfColumn) {
+            await prisma.$executeRaw`
+                INSERT INTO "invoice"
+                (id, "subscription_id", "user_id", amount, status, "html_content", "stripe_invoice_pdf_url", metadata, "created_at", "updated_at")
+                VALUES
+                (${invoiceId}, ${params.subscriptionId}, ${params.userId}, ${params.amount}, 'generated', ${params.htmlContent}, ${params.stripeInvoicePdfUrl || null}, CAST(${metadataJson} AS jsonb), NOW(), NOW())
+            `;
+        } else {
+            await prisma.$executeRaw`
+                INSERT INTO "invoice"
+                (id, "subscription_id", "user_id", amount, status, "html_content", metadata, "created_at", "updated_at")
+                VALUES
+                (${invoiceId}, ${params.subscriptionId}, ${params.userId}, ${params.amount}, 'generated', ${params.htmlContent}, CAST(${metadataJson} AS jsonb), NOW(), NOW())
+            `;
+        }
 
-        console.error(`[INVOICE] ✓ Successfully created invoice ${created.id}`);
-        return created.id;
+        console.error(`[INVOICE] ✓ Successfully created invoice ${invoiceId}`);
+        return invoiceId;
     } catch (error: any) {
         console.error(`[INVOICE] ❌ Error upserting invoice record:`, {
             subscriptionId: params.subscriptionId,
@@ -270,6 +435,55 @@ async function upsertInvoiceRecord(params: {
         });
         throw error;
     }
+}
+
+async function getOrCreateTeamInvoiceAnchorSubscriptionId(userId: string): Promise<string | undefined> {
+    const existingAnchor = await prisma.user_credit_purchase.findFirst({
+        where: {
+            user_id: userId,
+            status: "generated",
+            cancellationReason: "TEAM_INVOICE_ANCHOR",
+        },
+        orderBy: { created_at: "desc" },
+        select: { id: true },
+    });
+
+    if (existingAnchor?.id) {
+        return existingAnchor.id;
+    }
+
+    let packageId: string | null = null;
+    try {
+        const teamPackage = await findCreditPackage({ productKey: "plan_team" });
+        packageId = teamPackage.id;
+    } catch {
+        const fallbackPackage = await prisma.credit_package.findFirst({
+            orderBy: { created_at: "asc" },
+            select: { id: true },
+        });
+        packageId = fallbackPackage?.id || null;
+    }
+
+    if (!packageId) {
+        console.error("[INVOICE] Unable to create team invoice anchor: no credit package found");
+        return undefined;
+    }
+
+    const createdAnchor = await prisma.user_credit_purchase.create({
+        data: {
+            user_id: userId,
+            package_id: packageId,
+            amount: 0,
+            price_usd: 0,
+            status: "generated",
+            autoRenewEnabled: false,
+            renewalCount: 0,
+            cancellationReason: "TEAM_INVOICE_ANCHOR",
+        },
+        select: { id: true },
+    });
+
+    return createdAnchor.id;
 }
 
 export async function sendSubscriptionStatusEmail(params: {
@@ -439,8 +653,70 @@ function getPlanTierPriority(productKey?: string | null): number {
         case "plan_team":
         case "plan_team_annual":
             return 3;
+        case "plan_enterprise_manual":
+        case "plan_enterprise_annual_manual":
+            return 4;
         default:
             return 0;
+    }
+}
+
+function getPlanSeatPolicy(productKey?: string | null): {
+    planKey: string;
+    planLabel: string;
+    includedGeneralSeats: number;
+    includedPhotographerSeats: number;
+    extraSeatPriceUsdMonthly: number | null;
+    extraSeatProductKey: string | null;
+    unlimited: boolean;
+} | null {
+    switch (productKey) {
+        case "plan_starter":
+        case "plan_starter_annual":
+            return {
+                planKey: productKey,
+                planLabel: "Starter",
+                includedGeneralSeats: 0,
+                includedPhotographerSeats: 0,
+                extraSeatPriceUsdMonthly: null,
+                extraSeatProductKey: null,
+                unlimited: false,
+            };
+        case "plan_pro":
+        case "plan_pro_annual":
+            return {
+                planKey: productKey,
+                planLabel: "Pro",
+                includedGeneralSeats: 2,
+                includedPhotographerSeats: 2,
+                extraSeatPriceUsdMonthly: 20,
+                extraSeatProductKey: "pro_extra_user_seat",
+                unlimited: false,
+            };
+        case "plan_team":
+        case "plan_team_annual":
+            return {
+                planKey: productKey,
+                planLabel: "Team",
+                includedGeneralSeats: 5,
+                includedPhotographerSeats: 3,
+                extraSeatPriceUsdMonthly: 15,
+                extraSeatProductKey: "team_extra_user_seat",
+                unlimited: false,
+            };
+        case "plan_enterprise_manual":
+        case "plan_enterprise_annual_manual":
+            return {
+                planKey: productKey,
+                planLabel: "Enterprise",
+                includedGeneralSeats: Number.MAX_SAFE_INTEGER,
+                includedPhotographerSeats: Number.MAX_SAFE_INTEGER,
+                extraSeatPriceUsdMonthly: null,
+                extraSeatProductKey: null,
+                unlimited: true,
+            };
+        default:
+            return null;
     }
 }
 
@@ -449,6 +725,8 @@ export type ProductKey =
     | "plan_starter"
     | "plan_pro"
     | "plan_team"
+    | "plan_enterprise_manual"
+    | "plan_enterprise_annual_manual"
     | "plan_starter_annual"
     | "plan_pro_annual"
     | "plan_team_annual"
@@ -497,6 +775,8 @@ const PRODUCT_CATALOG: Record<ProductKey, {
     plan_starter: { name: "Starter", type: "subscription", unitAmountUsd: 29, credits: 60, interval: "month" },
     plan_pro: { name: "Pro", type: "subscription", unitAmountUsd: 69, credits: 160, interval: "month" },
     plan_team: { name: "Team", type: "subscription", unitAmountUsd: 139, credits: 360, interval: "month" },
+    plan_enterprise_manual: { name: "Enterprise Custom", type: "subscription", unitAmountUsd: 0, credits: 0, interval: "month" },
+    plan_enterprise_annual_manual: { name: "Enterprise Custom Annual", type: "subscription", unitAmountUsd: 0, credits: 0, interval: "year" },
     plan_starter_annual: { name: "Starter Annual", type: "subscription", unitAmountUsd: 300, credits: 720, interval: "year" },
     plan_pro_annual: { name: "Pro Annual", type: "subscription", unitAmountUsd: 744, credits: 1920, interval: "year" },
     plan_team_annual: { name: "Team Annual", type: "subscription", unitAmountUsd: 1500, credits: 4320, interval: "year" },
@@ -539,6 +819,34 @@ function calcCredits(config: ReturnType<typeof getProductConfig>, quantity: numb
         return config.creditsPerUnit * quantity;
     }
     return config.credits || 0;
+}
+
+function parseEnterpriseManualMetadata(metadata: Record<string, string | undefined>) {
+    const normalizedProductKey = normalizeProductKey(String(metadata.productKey || ""));
+    const isManualEnterprise =
+        normalizedProductKey === "plan_enterprise_manual" ||
+        normalizedProductKey === "plan_enterprise_annual_manual";
+
+    if (!isManualEnterprise) {
+        return null;
+    }
+
+    const credits = Number(metadata.enterpriseCredits || 0);
+    const amountUsd = Number(metadata.enterpriseAmountUsd || 0);
+    const normalSeats = Number(metadata.enterpriseNormalSeats || 0);
+    const photographerSeats = Number(metadata.enterprisePhotographerSeats || 0);
+    const billingCycle = normalizedProductKey.includes("annual") ? "annual" : "monthly";
+
+    return {
+        normalizedProductKey,
+        credits: Number.isFinite(credits) ? Math.max(0, Math.floor(credits)) : 0,
+        amountUsd: Number.isFinite(amountUsd) ? Math.max(0, amountUsd) : 0,
+        amountCents: toCents(Number.isFinite(amountUsd) ? Math.max(0, amountUsd) : 0),
+        normalSeats: Number.isFinite(normalSeats) ? Math.max(0, Math.floor(normalSeats)) : 0,
+        photographerSeats: Number.isFinite(photographerSeats) ? Math.max(0, Math.floor(photographerSeats)) : 0,
+        productName: billingCycle === "annual" ? "Enterprise Custom Annual" : "Enterprise Custom",
+        billingCycle,
+    };
 }
 
 function isDatabaseUnavailableError(error: any): boolean {
@@ -916,6 +1224,7 @@ export async function createCheckoutSession({
     confirmPlanChange,
     seatAutoRenew,
     autoRenewEnabled,
+    downgradeSeatTopUpUsdMonthly,
 }: {
     userId: string;
     productKey: string;
@@ -926,6 +1235,7 @@ export async function createCheckoutSession({
     confirmPlanChange?: boolean;
     seatAutoRenew?: boolean;
     autoRenewEnabled?: boolean;
+    downgradeSeatTopUpUsdMonthly?: number;
 }) {
     const normalizedProductKey = normalizeProductKey(productKey);
     const isSubscriptionTopUp = normalizedProductKey === "subscription_topup";
@@ -936,6 +1246,9 @@ export async function createCheckoutSession({
     const safeQuantity = Math.max(1, Math.min(quantity || 1, 1000));
     const isSeatAddon = normalizedProductKey === "pro_extra_user_seat" || normalizedProductKey === "team_extra_user_seat";
     const shouldAutoRenewSeat = seatAutoRenew !== false;
+    const safeDowngradeSeatTopUpUsdMonthly = typeof downgradeSeatTopUpUsdMonthly === "number" && Number.isFinite(downgradeSeatTopUpUsdMonthly) && downgradeSeatTopUpUsdMonthly > 0
+        ? downgradeSeatTopUpUsdMonthly
+        : null;
 
     if (!isSubscriptionTopUp && config!.type === "subscription" && safeQuantity !== 1) {
         if (!isSeatAddon) {
@@ -1013,12 +1326,254 @@ export async function createCheckoutSession({
         : [];
     const replacingSubscriptionId = existingSubscriptions[0]?.id;
 
-    if (!isSubscriptionTopUp && config!.type === "subscription" && !isSeatAddon && existingSubscriptions.length > 0 && !confirmPlanChange) {
+    const currentSubscription = existingSubscriptions[0] || null;
+    const currentSubscriptionProductKey = currentSubscription?.metadata?.productKey || null;
+    const isPlanChange = !isSubscriptionTopUp && config!.type === "subscription" && !isSeatAddon && existingSubscriptions.length > 0;
+    const isDowngrade = isPlanChange && getPlanTierPriority(normalizedProductKey) < getPlanTierPriority(currentSubscriptionProductKey);
+    const currentSeatPolicy = purchaseFor === "team"
+        ? getTeamSeatPolicyForProductKey(currentSubscriptionProductKey, currentSubscription?.metadata as Record<string, string> | undefined)
+        : null;
+    const targetSeatPolicy = purchaseFor === "team" ? getPlanSeatPolicy(normalizedProductKey) : null;
+
+    let downgradeSeatDetails: null | {
+        activeGeneralMembers: number;
+        activePhotographerMembers: number;
+        pendingGeneralInvites: number;
+        pendingPhotographerInvites: number;
+        paidExtraSeatCount: number;
+        paidExtraSeatMonthlyTopUpUsd: number | null;
+        currentExtraSeatPriceUsdMonthly: number | null;
+        targetExtraSeatPriceUsdMonthly: number | null;
+        requiredRemovalCount: number;
+        requiredGeneralRemovals: number;
+        requiredPhotographerRemovals: number;
+        targetGeneralSeats: number;
+        targetPhotographerSeats: number;
+        extraSeatPriceUsdMonthly: number | null;
+        extraSeatProductKey: string | null;
+        removalCandidates: Array<{
+            teamId: string;
+            kind: "member" | "invite";
+            id: string;
+            email: string | null;
+            name: string | null;
+            roleName: string | null;
+            joinedAt: string | null;
+        }>;
+        protectedPaidSeats: Array<{
+            id: string;
+            email: string | null;
+            name: string | null;
+            roleName: string | null;
+            seatExpiresAt: string | null;
+        }>;
+    } = null;
+
+    if (isDowngrade && purchaseFor === "team" && teamId && targetSeatPolicy) {
+        const now = new Date();
+        const [activeMemberships, pendingInvites] = await Promise.all([
+            prisma.team_membership.findMany({
+                where: {
+                    team_id: teamId,
+                    deleted_at: null,
+                },
+                select: {
+                    id: true,
+                    joined_at: true,
+                    is_paid_extra_seat: true,
+                    seat_auto_renew: true,
+                    seat_last_paid_at: true,
+                    seat_expires_at: true,
+                    seat_payment_product_key: true,
+                    role: {
+                        select: {
+                            name: true,
+                        },
+                    },
+                    user: {
+                        select: {
+                            name: true,
+                            email: true,
+                        },
+                    },
+                },
+            }),
+            prisma.team_invites.findMany({
+                where: {
+                    team_id: teamId,
+                    status: "PENDING",
+                },
+                select: {
+                    id: true,
+                    email: true,
+                    invited_at: true,
+                    role: {
+                        select: {
+                            name: true,
+                        },
+                    },
+                },
+            }),
+        ]);
+
+        const protectedPaidSeats = activeMemberships.filter((membership) => {
+            const hasPaidSeatSignal = Boolean(
+                membership.is_paid_extra_seat ||
+                membership.seat_payment_product_key ||
+                membership.seat_last_paid_at ||
+                membership.seat_auto_renew
+            );
+            return hasPaidSeatSignal && isFutureDate(membership.seat_expires_at, now);
+        });
+        const protectedPaidSeatIds = new Set(protectedPaidSeats.map((membership) => membership.id));
+        const activeNonPaidMemberships = activeMemberships.filter((membership) => !protectedPaidSeatIds.has(membership.id));
+
+        const activePhotographerMembers = activeMemberships.filter((membership) => membership.role?.name === "TEAM_PHOTOGRAPHER").length;
+        const activeGeneralMembers = activeMemberships.length - activePhotographerMembers;
+        const paidActivePhotographerMembers = protectedPaidSeats.filter((membership) => membership.role?.name === "TEAM_PHOTOGRAPHER").length;
+        const paidActiveGeneralMembers = protectedPaidSeats.length - paidActivePhotographerMembers;
+
+        const pendingPhotographerInvites = pendingInvites.filter((invite) => invite.role?.name === "TEAM_PHOTOGRAPHER").length;
+        const pendingGeneralInvites = pendingInvites.length - pendingPhotographerInvites;
+
+        const generalCandidates = [
+            ...activeNonPaidMemberships
+                .filter((membership) => membership.role?.name !== "TEAM_PHOTOGRAPHER")
+                .map((membership) => ({
+                    teamId,
+                    kind: "member" as const,
+                    id: membership.id,
+                    email: membership.user?.email || null,
+                    name: membership.user?.name || null,
+                    roleName: membership.role?.name || null,
+                    joinedAt: membership.joined_at?.toISOString?.() || null,
+                })),
+            ...pendingInvites
+                .filter((invite) => invite.role?.name !== "TEAM_PHOTOGRAPHER")
+                .map((invite) => ({
+                    teamId,
+                    kind: "invite" as const,
+                    id: invite.id,
+                    email: invite.email,
+                    name: null,
+                    roleName: invite.role?.name || null,
+                    joinedAt: invite.invited_at?.toISOString?.() || null,
+                })),
+        ].sort((left, right) => {
+            const leftTime = left.joinedAt ? new Date(left.joinedAt).getTime() : 0;
+            const rightTime = right.joinedAt ? new Date(right.joinedAt).getTime() : 0;
+            return rightTime - leftTime;
+        });
+
+        const photographerCandidates = [
+            ...activeNonPaidMemberships
+                .filter((membership) => membership.role?.name === "TEAM_PHOTOGRAPHER")
+                .map((membership) => ({
+                    teamId,
+                    kind: "member" as const,
+                    id: membership.id,
+                    email: membership.user?.email || null,
+                    name: membership.user?.name || null,
+                    roleName: membership.role?.name || null,
+                    joinedAt: membership.joined_at?.toISOString?.() || null,
+                })),
+            ...pendingInvites
+                .filter((invite) => invite.role?.name === "TEAM_PHOTOGRAPHER")
+                .map((invite) => ({
+                    teamId,
+                    kind: "invite" as const,
+                    id: invite.id,
+                    email: invite.email,
+                    name: null,
+                    roleName: invite.role?.name || null,
+                    joinedAt: invite.invited_at?.toISOString?.() || null,
+                })),
+        ].sort((left, right) => {
+            const leftTime = left.joinedAt ? new Date(left.joinedAt).getTime() : 0;
+            const rightTime = right.joinedAt ? new Date(right.joinedAt).getTime() : 0;
+            return rightTime - leftTime;
+        });
+
+        const nonPaidGeneralCount = generalCandidates.length;
+        const nonPaidPhotographerCount = photographerCandidates.length;
+        const requiredGeneralRemovals = Math.max(0, nonPaidGeneralCount - targetSeatPolicy.includedGeneralSeats);
+        const requiredPhotographerRemovals = Math.max(0, nonPaidPhotographerCount - targetSeatPolicy.includedPhotographerSeats);
+        const removalCandidates = [
+            ...generalCandidates.slice(0, requiredGeneralRemovals),
+            ...photographerCandidates.slice(0, requiredPhotographerRemovals),
+        ];
+        const requiredRemovalCount = removalCandidates.length;
+
+        const targetExtraSeatPriceUsdMonthly = targetSeatPolicy.extraSeatPriceUsdMonthly;
+        const currentExtraSeatPriceUsdMonthly = currentSeatPolicy?.extraSeatPriceUsdMonthly ?? null;
+        const paidExtraSeatMonthlyTopUpUsd = currentExtraSeatPriceUsdMonthly !== null && targetExtraSeatPriceUsdMonthly !== null
+            ? Math.max(0, targetExtraSeatPriceUsdMonthly - currentExtraSeatPriceUsdMonthly) * protectedPaidSeats.length
+            : null;
+
+        downgradeSeatDetails = {
+            activeGeneralMembers,
+            activePhotographerMembers,
+            pendingGeneralInvites,
+            pendingPhotographerInvites,
+            paidExtraSeatCount: protectedPaidSeats.length,
+            paidExtraSeatMonthlyTopUpUsd,
+            currentExtraSeatPriceUsdMonthly,
+            targetExtraSeatPriceUsdMonthly,
+            requiredRemovalCount,
+            requiredGeneralRemovals,
+            requiredPhotographerRemovals,
+            targetGeneralSeats: targetSeatPolicy.includedGeneralSeats,
+            targetPhotographerSeats: targetSeatPolicy.includedPhotographerSeats,
+            extraSeatPriceUsdMonthly: targetSeatPolicy.extraSeatPriceUsdMonthly,
+            extraSeatProductKey: targetSeatPolicy.extraSeatProductKey,
+            removalCandidates,
+            protectedPaidSeats: protectedPaidSeats.map((membership) => ({
+                id: membership.id,
+                email: membership.user?.email || null,
+                name: membership.user?.name || null,
+                roleName: membership.role?.name || null,
+                seatExpiresAt: membership.seat_expires_at?.toISOString?.() || null,
+            })),
+        };
+    }
+
+    if (isPlanChange && !confirmPlanChange) {
         const error: any = new Error(
-            "You already have an active subscription. Changing plans will cancel the current plan and transfer any unused credits to your wallet. Confirm to proceed."
+            isDowngrade && downgradeSeatDetails
+                ? `Downgrading to ${targetSeatPolicy?.planLabel || "this plan"} requires removing ${downgradeSeatDetails.requiredRemovalCount} member(s) or cancelling pending invites first. Paid extra seats are excluded from removals and require an additional monthly top-up of $${downgradeSeatDetails.paidExtraSeatMonthlyTopUpUsd ?? 0} to keep working on the lower plan. If no action is taken within 2 days, the current subscription will be cancelled and access will stop.`
+                : "You already have an active subscription. Changing plans will cancel the current plan and transfer any unused credits to your wallet. Confirm to proceed."
         );
         error.code = "PLAN_CHANGE_CONFIRMATION_REQUIRED";
+        error.details = {
+            isDowngrade,
+            currentPlanKey: currentSubscriptionProductKey,
+            currentPlanLabel: currentSubscriptionProductKey ? PRODUCT_CATALOG[currentSubscriptionProductKey as ProductKey]?.name || currentSubscriptionProductKey : null,
+            targetPlanKey: normalizedProductKey,
+            targetPlanLabel: config?.name || normalizedProductKey,
+            confirmPlanChange: Boolean(confirmPlanChange),
+            downgradeGracePeriodDays: isDowngrade ? 2 : null,
+            dataLossWarning: isDowngrade
+                ? "If you do not remove members or cancel pending invites, or buy enough seats within 2 days, the current subscription will be cancelled and access to paid features will stop. Any unsaved operational data may be lost and may be unrecoverable."
+                : null,
+            seatImpact: downgradeSeatDetails,
+        };
         throw error;
+    }
+
+    if (isPlanChange && isDowngrade && confirmPlanChange && replacingSubscriptionId) {
+        const pendingCancellationAt = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
+        await prisma.user_credit_purchase.updateMany({
+            where: {
+                id: replacingSubscriptionId,
+                cancelledAt: null,
+            },
+            data: {
+                autoRenewEnabled: false,
+                nextRenewalDate: null,
+                cancelledAt: pendingCancellationAt,
+                cancellationReason: "Pending downgrade decision: remove members or buy extra seats within 2 days",
+            },
+        });
     }
 
     let credits = 0;
@@ -1125,27 +1680,55 @@ export async function createCheckoutSession({
             normalizedProductKey === "plan_starter_annual" || normalizedProductKey === "plan_pro_annual" || normalizedProductKey === "plan_team_annual" ||
             normalizedProductKey === "pro_extra_user_seat" || normalizedProductKey === "team_extra_user_seat");
 
+    const downgradeSeatTopUpAmount = isSubscriptionMode && purchaseFor === "team" && safeDowngradeSeatTopUpUsdMonthly && isPlanChange && isDowngrade
+        ? safeDowngradeSeatTopUpUsdMonthly * (config!.interval === "year" ? 12 : 1)
+        : 0;
+
+    if (downgradeSeatTopUpAmount > 0 && safeDowngradeSeatTopUpUsdMonthly) {
+        metadata.downgradeSeatTopUpUsdMonthly = String(safeDowngradeSeatTopUpUsdMonthly);
+        metadata.downgradeSeatTopUpAmount = String(downgradeSeatTopUpAmount.toFixed(2));
+    }
+
     if (isOneTimeNonPlanPurchase) {
         unitAmount = toCents(safeUiUnitAmountUsd);
         totalAmount = unitAmount * safeQuantity;
     }
+    if (downgradeSeatTopUpAmount > 0) {
+        totalAmount += toCents(downgradeSeatTopUpAmount);
+    }
     const shouldCreateStripeInvoice = !isSubscriptionMode && totalAmount > 0;
+    const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [
+        {
+            quantity: safeQuantity,
+            price_data: {
+                currency: "usd",
+                unit_amount: unitAmount,
+                product_data: {
+                    name: productName,
+                },
+                recurring: isSubscriptionMode ? { interval: config!.interval || "month" } : undefined,
+            },
+        },
+    ];
+
+    if (downgradeSeatTopUpAmount > 0) {
+        lineItems.push({
+            quantity: 1,
+            price_data: {
+                currency: "usd",
+                unit_amount: toCents(downgradeSeatTopUpAmount),
+                product_data: {
+                    name: `${config!.name} seat top-up`,
+                },
+                recurring: { interval: config!.interval || "month" },
+            },
+        });
+    }
+
     const session = await stripe.checkout.sessions.create({
         mode: isSubscriptionMode ? "subscription" : "payment",
         customer: customerId,
-        line_items: [
-            {
-                quantity: safeQuantity,
-                price_data: {
-                    currency: "usd",
-                    unit_amount: unitAmount,
-                    product_data: {
-                        name: productName,
-                    },
-                    recurring: isSubscriptionMode ? { interval: config!.interval || "month" } : undefined,
-                },
-            },
-        ],
+        line_items: lineItems,
         metadata,
         invoice_creation: shouldCreateStripeInvoice ? { enabled: true } : undefined,
         subscription_data: isSubscriptionMode ? {
@@ -1200,6 +1783,111 @@ export async function createCheckoutSession({
     }
 
     return { url: session.url };
+}
+
+export async function createAdminEnterpriseCheckoutSession({
+    ownerEmail,
+    teamId,
+    normalSeats,
+    photographerSeats,
+    credits,
+    amountUsd,
+    billingCycle,
+    autoRenew = true,
+}: {
+    ownerEmail: string;
+    teamId: string;
+    normalSeats: number;
+    photographerSeats: number;
+    credits: number;
+    amountUsd: number;
+    billingCycle: "monthly" | "annual";
+    autoRenew?: boolean;
+}) {
+    const normalizedOwnerEmail = String(ownerEmail || "").trim().toLowerCase();
+    if (!normalizedOwnerEmail) {
+        throw new Error("Owner email is required");
+    }
+
+    const owner = await prisma.user.findUnique({ where: { email: normalizedOwnerEmail } });
+    if (!owner) {
+        throw new Error("Owner user not found");
+    }
+
+    const team = await prisma.teams.findFirst({
+        where: {
+            id: teamId,
+            owner_id: owner.id,
+            deleted_at: null,
+        },
+    });
+
+    if (!team) {
+        throw new Error("Selected team was not found for the provided owner email");
+    }
+
+    const safeNormalSeats = Math.max(0, Math.floor(normalSeats || 0));
+    const safePhotographerSeats = Math.max(0, Math.floor(photographerSeats || 0));
+    const safeCredits = Math.max(0, Math.floor(credits || 0));
+    const safeAmountUsd = Number.isFinite(amountUsd) ? Math.max(0, amountUsd) : 0;
+    const unitAmount = toCents(safeAmountUsd);
+    const productKey = billingCycle === "annual" ? "plan_enterprise_annual_manual" : "plan_enterprise_manual";
+
+    const { customerId } = await ensureStripeCustomer(owner.id);
+
+    const metadata: Record<string, string> = {
+        productKey,
+        purchaseFor: "team",
+        userId: owner.id,
+        teamId: team.id,
+        quantity: "1",
+        enterpriseManual: "true",
+        enterpriseNormalSeats: String(safeNormalSeats),
+        enterprisePhotographerSeats: String(safePhotographerSeats),
+        enterpriseCredits: String(safeCredits),
+        enterpriseAmountUsd: safeAmountUsd.toFixed(2),
+        enterpriseBillingCycle: billingCycle,
+        autoRenewEnabled: String(autoRenew ? "true" : "false"),
+    };
+
+    const session = await stripe.checkout.sessions.create({
+        mode: "subscription",
+        customer: customerId,
+        line_items: [
+            {
+                quantity: 1,
+                price_data: {
+                    currency: "usd",
+                    unit_amount: unitAmount,
+                    product_data: {
+                        name: billingCycle === "annual" ? "Enterprise Custom Annual" : "Enterprise Custom Monthly",
+                    },
+                    recurring: { interval: billingCycle === "annual" ? "year" : "month" },
+                },
+            },
+        ],
+        metadata,
+        subscription_data: {
+            metadata,
+        },
+        success_url: `${FRONTEND_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${FRONTEND_URL}/payment/error?type=cancelled`,
+    });
+
+    await prisma.team_purchase.create({
+        data: {
+            team_id: team.id,
+            amount: safeCredits,
+            price_usd: safeAmountUsd,
+            status: "pending",
+            stripe_session_id: session.id,
+        },
+    });
+
+    return {
+        url: session.url,
+        sessionId: session.id,
+    };
 }
 
 function applyCreditsToUser(userId: string, credits: number) {
@@ -1548,6 +2236,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
     const metadata = session.metadata || {};
     const productKey = metadata.productKey;
     const normalizedProductKey = normalizeProductKey(String(productKey || ""));
+    const manualEnterprisePlan = parseEnterpriseManualMetadata(metadata);
     const isSeatAddon = productKey === "pro_extra_user_seat" || productKey === "team_extra_user_seat";
     const purchaseFor = metadata.purchaseFor as PurchaseFor | undefined;
     const userId = metadata.userId;
@@ -1579,11 +2268,20 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
         productName = metadata.subscriptionProductKey
             ? `${metadata.subscriptionProductKey.toUpperCase()} Top-Up Credits`
             : "Subscription Top-Up Credits";
+    } else if (manualEnterprisePlan) {
+        credits = manualEnterprisePlan.credits;
+        expectedAmount = manualEnterprisePlan.amountCents;
+        productName = manualEnterprisePlan.productName;
     } else {
         const config = getProductConfig(productKey);
         credits = calcCredits(config, quantity);
         expectedAmount = toCents(config.unitAmountUsd) * quantity;
         productName = config.name;
+    }
+
+    const downgradeSeatTopUpAmount = toCents(Number(metadata.downgradeSeatTopUpAmount || 0));
+    if (downgradeSeatTopUpAmount > 0) {
+        expectedAmount += downgradeSeatTopUpAmount;
     }
 
 
@@ -1706,6 +2404,8 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                 });
             }
         }
+
+        await enforceTeamSeatCapacityForExistingMembers(teamId);
     } else if (credits > 0) {
         const packageRecord = await findCreditPackage({
             productKey,
@@ -1936,6 +2636,20 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
 
             // Use custom subscription invoice template for plan subscriptions
             if (isSubscriptionPlanPurchase && userName) {
+                const invoiceLinkedPersonalPurchase = purchaseFor === "team"
+                    ? null
+                    : await prisma.user_credit_purchase.findFirst({
+                        where: {
+                            user_id: userId,
+                            OR: [
+                                { stripe_session_id: session.id },
+                                ...(subscriptionId ? [{ stripe_subscription_id: subscriptionId }] : []),
+                            ],
+                        },
+                        orderBy: { created_at: "desc" },
+                        select: { id: true },
+                    });
+
                 console.error(`[EMAIL-DEBUG] Sending subscription invoice with credits: ${credits}`);
                 await sendCustomSubscriptionInvoiceEmail({
                     to: userEmail,
@@ -1949,8 +2663,10 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                     dueDate: new Date(),
                     invoicePdfUrl: stripeInvoicePdfUrl,
                     hostedInvoiceUrl: stripeInvoiceHostedUrl,
-                    subscriptionId,
-                    userId,
+                    subscriptionId: invoiceLinkedPersonalPurchase?.id,
+                    userId: purchaseFor === "team"
+                        ? userId
+                        : (invoiceLinkedPersonalPurchase ? userId : undefined),
                     billingCycle: normalizedProductKey.includes("annual") ? "annual" : "monthly",
                     planFor: purchaseFor === "team" ? "team" : "personal",
                     autoRenewal: shouldAutoRenew,
@@ -2084,6 +2800,7 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
 
     const metadata = subscription.metadata || {};
     const productKey = metadata.productKey;
+    const manualEnterprisePlan = parseEnterpriseManualMetadata(metadata);
     const purchaseFor = metadata.purchaseFor as PurchaseFor | undefined;
     const userId = metadata.userId;
     const teamId = metadata.teamId;
@@ -2101,9 +2818,10 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
         return;
     }
 
-    const config = getProductConfig(productKey);
-    const credits = calcCredits(config, quantity);
-    const expectedAmount = toCents(config.unitAmountUsd) * quantity;
+    const config = manualEnterprisePlan ? null : getProductConfig(productKey);
+    const credits = manualEnterprisePlan ? manualEnterprisePlan.credits : calcCredits(config!, quantity);
+    const expectedAmount = manualEnterprisePlan ? manualEnterprisePlan.amountCents : toCents(config!.unitAmountUsd) * quantity;
+    const productName = manualEnterprisePlan?.productName || config?.name || "Enterprise Custom";
 
     console.error('[WEBHOOK] Config loaded - productKey:', productKey, 'credits:', credits, 'expectedAmount:', expectedAmount, 'actualAmount:', invoice.amount_paid);
 
@@ -2215,7 +2933,7 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
                 emailSent: false,
                 metadata: {
                     productKey,
-                    productName: config.name,
+                    productName,
                     purchaseFor,
                     quantity,
                     billingReason: invoice.billing_reason,
@@ -2238,7 +2956,7 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
             await sendCustomSubscriptionInvoiceEmail({
                 to: user.email,
                 userName: user.name || "Valued Customer",
-                packageName: config.name,
+                packageName: productName,
                 amount: invoice.amount_paid / 100,
                 credits,
                 invoiceId: invoice.number || invoice.id,
@@ -2247,7 +2965,6 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
                 dueDate: new Date(),
                 invoicePdfUrl: invoice.invoice_pdf,
                 hostedInvoiceUrl: invoice.hosted_invoice_url,
-                subscriptionId,
                 userId,
                 billingCycle: productKey.toLowerCase().includes("annual") ? "annual" : "monthly",
                 planFor: "team",
@@ -2363,7 +3080,7 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
                 emailSent: false,
                 metadata: {
                     productKey,
-                    productName: config.name,
+                    productName,
                     purchaseFor,
                     quantity,
                     billingReason: invoice.billing_reason,
@@ -2382,11 +3099,25 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
         });
 
         if (user?.email) {
+            const personalInvoicePurchase = recentPurchase?.id
+                ? { id: recentPurchase.id }
+                : await prisma.user_credit_purchase.findFirst({
+                    where: {
+                        user_id: userId,
+                        OR: [
+                            { stripe_invoice_id: invoice.id },
+                            ...(subscriptionId ? [{ stripe_subscription_id: subscriptionId }] : []),
+                        ],
+                    },
+                    orderBy: { created_at: "desc" },
+                    select: { id: true },
+                });
+
             console.error('[WEBHOOK] Sending personal plan invoice email with credits:', credits);
             await sendCustomSubscriptionInvoiceEmail({
                 to: user.email,
                 userName: user.name || "Valued Customer",
-                packageName: config.name,
+                packageName: productName,
                 amount: invoice.amount_paid / 100,
                 credits,
                 invoiceId: invoice.number || invoice.id,
@@ -2395,8 +3126,8 @@ export async function handleInvoicePaid(invoice: Stripe.Invoice) {
                 dueDate: new Date(),
                 invoicePdfUrl: invoice.invoice_pdf,
                 hostedInvoiceUrl: invoice.hosted_invoice_url,
-                subscriptionId,
-                userId,
+                subscriptionId: personalInvoicePurchase?.id,
+                userId: personalInvoicePurchase ? userId : undefined,
                 billingCycle: productKey.toLowerCase().includes("annual") ? "annual" : "monthly",
                 planFor: "personal",
                 autoRenewal: shouldAutoRenew,
@@ -2694,7 +3425,7 @@ export async function processPendingPurchases() {
                                 dueDate: new Date(),
                                 invoicePdfUrl: invoiceObject?.invoice_pdf || null,
                                 hostedInvoiceUrl: invoiceObject?.hosted_invoice_url || null,
-                                subscriptionId: sessionSubscriptionId || invoiceId,
+                                subscriptionId: purchase.id,
                                 userId: purchase.user_id,
                                 billingCycle: String(purchase.package?.name || "").toLowerCase().includes("annual") ? "annual" : "monthly",
                                 planFor: "personal",
@@ -2782,8 +3513,10 @@ export async function processPendingPurchases() {
                         continue;
                     }
 
-                    // Fetch session from Stripe
-                    const session = await stripe.checkout.sessions.retrieve(purchase.stripe_session_id);
+                    // Fetch session from Stripe with invoice expanded so URLs can be captured reliably.
+                    const session = await stripe.checkout.sessions.retrieve(purchase.stripe_session_id, {
+                        expand: ["invoice"],
+                    });
 
                     console.log(`[PENDING-PROCESSOR-TEAM] Checking session ${session.id}:`, {
                         paymentStatus: session.payment_status,
@@ -2797,9 +3530,30 @@ export async function processPendingPurchases() {
                             ? session.subscription
                             : session.subscription?.id;
 
+                        let teamPurchaseRecord = await prisma.team_purchase.findFirst({
+                            where: { stripe_session_id: session.id },
+                            select: { id: true, status: true },
+                        });
+
+                        if (!teamPurchaseRecord) {
+                            teamPurchaseRecord = await prisma.team_purchase.create({
+                                data: {
+                                    team_id: purchase.team_id,
+                                    amount: purchase.amount,
+                                    price_usd: purchase.price_usd,
+                                    status: "completed",
+                                    stripe_session_id: session.id,
+                                    stripe_subscription_id: subscriptionId,
+                                    completed_at: new Date(),
+                                },
+                                select: { id: true, status: true },
+                            });
+                            console.log(`[PENDING-PROCESSOR-TEAM] Created missing team purchase row for session ${session.id}`);
+                        }
+
                         const completionResult = await prisma.team_purchase.updateMany({
                             where: {
-                                id: purchase.id,
+                                id: teamPurchaseRecord.id,
                                 status: "pending",
                             },
                             data: {
@@ -2822,6 +3576,8 @@ export async function processPendingPurchases() {
                             });
                         }
 
+                        await enforceTeamSeatCapacityForExistingMembers(purchase.team_id);
+
                         console.log(`[PENDING-PROCESSOR-TEAM] ✓ Processed team purchase ${purchase.id}:`, {
                             teamId: purchase.team_id,
                             credits: purchase.amount,
@@ -2832,14 +3588,29 @@ export async function processPendingPurchases() {
 
                         const invoiceObject = session.invoice && typeof session.invoice === "object" ? session.invoice : null;
                         const invoiceId = typeof session.invoice === "string" ? session.invoice : invoiceObject?.id;
+                        let detailedInvoice: Stripe.Invoice | null = null;
+
+                        if (invoiceId) {
+                            try {
+                                detailedInvoice = await stripe.invoices.retrieve(invoiceId);
+                            } catch (invoiceError: any) {
+                                console.warn(`[PENDING-PROCESSOR-TEAM] Unable to retrieve detailed invoice ${invoiceId}:`, invoiceError?.message || invoiceError);
+                            }
+                        }
+
+                        const hostedInvoiceUrl = detailedInvoice?.hosted_invoice_url || invoiceObject?.hosted_invoice_url || null;
+                        const invoicePdfUrl = detailedInvoice?.invoice_pdf || invoiceObject?.invoice_pdf || null;
+                        const invoiceNumber = detailedInvoice?.number || invoiceObject?.number || null;
+                        const invoiceStatus = detailedInvoice?.status || invoiceObject?.status || null;
+                        const invoiceCustomer = detailedInvoice?.customer || invoiceObject?.customer || null;
 
                         console.log(`[PENDING-PROCESSOR-TEAM] Stripe invoice details for purchase ${purchase.id}:`, {
                             invoiceId,
-                            invoiceNumber: invoiceObject?.number || null,
-                            invoiceStatus: invoiceObject?.status || null,
-                            hostedInvoiceUrl: invoiceObject?.hosted_invoice_url || null,
-                            invoicePdf: invoiceObject?.invoice_pdf || null,
-                            customer: invoiceObject?.customer || null,
+                            invoiceNumber,
+                            invoiceStatus,
+                            hostedInvoiceUrl,
+                            invoicePdf: invoicePdfUrl,
+                            customer: invoiceCustomer,
                         });
 
                         if (subscriptionId && invoiceId) {
@@ -2862,14 +3633,13 @@ export async function processPendingPurchases() {
                                     packageName: team?.name || "Team Plan",
                                     amount: purchase.price_usd,
                                     credits: purchase.amount,
-                                    invoiceId: invoiceObject?.number || invoiceId,
+                                    invoiceId: invoiceNumber || invoiceId,
                                     renewalNumber: 0,
                                     issueDate: new Date(),
                                     dueDate: new Date(),
-                                    invoicePdfUrl: invoiceObject?.invoice_pdf || null,
-                                    hostedInvoiceUrl: invoiceObject?.hosted_invoice_url || null,
-                                    subscriptionId: subscriptionId || invoiceId,
-                                    userId: purchase.team_id,
+                                    invoicePdfUrl,
+                                    hostedInvoiceUrl,
+                                    userId: team?.owner_id,
                                     billingCycle: "monthly",
                                     planFor: "team",
                                     autoRenewal: true,

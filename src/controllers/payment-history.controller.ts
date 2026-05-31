@@ -15,6 +15,10 @@ function isSubscriptionEffectivelyActive(purchase: { status?: string; completed_
   }
 
   const now = new Date();
+
+    if (purchase.cancelledAt && purchase.cancelledAt.getTime() > now.getTime()) {
+        return true;
+    }
   
   // If not cancelled and auto-renew enabled, it's active
   if (!purchase.cancelledAt && purchase.autoRenewEnabled) {
@@ -508,11 +512,23 @@ export class PaymentHistoryController {
                 }),
             ]);
 
-            const invoiceRows = await prisma.invoice.findMany({
-                where: { user_id: userId },
-                orderBy: { created_at: "desc" },
-                take: limit * 3,
-            });
+            const invoiceRows = await prisma.$queryRaw<Array<{
+                id: string;
+                subscription_id: string;
+                user_id: string;
+                amount: number;
+                status: string;
+                html_content: string | null;
+                metadata: unknown;
+                created_at: Date;
+                updated_at: Date;
+            }>>`
+                SELECT id, subscription_id, user_id, amount, status, html_content, metadata, created_at, updated_at
+                FROM "invoice"
+                WHERE user_id = ${userId}
+                ORDER BY created_at DESC
+                LIMIT ${limit * 3}
+            `;
             const invoiceRowBySubscriptionId = new Map(invoiceRows.map((row) => [row.subscription_id, row]));
 
             const ownedTeamIds = ownedTeams.map((team) => team.id);
@@ -550,6 +566,8 @@ export class PaymentHistoryController {
             const personalInvoices = subscriptions.map((sub, index) => {
                 const invoiceRow = invoiceRowBySubscriptionId.get(sub.id) as any;
                 const invoiceMetadata = (invoiceRow?.metadata || {}) as Record<string, any>;
+                const storedInvoicePdfUrl = invoiceRow?.stripe_invoice_pdf_url || invoiceMetadata.stripeInvoicePdfUrl || null;
+                const storedHostedInvoiceUrl = invoiceRow?.stripe_invoice_hosted_url || invoiceMetadata.stripeInvoiceHostedUrl || null;
                 const packageName = sub.package.name;
                 const tier = getPlanTierFromPackageName(packageName);
                 const billingCycle = getBillingCycleFromPackageName(packageName);
@@ -600,9 +618,9 @@ export class PaymentHistoryController {
                         isExtraSeatPurchase: isExtraSeatPackageName(packageName),
                         seatUnits: isExtraSeatPackageName(packageName) ? Math.max(0, sub.amount) : 0,
                     }),
-                    previewAvailable: Boolean(invoiceMetadata.stripeInvoicePdfUrl || invoiceMetadata.stripeInvoiceHostedUrl || invoiceRow?.html_content),
-                    stripeInvoicePdfUrl: invoiceMetadata.stripeInvoicePdfUrl || null,
-                    stripeInvoiceHostedUrl: invoiceMetadata.stripeInvoiceHostedUrl || null,
+                    previewAvailable: Boolean(storedInvoicePdfUrl || storedHostedInvoiceUrl || invoiceRow?.html_content),
+                    stripeInvoicePdfUrl: storedInvoicePdfUrl,
+                    stripeInvoiceHostedUrl: storedHostedInvoiceUrl,
                 };
             });
 
@@ -617,6 +635,7 @@ export class PaymentHistoryController {
                 let validTill: Date | null = null;
                 let stripeInvoicePdfUrl: string | null = null;
                 let stripeInvoiceHostedUrl: string | null = null;
+                let autoRenewal = false;
                 if (dateSubscribed) {
                     const base = new Date(dateSubscribed);
                     if (inferred.billingCycle === "monthly") {
@@ -640,6 +659,19 @@ export class PaymentHistoryController {
                     }
                 }
 
+                if (purchase.stripe_subscription_id && stripe) {
+                    try {
+                        const subscription = await stripe.subscriptions.retrieve(purchase.stripe_subscription_id);
+                        autoRenewal = subscription.cancel_at_period_end ? false : true;
+                    } catch (error) {
+                        console.error("Failed to fetch Stripe subscription for team auto-renewal:", {
+                            purchaseId: purchase.id,
+                            stripeSubscriptionId: purchase.stripe_subscription_id,
+                            error,
+                        });
+                    }
+                }
+
                 return {
                     id: `INV-T-${purchase.id}`,
                     subscriptionId: purchase.id,
@@ -655,7 +687,7 @@ export class PaymentHistoryController {
                     billingCycle: inferred.billingCycle as any,
                     scope: "team",
                     planFor: "team",
-                    autoRenewal: false,
+                    autoRenewal,
                     dateSubscribed: dateSubscribed,
                     validTill: validTill,
                     teamName: purchase.team?.name || null as any,

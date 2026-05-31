@@ -49,6 +49,8 @@ model user {
   direct_conversations_as_b direct_conversation[] @relation("ConversationUserB")
   sent_direct_messages      direct_message[]      @relation("DirectMessageSender")
   received_direct_messages  direct_message[]      @relation("DirectMessageReceiver")
+  project_invites_sent      project_invites[]     @relation("ProjectInvitesSent")
+  project_invites_accepted   project_invites[]     @relation("ProjectInvitesAccepted")
 
   @@index([ai_generation_consent_last_at])
   @@map("user")
@@ -69,6 +71,7 @@ model teams {
   purchases   team_purchase[]
   usage_log   team_usage[]
   teamInvites team_invites[]
+  projectInvites project_invites[]
   projects    team_project[]
 
   @@map("teams")
@@ -226,6 +229,7 @@ model team_project {
   team               teams?                 @relation(fields: [team_id], references: [id], onDelete: Cascade)
   created_by         user                   @relation("ProjectCreator", fields: [created_by_user_id], references: [id])
   members            team_project_member[]
+  projectInvites     project_invites[]
   images             image[]                @relation("ProjectImages")
 
   @@index([team_id, created_by_user_id])
@@ -243,6 +247,28 @@ model team_project_member {
 
   @@unique([project_id, user_id])
   @@map("team_project_member")
+}
+
+model project_invites {
+  id                  String                @id @default(uuid()) @map("id")
+  project_id          String                @map("project_id")
+  team_id             String?               @map("team_id")
+  email               String                @map("email")
+  invited_by_user_id  String                @map("invited_by_user_id")
+  token               String                @unique @map("token")
+  status              project_invite_status @default(PENDING) @map("status")
+  invited_at          DateTime              @default(now()) @map("invited_at")
+  accepted_at         DateTime?             @map("accepted_at")
+  accepted_by_user_id String?               @map("accepted_by_user_id")
+  created_at          DateTime              @default(now()) @map("created_at")
+  updated_at          DateTime              @updatedAt @map("updated_at")
+  project             team_project          @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  team                teams?                @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  invited_by          user                  @relation("ProjectInvitesSent", fields: [invited_by_user_id], references: [id])
+  accepted_by         user?                 @relation("ProjectInvitesAccepted", fields: [accepted_by_user_id], references: [id])
+
+  @@unique([project_id, email])
+  @@map("project_invites")
 }
 
 model photographer_profile {
@@ -600,6 +626,7 @@ model invoice {
   amount            Float                  @map("amount")
   status            String                 @default("generated") @map("status")
   html_content      String?                @map("html_content")
+  stripe_invoice_pdf_url String?           @map("stripe_invoice_pdf_url")
   metadata          Json?                  @map("metadata")
   created_at        DateTime               @default(now()) @map("created_at")
   updated_at        DateTime               @updatedAt @map("updated_at")
@@ -649,6 +676,15 @@ enum project_member_role {
   AGENT
 
   @@map("project_member_role")
+}
+
+enum project_invite_status {
+  PENDING
+  ACCEPTED
+  CANCELLED
+  EXPIRED
+
+  @@map("project_invite_status")
 }
 
 enum invite_status {

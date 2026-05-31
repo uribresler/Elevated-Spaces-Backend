@@ -47,7 +47,7 @@ export async function getMyProjects(req: Request, res: Response) {
 export async function addProjectPhotographer(req: Request, res: Response) {
     try {
         const { id } = req.params;
-        const { photographerId } = req.body;
+        const { photographerId, photographerEmail } = req.body;
         const userId = req.user?.id;
 
         if (!userId) {
@@ -58,6 +58,7 @@ export async function addProjectPhotographer(req: Request, res: Response) {
             projectId: id,
             userId,
             photographerId,
+            photographerEmail,
         });
 
         return res.status(200).json(result);

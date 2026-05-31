@@ -754,7 +754,8 @@ export class SubscriptionRenewalService {
      */
     static async cancelSubscription(
         subscriptionId: string,
-        reason?: string
+        reason?: string,
+        effectiveAt?: Date
     ): Promise<RenewalResult> {
         try {
             const subscription = await prisma.user_credit_purchase.findUnique({
@@ -771,6 +772,7 @@ export class SubscriptionRenewalService {
             }
 
             const now = new Date();
+            const cancelledAt = effectiveAt && effectiveAt.getTime() > now.getTime() ? effectiveAt : now;
 
             // Determine credit expiry from the subscription's billing interval.
             const lastPaid = subscription.completed_at || subscription.created_at || new Date();
@@ -780,7 +782,7 @@ export class SubscriptionRenewalService {
                 where: { id: subscriptionId },
                 data: {
                     autoRenewEnabled: false,
-                    cancelledAt: now,
+                    cancelledAt,
                     cancellationReason: reason || "User requested cancellation",
                     nextRenewalDate: null,
                     creditExpiresAt,
@@ -796,7 +798,7 @@ export class SubscriptionRenewalService {
                     amount: subscription.price_usd,
                     invoiceId: `CANCEL-${Date.now()}-${Math.random().toString(36).substr(2,6).toUpperCase()}`,
                     renewalNumber: subscription.renewalCount || 0,
-                    planChangedOn: now,
+                    planChangedOn: cancelledAt,
                     creditsAvailableUntil: creditExpiresAt,
                     reason: reason || "User requested cancellation",
                     subject: "Your Subscription Has Been Updated",

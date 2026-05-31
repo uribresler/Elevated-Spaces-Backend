@@ -21,6 +21,9 @@ function isSubscriptionEffectivelyActive(purchase: { status?: string; completed_
   }
 
   const now = new Date();
+    if (purchase.cancelledAt && purchase.cancelledAt.getTime() > now.getTime()) {
+        return true;
+    }
   
   // If not cancelled and auto-renew enabled, it's active
   if (!purchase.cancelledAt && purchase.autoRenewEnabled) {
@@ -64,12 +67,35 @@ type TeamSeatPolicy = {
     planKey: string;
     planLabel: string;
     freeAdditionalUsers: number;
+    freePhotographerUsers: number;
     extraSeatPriceUsdMonthly: number | null;
     extraSeatProductKey: "pro_extra_user_seat" | "team_extra_user_seat" | null;
     unlimited: boolean;
 };
 
-function getTeamSeatPolicyForProductKey(productKey?: string | null): TeamSeatPolicy | null {
+function getPositiveInt(value: string | null | undefined, fallback = 0): number {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+        return fallback;
+    }
+    return Math.max(0, Math.floor(parsed));
+}
+
+function getTeamSeatPolicyForProductKey(productKey?: string | null, metadata?: Record<string, string>): TeamSeatPolicy | null {
+    const normalizedProductKey = String(productKey || "").toLowerCase();
+    const isManualEnterprise = normalizedProductKey === "plan_enterprise_manual" || normalizedProductKey === "plan_enterprise_annual_manual";
+    if (isManualEnterprise) {
+        return {
+            planKey: String(productKey || "plan_enterprise_manual"),
+            planLabel: "Enterprise",
+            freeAdditionalUsers: getPositiveInt(metadata?.enterpriseNormalSeats, 0),
+            freePhotographerUsers: getPositiveInt(metadata?.enterprisePhotographerSeats, 0),
+            extraSeatPriceUsdMonthly: null,
+            extraSeatProductKey: null,
+            unlimited: false,
+        };
+    }
+
     switch (String(productKey || "").toLowerCase()) {
         case "starter":
         case "plan_starter":
@@ -79,6 +105,7 @@ function getTeamSeatPolicyForProductKey(productKey?: string | null): TeamSeatPol
                 planKey: String(productKey || "").startsWith("plan_") ? String(productKey) : `plan_${String(productKey || "")}`,
                 planLabel: "Starter",
                 freeAdditionalUsers: 0,
+                freePhotographerUsers: 0,
                 extraSeatPriceUsdMonthly: null,
                 extraSeatProductKey: null,
                 unlimited: false,
@@ -91,6 +118,7 @@ function getTeamSeatPolicyForProductKey(productKey?: string | null): TeamSeatPol
                 planKey: String(productKey || "").startsWith("plan_") ? String(productKey) : `plan_${String(productKey || "")}`,
                 planLabel: "Pro",
                 freeAdditionalUsers: 2,
+                freePhotographerUsers: 2,
                 extraSeatPriceUsdMonthly: 20,
                 extraSeatProductKey: "pro_extra_user_seat",
                 unlimited: false,
@@ -103,6 +131,7 @@ function getTeamSeatPolicyForProductKey(productKey?: string | null): TeamSeatPol
                 planKey: String(productKey || "").startsWith("plan_") ? String(productKey) : `plan_${String(productKey || "")}`,
                 planLabel: "Team",
                 freeAdditionalUsers: 5,
+                freePhotographerUsers: 3,
                 extraSeatPriceUsdMonthly: 15,
                 extraSeatProductKey: "team_extra_user_seat",
                 unlimited: false,
@@ -115,6 +144,7 @@ function getTeamSeatPolicyForProductKey(productKey?: string | null): TeamSeatPol
                 planKey: String(productKey || "").startsWith("plan_") ? String(productKey) : `plan_${String(productKey || "")}`,
                 planLabel: "Enterprise",
                 freeAdditionalUsers: Number.MAX_SAFE_INTEGER,
+                freePhotographerUsers: Number.MAX_SAFE_INTEGER,
                 extraSeatPriceUsdMonthly: null,
                 extraSeatProductKey: null,
                 unlimited: true,
@@ -125,6 +155,7 @@ function getTeamSeatPolicyForProductKey(productKey?: string | null): TeamSeatPol
                     planKey: productKey,
                     planLabel: "Enterprise",
                     freeAdditionalUsers: Number.MAX_SAFE_INTEGER,
+                    freePhotographerUsers: Number.MAX_SAFE_INTEGER,
                     extraSeatPriceUsdMonthly: null,
                     extraSeatProductKey: null,
                     unlimited: true,
@@ -137,26 +168,88 @@ function getTeamSeatPolicyForProductKey(productKey?: string | null): TeamSeatPol
 function buildTeamSeatLimitError(params: {
     policy: TeamSeatPolicy;
     activeMembers: number;
+    activePhotographerMembers: number;
+    activeGeneralMembers: number;
     pendingInvites: number;
+    pendingPhotographerInvites: number;
+    pendingGeneralInvites: number;
     purchasedExtraSeats: number;
+    requestedRole: string;
+    projectedMembers: number;
+    projectedPhotographerMembers: number;
+    projectedGeneralMembers: number;
+    allowedMembers: number;
+    generalAllowedWithExtra: number;
+    photographerAllowedWithExtra: number;
+    exceedsTotal: boolean;
+    exceedsGeneral: boolean;
+    exceedsPhotographer: boolean;
 }) {
-    const { policy, activeMembers, pendingInvites, purchasedExtraSeats } = params;
-    const included = policy.freeAdditionalUsers;
-    const allowed = included + purchasedExtraSeats;
-    const message = policy.extraSeatPriceUsdMonthly && policy.extraSeatProductKey
-        ? `Team member limit reached for ${policy.planLabel}. Included users: ${included}. Extra users cost $${policy.extraSeatPriceUsdMonthly}/month each.`
+    const {
+        policy,
+        activeMembers,
+        activePhotographerMembers,
+        activeGeneralMembers,
+        pendingInvites,
+        pendingPhotographerInvites,
+        pendingGeneralInvites,
+        purchasedExtraSeats,
+        requestedRole,
+        projectedMembers,
+        projectedPhotographerMembers,
+        projectedGeneralMembers,
+        allowedMembers,
+        generalAllowedWithExtra,
+        photographerAllowedWithExtra,
+        exceedsTotal,
+        exceedsGeneral,
+        exceedsPhotographer,
+    } = params;
+    const includedGeneral = policy.freeAdditionalUsers;
+    const includedPhotographer = policy.freePhotographerUsers;
+    const allowed = includedGeneral + includedPhotographer + purchasedExtraSeats;
+    const remainingPhotographerSeats = Math.max(0, photographerAllowedWithExtra - projectedPhotographerMembers);
+    const remainingGeneralSeats = Math.max(0, generalAllowedWithExtra - projectedGeneralMembers);
+    const remainingTotalSeats = Math.max(0, allowedMembers - projectedMembers);
+    const requestedPhotographer = normalizeTeamRoleName(requestedRole) === "TEAM_PHOTOGRAPHER";
+
+    const defaultMessage = policy.extraSeatPriceUsdMonthly && policy.extraSeatProductKey
+        ? `Team member limit reached for ${policy.planLabel}. Included seats: ${includedGeneral} general + ${includedPhotographer} photographer-only. Extra users cost $${policy.extraSeatPriceUsdMonthly}/month each.`
         : `Team member limit reached for ${policy.planLabel}. Additional users are not available on this plan.`;
+
+    let message = defaultMessage;
+
+    if (!requestedPhotographer && exceedsGeneral && !exceedsTotal && remainingPhotographerSeats > 0 && policy.extraSeatPriceUsdMonthly) {
+        message = `General seats are fully utilized. You can now invite ${remainingPhotographerSeats} photographer${remainingPhotographerSeats === 1 ? "" : "s"} in the team for free, or pay $${policy.extraSeatPriceUsdMonthly}/mo for any extra non-photographer user.`;
+    } else if (exceedsTotal && policy.extraSeatPriceUsdMonthly) {
+        message = `All included seats are filled for ${policy.planLabel}. Please pay $${policy.extraSeatPriceUsdMonthly}/mo per extra user seat.`;
+    }
 
     const error: any = new Error(message);
     error.code = "TEAM_SEAT_LIMIT_REACHED";
     error.details = {
         planKey: policy.planKey,
         planLabel: policy.planLabel,
-        freeIncludedUsers: included,
+        requestedRole,
+        freeIncludedUsers: includedGeneral,
+        freeIncludedPhotographerUsers: includedPhotographer,
         activeMembers,
+        activeGeneralMembers,
+        activePhotographerMembers,
         pendingInvites,
+        pendingGeneralInvites,
+        pendingPhotographerInvites,
         purchasedExtraSeats,
         allowedMembers: allowed,
+        remainingTotalSeats,
+        remainingGeneralSeats,
+        remainingPhotographerSeats,
+        projectedMembers,
+        projectedGeneralMembers,
+        projectedPhotographerMembers,
+        exceedsTotal,
+        exceedsGeneral,
+        exceedsPhotographer,
         allowPurchaseExtraSeats: Boolean(policy.extraSeatProductKey),
         extraSeatProductKey: policy.extraSeatProductKey,
         extraSeatPriceUsdMonthly: policy.extraSeatPriceUsdMonthly,
@@ -260,25 +353,26 @@ async function getActiveTeamSeatContext(teamId: string): Promise<ActiveTeamSeatC
             continue;
         }
 
-        const parsedPolicy = getTeamSeatPolicyForProductKey(subscriptionProductKey);
+        const parsedPolicy = getTeamSeatPolicyForProductKey(subscriptionProductKey, metadata as Record<string, string>);
         if (parsedPolicy) {
             const periodStartEpoch = (subscription as any)?.current_period_start;
             const createdEpoch = typeof subscription.created === "number" ? subscription.created : 0;
             const sortEpoch = typeof periodStartEpoch === "number" ? periodStartEpoch : createdEpoch;
             const statusPriority = getSubscriptionStatusPriority(subscription.status);
+            const totalIncludedUsers = parsedPolicy.freeAdditionalUsers + parsedPolicy.freePhotographerUsers;
 
             const shouldReplace = !selectedPlanMeta
-                || parsedPolicy.freeAdditionalUsers > selectedPlanMeta.includedUsers
-                || (parsedPolicy.freeAdditionalUsers === selectedPlanMeta.includedUsers
-                    && (
-                        statusPriority > selectedPlanMeta.statusPriority
-                        || (statusPriority === selectedPlanMeta.statusPriority && sortEpoch > selectedPlanMeta.sortEpoch)
-                    ));
+                // Prefer the most recent subscription (newer period start)
+                || sortEpoch > selectedPlanMeta.sortEpoch
+                // If same start, prefer higher status priority
+                || (sortEpoch === selectedPlanMeta.sortEpoch && statusPriority > selectedPlanMeta.statusPriority)
+                // If same priority, prefer larger included user count
+                || (sortEpoch === selectedPlanMeta.sortEpoch && statusPriority === selectedPlanMeta.statusPriority && totalIncludedUsers > selectedPlanMeta.includedUsers);
 
             if (shouldReplace) {
                 policy = parsedPolicy;
                 selectedPlanMeta = {
-                    includedUsers: parsedPolicy.freeAdditionalUsers,
+                    includedUsers: totalIncludedUsers,
                     statusPriority,
                     sortEpoch,
                 };
@@ -327,6 +421,11 @@ export async function enforceTeamSeatCapacityForExistingMembers(teamId: string):
             is_paid_extra_seat: true,
             seat_auto_renew: true,
             seat_expires_at: true,
+            role: {
+                select: {
+                    name: true,
+                },
+            },
         },
         orderBy: {
             joined_at: "asc",
@@ -339,10 +438,17 @@ export async function enforceTeamSeatCapacityForExistingMembers(teamId: string):
         isFutureDate(membership.seat_expires_at, now)
     )).length;
 
-    const includedMembers = activeMemberships.slice(0, policy.freeAdditionalUsers);
-    const extraMembers = activeMemberships.slice(policy.freeAdditionalUsers);
+    const generalMembers = activeMemberships.filter((membership) => membership.role?.name !== "TEAM_PHOTOGRAPHER");
+    const photographerMembers = activeMemberships.filter((membership) => membership.role?.name === "TEAM_PHOTOGRAPHER");
+    const includedGeneralMembers = generalMembers.slice(0, policy.freeAdditionalUsers);
+    const includedPhotographerMembers = photographerMembers.slice(0, policy.freePhotographerUsers);
+    const overflowMembers = [
+        ...generalMembers.slice(policy.freeAdditionalUsers),
+        ...photographerMembers.slice(policy.freePhotographerUsers),
+    ].sort((left, right) => left.joined_at.getTime() - right.joined_at.getTime());
+
     const paidByReservedIds = new Set(
-        extraMembers
+        overflowMembers
             .filter((membership) => (
                 membership.is_paid_extra_seat &&
                 membership.seat_auto_renew === false &&
@@ -352,14 +458,17 @@ export async function enforceTeamSeatCapacityForExistingMembers(teamId: string):
     );
 
     const seatsAvailableFromPurchases = Math.max(0, purchasedExtraSeats);
-    const paidCandidates = extraMembers.filter((membership) => !paidByReservedIds.has(membership.id));
+    const paidCandidates = overflowMembers.filter((membership) => !paidByReservedIds.has(membership.id));
     const paidByPurchase = paidCandidates.slice(0, seatsAvailableFromPurchases);
     const shouldBePaidIds = new Set<string>([
         ...Array.from(paidByReservedIds),
         ...paidByPurchase.map((membership) => membership.id),
     ]);
 
-    const includedIds = new Set(includedMembers.map((membership) => membership.id));
+    const includedIds = new Set([
+        ...includedGeneralMembers.map((membership) => membership.id),
+        ...includedPhotographerMembers.map((membership) => membership.id),
+    ]);
     const overLimitMembers = activeMemberships.filter(
         (membership) => !includedIds.has(membership.id) && !shouldBePaidIds.has(membership.id)
     );
@@ -426,7 +535,7 @@ export async function enforceTeamSeatCapacityForExistingMembers(teamId: string):
     });
 }
 
-async function assertTeamSeatCapacityForInvite(teamId: string, inviteEmail: string): Promise<void> {
+async function assertTeamSeatCapacityForInvite(teamId: string, inviteEmail: string, inviteRoleName: string): Promise<void> {
     const { policy, purchasedExtraSeats } = await getActiveTeamSeatContext(teamId);
     if (!policy) {
         throw buildTeamPlanRequiredError();
@@ -451,36 +560,82 @@ async function assertTeamSeatCapacityForInvite(teamId: string, inviteEmail: stri
         },
     });
 
-    const [activeMembershipsCount, pendingInvitesCount] = await Promise.all([
-        prisma.team_membership.count({
+    const [activeMemberships, pendingInvites] = await Promise.all([
+        prisma.team_membership.findMany({
             where: {
                 team_id: teamId,
                 deleted_at: null,
             },
+            select: {
+                id: true,
+                role: {
+                    select: {
+                        name: true,
+                    },
+                },
+            },
         }),
-        prisma.team_invites.count({
+        prisma.team_invites.findMany({
             where: {
                 team_id: teamId,
                 status: invite_status.PENDING,
                 email: { not: inviteEmail },
             },
+            select: {
+                id: true,
+                role: {
+                    select: {
+                        name: true,
+                    },
+                },
+            },
         }),
     ]);
 
-    const allowedMembers = policy.freeAdditionalUsers + purchasedExtraSeats + retainedPaidSeats;
-    const projectedMembers = activeMembershipsCount + pendingInvitesCount + 1;
+    const activePhotographerMembers = activeMemberships.filter((membership) => membership.role?.name === "TEAM_PHOTOGRAPHER").length;
+    const activeGeneralMembers = activeMemberships.length - activePhotographerMembers;
+    const pendingPhotographerInvites = pendingInvites.filter((invite) => invite.role?.name === "TEAM_PHOTOGRAPHER").length;
+    const pendingGeneralInvites = pendingInvites.length - pendingPhotographerInvites;
 
-    if (projectedMembers > allowedMembers) {
+    const isPhotographerInvite = normalizeTeamRoleName(inviteRoleName) === "TEAM_PHOTOGRAPHER";
+    const projectedPhotographerMembers = activePhotographerMembers + pendingPhotographerInvites + (isPhotographerInvite ? 1 : 0);
+    const projectedGeneralMembers = activeGeneralMembers + pendingGeneralInvites + (isPhotographerInvite ? 0 : 1);
+    const projectedMembers = projectedPhotographerMembers + projectedGeneralMembers;
+
+    const extraSharedSeats = purchasedExtraSeats + retainedPaidSeats;
+    const allowedMembers = policy.freeAdditionalUsers + policy.freePhotographerUsers + extraSharedSeats;
+    const generalAllowedWithExtra = policy.freeAdditionalUsers + extraSharedSeats;
+    const photographerAllowedWithExtra = policy.freePhotographerUsers + extraSharedSeats;
+
+    const exceedsTotal = projectedMembers > allowedMembers;
+    const exceedsGeneral = projectedGeneralMembers > generalAllowedWithExtra;
+    const exceedsPhotographer = projectedPhotographerMembers > photographerAllowedWithExtra;
+
+    if (exceedsTotal || exceedsGeneral || exceedsPhotographer) {
         throw buildTeamSeatLimitError({
             policy,
-            activeMembers: activeMembershipsCount,
-            pendingInvites: pendingInvitesCount,
+            activeMembers: activeMemberships.length,
+            activeGeneralMembers,
+            activePhotographerMembers,
+            pendingInvites: pendingInvites.length,
+            pendingGeneralInvites,
+            pendingPhotographerInvites,
             purchasedExtraSeats,
+            requestedRole: normalizeTeamRoleName(inviteRoleName),
+            projectedMembers,
+            projectedGeneralMembers,
+            projectedPhotographerMembers,
+            allowedMembers,
+            generalAllowedWithExtra,
+            photographerAllowedWithExtra,
+            exceedsTotal,
+            exceedsGeneral,
+            exceedsPhotographer,
         });
     }
 }
 
-async function assertTeamSeatCapacityForAcceptance(teamId: string): Promise<void> {
+async function assertTeamSeatCapacityForAcceptance(teamId: string, inviteRoleName: string): Promise<void> {
     const { policy, purchasedExtraSeats } = await getActiveTeamSeatContext(teamId);
     if (!policy) {
         throw buildTeamPlanRequiredError();
@@ -505,21 +660,57 @@ async function assertTeamSeatCapacityForAcceptance(teamId: string): Promise<void
         },
     });
 
-    const activeMembershipsCount = await prisma.team_membership.count({
+    const activeMemberships = await prisma.team_membership.findMany({
         where: {
             team_id: teamId,
             deleted_at: null,
         },
+        select: {
+            id: true,
+            role: {
+                select: {
+                    name: true,
+                },
+            },
+        },
     });
 
-    const allowedMembers = policy.freeAdditionalUsers + purchasedExtraSeats + retainedPaidSeats;
-    const projectedMembers = activeMembershipsCount + 1;
-    if (projectedMembers > allowedMembers) {
+    const activePhotographerMembers = activeMemberships.filter((membership) => membership.role?.name === "TEAM_PHOTOGRAPHER").length;
+    const activeGeneralMembers = activeMemberships.length - activePhotographerMembers;
+    const isPhotographerInvite = normalizeTeamRoleName(inviteRoleName) === "TEAM_PHOTOGRAPHER";
+    const projectedPhotographerMembers = activePhotographerMembers + (isPhotographerInvite ? 1 : 0);
+    const projectedGeneralMembers = activeGeneralMembers + (isPhotographerInvite ? 0 : 1);
+    const projectedMembers = projectedPhotographerMembers + projectedGeneralMembers;
+
+    const extraSharedSeats = purchasedExtraSeats + retainedPaidSeats;
+    const allowedMembers = policy.freeAdditionalUsers + policy.freePhotographerUsers + extraSharedSeats;
+    const generalAllowedWithExtra = policy.freeAdditionalUsers + extraSharedSeats;
+    const photographerAllowedWithExtra = policy.freePhotographerUsers + extraSharedSeats;
+
+    const exceedsTotal = projectedMembers > allowedMembers;
+    const exceedsGeneral = projectedGeneralMembers > generalAllowedWithExtra;
+    const exceedsPhotographer = projectedPhotographerMembers > photographerAllowedWithExtra;
+
+    if (exceedsTotal || exceedsGeneral || exceedsPhotographer) {
         throw buildTeamSeatLimitError({
             policy,
-            activeMembers: activeMembershipsCount,
+            activeMembers: activeMemberships.length,
+            activeGeneralMembers,
+            activePhotographerMembers,
             pendingInvites: 0,
+            pendingGeneralInvites: 0,
+            pendingPhotographerInvites: 0,
             purchasedExtraSeats,
+            requestedRole: normalizeTeamRoleName(inviteRoleName),
+            projectedMembers,
+            projectedGeneralMembers,
+            projectedPhotographerMembers,
+            allowedMembers,
+            generalAllowedWithExtra,
+            photographerAllowedWithExtra,
+            exceedsTotal,
+            exceedsGeneral,
+            exceedsPhotographer,
         });
     }
 }
@@ -962,8 +1153,8 @@ export async function invitationService({ email, userId, subject, text, teamId, 
 
     const { team: team_exists, roleName: inviterRole } = await getTeamAccess({ teamId, userId });
     await assertEmailNotAlreadyPartOfTeam(team_exists.id, normalizedEmail);
-    await assertTeamSeatCapacityForInvite(team_exists.id, normalizedEmail);
     const inviteRoleName = resolveInviteRoleName(roleName);
+    await assertTeamSeatCapacityForInvite(team_exists.id, normalizedEmail, inviteRoleName);
     if (!canInviteRole(inviterRole, inviteRoleName)) {
         throw new Error("You are not allowed to invite this role");
     }
@@ -1106,7 +1297,16 @@ export async function acceptInvitationService({
         throw new Error("Invalid invite token");
     }
 
-    const invite = await prisma.team_invites.findUnique({ where: { token } });
+    const invite = await prisma.team_invites.findUnique({
+        where: { token },
+        include: {
+            role: {
+                select: {
+                    name: true,
+                },
+            },
+        },
+    });
     if (!invite) {
         throw new Error("This invite has been expired, please check your inbox for a newer invite");
     }
@@ -1127,7 +1327,7 @@ export async function acceptInvitationService({
         throw new Error("Invite has expired");
     }
 
-    await assertTeamSeatCapacityForAcceptance(invite.team_id);
+    await assertTeamSeatCapacityForAcceptance(invite.team_id, invite.role?.name || "TEAM_MEMBER");
 
     const inviteEmail = payload.email.trim().toLowerCase();
     let user = await prisma.user.findUnique({ where: { email: inviteEmail } });
@@ -1197,6 +1397,50 @@ export async function acceptInvitationService({
             joined_at: new Date(), // Reset joined_at to current time for reactivated members
         },
     });
+
+    const pendingProjectInvites = await prisma.project_invites.findMany({
+        where: {
+            team_id: invite.team_id,
+            email: payload.email.trim().toLowerCase(),
+            status: "PENDING",
+        },
+        select: {
+            id: true,
+            project_id: true,
+        },
+    });
+
+    if (pendingProjectInvites.length > 0) {
+        await prisma.$transaction(async (tx) => {
+            for (const projectInvite of pendingProjectInvites) {
+                await tx.team_project_member.upsert({
+                    where: {
+                        project_id_user_id: {
+                            project_id: projectInvite.project_id,
+                            user_id: user.id,
+                        },
+                    },
+                    create: {
+                        project_id: projectInvite.project_id,
+                        user_id: user.id,
+                        role: "PHOTOGRAPHER",
+                    },
+                    update: {
+                        role: "PHOTOGRAPHER",
+                    },
+                });
+
+                await tx.project_invites.update({
+                    where: { id: projectInvite.id },
+                    data: {
+                        status: "ACCEPTED",
+                        accepted_at: new Date(),
+                        accepted_by_user_id: user.id,
+                    },
+                });
+            }
+        });
+    }
 
     await prisma.team_invites.update({
         where: { id: invite.id },
@@ -1392,8 +1636,8 @@ export async function reinviteService({
 
     const { team: team_exists, roleName: inviterRole } = await getTeamAccess({ teamId, userId });
     await assertEmailNotAlreadyPartOfTeam(team_exists.id, normalizedEmail);
-    await assertTeamSeatCapacityForInvite(team_exists.id, normalizedEmail);
     const inviteRoleName = resolveInviteRoleName(roleName);
+    await assertTeamSeatCapacityForInvite(team_exists.id, normalizedEmail, inviteRoleName);
     if (!canInviteRole(inviterRole, inviteRoleName)) {
         throw new Error("You are not allowed to invite this role");
     }

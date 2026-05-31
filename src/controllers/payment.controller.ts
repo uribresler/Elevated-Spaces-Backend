@@ -13,7 +13,7 @@ export async function createCheckoutSessionHandler(req: Request, res: Response) 
             return res.status(401).json({ message: "Unauthorized" });
         }
 
-        const { productKey, uiUnitAmountUsd, purchaseFor, teamId, quantity, confirmPlanChange, seatAutoRenew, autoRenewEnabled } = req.body;
+        const { productKey, uiUnitAmountUsd, purchaseFor, teamId, quantity, confirmPlanChange, seatAutoRenew, autoRenewEnabled, downgradeSeatTopUpUsdMonthly } = req.body;
         console.log("📋 Checkout session request:", {
             userId,
             productKey,
@@ -40,6 +40,7 @@ export async function createCheckoutSessionHandler(req: Request, res: Response) 
             confirmPlanChange,
             seatAutoRenew,
             autoRenewEnabled,
+            downgradeSeatTopUpUsdMonthly,
         });
 
         return res.status(200).json(result);
@@ -54,6 +55,7 @@ export async function createCheckoutSessionHandler(req: Request, res: Response) 
             return res.status(409).json({
                 message: error.message || "Plan change confirmation required",
                 code: error.code,
+                details: error.details || null,
             });
         }
         return res.status(400).json({

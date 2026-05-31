@@ -195,14 +195,16 @@ export class InvoiceService {
         amount: number;
         status: "generated" | "sent" | "paid";
         htmlContent: string;
+        stripeInvoicePdfUrl?: string | null;
         metadata?: Record<string, any>;
     }) {
         try {
+            const metadataJson = JSON.stringify(data.metadata || {});
             const invoice = await prisma.$executeRawUnsafe(`
                 INSERT INTO "invoice" 
-                (id, "subscription_id", "user_id", amount, status, "html_content", metadata, "created_at", "updated_at")
+                (id, "subscription_id", "user_id", amount, status, "html_content", "stripe_invoice_pdf_url", metadata, "created_at", "updated_at")
                 VALUES 
-                ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+                ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
                 RETURNING *
             `, 
             `INV-${Date.now()}`,
@@ -211,11 +213,31 @@ export class InvoiceService {
             data.amount,
             data.status,
             data.htmlContent,
-            JSON.stringify(data.metadata || {})
+            data.stripeInvoicePdfUrl || null,
+            metadataJson
             );
 
             return invoice;
         } catch (error) {
+            if ((error as any)?.code === "P2022") {
+                const invoice = await prisma.$executeRawUnsafe(`
+                    INSERT INTO "invoice" 
+                    (id, "subscription_id", "user_id", amount, status, "html_content", metadata, "created_at", "updated_at")
+                    VALUES 
+                    ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+                    RETURNING *
+                `,
+                `INV-${Date.now()}`,
+                data.subscriptionId,
+                data.userId,
+                data.amount,
+                data.status,
+                data.htmlContent,
+                JSON.stringify(data.metadata || {})
+                );
+
+                return invoice;
+            }
             console.error("Error creating invoice record:", error);
             throw error;
         }

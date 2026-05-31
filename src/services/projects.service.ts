@@ -1,4 +1,6 @@
+import crypto from "crypto";
 import prisma from "../dbConnection";
+import { invitationService } from "./teams.service";
 
 const GRACE_PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -12,6 +14,9 @@ function isSubscriptionEffectivelyActive(purchase: { status?: string; completed_
   }
 
   const now = new Date();
+    if (purchase.cancelledAt && purchase.cancelledAt.getTime() > now.getTime()) {
+        return true;
+    }
   
   // If not cancelled and auto-renew enabled, it's active
   if (!purchase.cancelledAt && purchase.autoRenewEnabled) {
@@ -59,6 +64,100 @@ async function getTeamRole({ teamId, userId }: { teamId: string; userId: string 
     return { team, roleName: membership.role.name };
 }
 
+async function inviteProjectPhotographer({
+    projectId,
+    projectName,
+    teamId,
+    invitedByUserId,
+    photographerEmail,
+}: {
+    projectId: string;
+    projectName: string;
+    teamId: string;
+    invitedByUserId: string;
+    photographerEmail: string;
+}) {
+    const normalizedEmail = photographerEmail.trim().toLowerCase();
+    if (!normalizedEmail) {
+        throw new Error("Photographer email is required");
+    }
+
+    const existingUser = await prisma.user.findUnique({
+        where: { email: normalizedEmail },
+        select: { id: true },
+    });
+
+    if (existingUser) {
+        const existingMembership = await prisma.team_membership.findUnique({
+            where: { team_id_user_id: { team_id: teamId, user_id: existingUser.id } },
+            include: { role: true },
+        });
+
+        if (existingMembership && !existingMembership.deleted_at) {
+            const roleName = String(existingMembership.role?.name || "").toUpperCase();
+            if (roleName !== "TEAM_PHOTOGRAPHER" && roleName !== "PHOTOGRAPHER") {
+                throw new Error("Photographer must be a team member with photographer role");
+            }
+
+            await prisma.team_project_member.upsert({
+                where: { project_id_user_id: { project_id: projectId, user_id: existingUser.id } },
+                create: {
+                    project_id: projectId,
+                    user_id: existingUser.id,
+                    role: "PHOTOGRAPHER",
+                },
+                update: {},
+            });
+
+            return {
+                projectInvite: null,
+                invitationSent: false,
+                accessGranted: true,
+            };
+        }
+    }
+
+    await invitationService({
+        email: normalizedEmail,
+        userId: invitedByUserId,
+        subject: `Invitation to collaborate on ${projectName}`,
+        text: `You have been invited to collaborate on the project \"${projectName}\". Please accept the team invitation to unlock full project access.`,
+        teamId,
+        roleName: "TEAM_PHOTOGRAPHER",
+    });
+
+    const projectInvite = await prisma.project_invites.upsert({
+        where: {
+            project_id_email: {
+                project_id: projectId,
+                email: normalizedEmail,
+            },
+        },
+        create: {
+            project_id: projectId,
+            team_id: teamId,
+            email: normalizedEmail,
+            invited_by_user_id: invitedByUserId,
+            token: crypto.randomUUID(),
+            status: "PENDING",
+        },
+        update: {
+            team_id: teamId,
+            invited_by_user_id: invitedByUserId,
+            status: "PENDING",
+            accepted_at: null,
+            accepted_by_user_id: null,
+            token: crypto.randomUUID(),
+        },
+    });
+
+    return {
+        projectInvite,
+        invitationSent: true,
+        accessGranted: false,
+    };
+}
+
 export async function createProjectService({
     teamId,
     name,
@@ -88,6 +187,7 @@ export async function createProjectService({
     let team = null;
     let roleName = null;
     let photographerId: string | undefined;
+    let invitedPhotographerEmail: string | null = null;
 
     // If teamId is provided, validate team access and permissions
     if (sanitizedTeamId) {
@@ -141,38 +241,42 @@ export async function createProjectService({
         }
     }
 
+    if (photographerEmail && !sanitizedTeamId) {
+        throw new Error("Photographers can only be invited for team projects");
+    }
+
     // Validate photographer BEFORE creating the project (team projects only)
     if (sanitizedTeamId && photographerEmail) {
-        const photographer = await prisma.user.findUnique({ where: { email: photographerEmail } });
+        const photographer = await prisma.user.findUnique({ where: { email: photographerEmail.trim().toLowerCase() } });
         console.log('[DEBUG] Looking for photographer with email:', photographerEmail, '- Found:', !!photographer);
-        if (!photographer) {
-            throw new Error("Photographer not found. Invite them to the team first.");
+        if (photographer) {
+            const photographerMembership = await prisma.team_membership.findUnique({
+                where: { team_id_user_id: { team_id: team!.id, user_id: photographer.id } },
+                include: { role: true },
+            });
+
+            console.log('[DEBUG] Photographer membership found:', !!photographerMembership);
+            console.log('[DEBUG] Membership deleted_at:', photographerMembership?.deleted_at);
+            console.log('[DEBUG] Membership role full object:', photographerMembership?.role);
+
+            if (photographerMembership && !photographerMembership.deleted_at) {
+                const membershipRoleName = String(photographerMembership.role?.name || "").toUpperCase();
+                console.log('[DEBUG] Photographer membership role name (original):', photographerMembership.role?.name);
+                console.log('[DEBUG] Photographer membership role name (uppercase):', membershipRoleName);
+                console.log('[DEBUG] Checking if role is TEAM_PHOTOGRAPHER or PHOTOGRAPHER:', membershipRoleName === "TEAM_PHOTOGRAPHER" || membershipRoleName === "PHOTOGRAPHER");
+
+                if (membershipRoleName !== "TEAM_PHOTOGRAPHER" && membershipRoleName !== "PHOTOGRAPHER") {
+                    console.error('[ERROR] Invalid photographer role:', membershipRoleName);
+                    throw new Error("Photographer must be a team member with photographer role");
+                }
+
+                photographerId = photographer.id;
+            } else {
+                invitedPhotographerEmail = photographerEmail.trim().toLowerCase();
+            }
+        } else {
+            invitedPhotographerEmail = photographerEmail.trim().toLowerCase();
         }
-
-        const photographerMembership = await prisma.team_membership.findUnique({
-            where: { team_id_user_id: { team_id: team!.id, user_id: photographer.id } },
-            include: { role: true },
-        });
-
-        console.log('[DEBUG] Photographer membership found:', !!photographerMembership);
-        console.log('[DEBUG] Membership deleted_at:', photographerMembership?.deleted_at);
-        console.log('[DEBUG] Membership role full object:', photographerMembership?.role);
-
-        if (!photographerMembership || photographerMembership.deleted_at) {
-            throw new Error("Photographer must be a team member with photographer role");
-        }
-
-        const membershipRoleName = String(photographerMembership.role?.name || "").toUpperCase();
-        console.log('[DEBUG] Photographer membership role name (original):', photographerMembership.role?.name);
-        console.log('[DEBUG] Photographer membership role name (uppercase):', membershipRoleName);
-        console.log('[DEBUG] Checking if role is TEAM_PHOTOGRAPHER or PHOTOGRAPHER:', membershipRoleName === "TEAM_PHOTOGRAPHER" || membershipRoleName === "PHOTOGRAPHER");
-
-        if (membershipRoleName !== "TEAM_PHOTOGRAPHER" && membershipRoleName !== "PHOTOGRAPHER") {
-            console.error('[ERROR] Invalid photographer role:', membershipRoleName);
-            throw new Error("Photographer must be a team member with photographer role");
-        }
-
-        photographerId = photographer.id;
     }
 
     // Create project (team or personal)
@@ -186,7 +290,7 @@ export async function createProjectService({
         },
     });
 
-    // Add photographer to project if provided (team projects only)
+    // Add photographer or create a pending project invite if provided (team projects only)
     if (photographerId) {
         await prisma.team_project_member.create({
             data: {
@@ -195,12 +299,20 @@ export async function createProjectService({
                 role: "PHOTOGRAPHER",
             },
         });
+    } else if (invitedPhotographerEmail && team) {
+        await inviteProjectPhotographer({
+            projectId: project.id,
+            projectName: project.name,
+            teamId: team.id,
+            invitedByUserId: userId,
+            photographerEmail: invitedPhotographerEmail,
+        });
     }
 
     return {
         success: true,
         message: sanitizedTeamId 
-            ? "Team project created successfully" 
+            ? (invitedPhotographerEmail ? "Team project created successfully. Photographer invitation sent." : "Team project created successfully") 
             : "Personal project created successfully",
         project,
         data: { project },
@@ -208,6 +320,11 @@ export async function createProjectService({
 }
 
 export async function getMyProjectsService({ userId }: { userId: string }) {
+    const currentUser = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { email: true },
+    });
+
     const memberships = await prisma.team_membership.findMany({
         where: { user_id: userId },
         include: { role: true },
@@ -251,6 +368,17 @@ export async function getMyProjectsService({ userId }: { userId: string }) {
         });
     }
 
+    if (currentUser?.email) {
+        orFilters.push({
+            projectInvites: {
+                some: {
+                    email: currentUser.email,
+                    status: { in: ["PENDING", "ACCEPTED"] },
+                },
+            },
+        });
+    }
+
     // orFilters will always have at least one entry (personal projects)
     const projects = await prisma.team_project.findMany({
         where: { OR: orFilters },
@@ -273,10 +401,12 @@ export async function addProjectPhotographerService({
     projectId,
     userId,
     photographerId,
+    photographerEmail,
 }: {
     projectId: string;
     userId: string;
-    photographerId: string;
+    photographerId?: string;
+    photographerEmail?: string;
 }) {
     const project = await prisma.team_project.findUnique({
         where: { id: projectId },
@@ -295,29 +425,50 @@ export async function addProjectPhotographerService({
         throw new Error("You are not allowed to add photographers");
     }
 
-    const photographerMembership = await prisma.team_membership.findUnique({
-        where: { team_id_user_id: { team_id: team.id, user_id: photographerId } },
-        include: { role: true },
-    });
+    let member: any = null;
+    let projectInvite: any = null;
 
-    if (!photographerMembership || photographerMembership.deleted_at || photographerMembership.role.name !== "TEAM_PHOTOGRAPHER") {
-        throw new Error("Photographer must be a team member with photographer role");
+    if (photographerEmail) {
+        const result = await inviteProjectPhotographer({
+            projectId: project.id,
+            projectName: project.name,
+            teamId: team.id,
+            invitedByUserId: userId,
+            photographerEmail,
+        });
+        member = result.accessGranted ? await prisma.team_project_member.findFirst({
+            where: { project_id: project.id },
+            include: { user: true },
+        }) : null;
+        projectInvite = result.projectInvite;
+    } else if (photographerId) {
+        const photographerMembership = await prisma.team_membership.findUnique({
+            where: { team_id_user_id: { team_id: team.id, user_id: photographerId } },
+            include: { role: true },
+        });
+
+        if (!photographerMembership || photographerMembership.deleted_at || photographerMembership.role.name !== "TEAM_PHOTOGRAPHER") {
+            throw new Error("Photographer must be a team member with photographer role");
+        }
+
+        member = await prisma.team_project_member.upsert({
+            where: { project_id_user_id: { project_id: project.id, user_id: photographerId } },
+            create: {
+                project_id: project.id,
+                user_id: photographerId,
+                role: "PHOTOGRAPHER",
+            },
+            update: {},
+        });
+    } else {
+        throw new Error("Photographer is required");
     }
-
-    const member = await prisma.team_project_member.upsert({
-        where: { project_id_user_id: { project_id: project.id, user_id: photographerId } },
-        create: {
-            project_id: project.id,
-            user_id: photographerId,
-            role: "PHOTOGRAPHER",
-        },
-        update: {},
-    });
 
     return {
         success: true,
-        message: "Photographer added to project",
+        message: projectInvite ? "Photographer invitation sent" : "Photographer added to project",
         member,
+        projectInvite,
     };
 }
 
@@ -401,7 +552,20 @@ export async function getProjectImagesService({
                 });
 
                 if (!membership || membership.deleted_at) {
-                    throw new Error("You don't have access to this project");
+                    const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+                    const invite = user?.email
+                        ? await prisma.project_invites.findFirst({
+                            where: {
+                                project_id: project.id,
+                                email: user.email,
+                                status: { in: ["PENDING", "ACCEPTED"] },
+                            },
+                        })
+                        : null;
+
+                    if (!invite) {
+                        throw new Error("You don't have access to this project");
+                    }
                 }
             }
         } else {

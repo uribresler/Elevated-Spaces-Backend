@@ -196,6 +196,13 @@ export async function getMyTeams(req: Request, res: Response) {
                         accepted_by_user_id: true,
                         created_at: true,
                         updated_at: true,
+                        role: {
+                            select: {
+                                id: true,
+                                name: true,
+                                description: true,
+                            },
+                        },
                     },
                 },
                 owner: {
@@ -246,6 +253,14 @@ export async function getMyTeams(req: Request, res: Response) {
             return {
                 ...team,
                 teamInvites: filteredInvites,
+                members: team.members.map((member) => ({
+                    ...member,
+                    is_paid_extra_seat: Boolean((member as any).is_paid_extra_seat),
+                    seat_auto_renew: Boolean((member as any).seat_auto_renew),
+                    seat_last_paid_at: (member as any).seat_last_paid_at || null,
+                    seat_expires_at: (member as any).seat_expires_at || null,
+                    seat_payment_product_key: (member as any).seat_payment_product_key || null,
+                })),
             };
         });
 
@@ -293,6 +308,7 @@ export async function getMyTeamsWithCredits(req: Request, res: Response) {
                     select: {
                         id: true,
                         name: true,
+                        wallet: true,
                         deleted_at: true,
                     }
                 },
@@ -317,14 +333,22 @@ export async function getMyTeamsWithCredits(req: Request, res: Response) {
         // Format member teams (exclude deleted teams)
         const memberTeamsFormatted = memberTeams
             .filter(membership => !membership.team.deleted_at)
-            .map(membership => ({
-                id: membership.team.id,
-                name: membership.team.name,
-                role: membership.role.name,
-                allocated: membership.allocated,
-                used: membership.used,
-                remaining: membership.allocated - membership.used,
-            }));
+            .map(membership => {
+                const roleName = String(membership.role?.name || "").toUpperCase();
+                const canUseTeamWallet = ["TEAM_OWNER", "TEAM_ADMIN", "ADMIN"].includes(roleName);
+                const walletBalance = Number(membership.team?.wallet || 0);
+                const allocatedBalance = canUseTeamWallet ? walletBalance : Number(membership.allocated || 0);
+                const usedBalance = canUseTeamWallet ? 0 : Number(membership.used || 0);
+
+                return {
+                    id: membership.team.id,
+                    name: membership.team.name,
+                    role: membership.role.name,
+                    allocated: allocatedBalance,
+                    used: usedBalance,
+                    remaining: Math.max(allocatedBalance - usedBalance, 0),
+                };
+            });
 
         // Combine and remove duplicates (user can't be both owner and member of same team)
         const allTeams = [...ownedTeamsFormatted, ...memberTeamsFormatted];
@@ -444,6 +468,13 @@ export async function getTeamsByUserId(req: Request, res: Response) {
                                 accepted_by_user_id: true,
                                 created_at: true,
                                 updated_at: true,
+                                role: {
+                                    select: {
+                                        id: true,
+                                        name: true,
+                                        description: true,
+                                    },
+                                },
                             },
                         },
                         owner: {
@@ -487,6 +518,14 @@ export async function getTeamsByUserId(req: Request, res: Response) {
             return {
                 ...team,
                 teamInvites: filteredInvites,
+                members: team.members.map((member) => ({
+                    ...member,
+                    is_paid_extra_seat: Boolean((member as any).is_paid_extra_seat),
+                    seat_auto_renew: Boolean((member as any).seat_auto_renew),
+                    seat_last_paid_at: (member as any).seat_last_paid_at || null,
+                    seat_expires_at: (member as any).seat_expires_at || null,
+                    seat_payment_product_key: (member as any).seat_payment_product_key || null,
+                })),
             };
         });
 
@@ -628,6 +667,9 @@ export async function getTeamEligibility(req: Request, res: Response) {
         return res.status(200).json(result);
     } catch (error: any) {
         console.error('GET_TEAM_ELIGIBILITY_ERROR:', error);
+        if (error?.code === 'TEAM_NOT_FOUND') {
+            return res.status(404).json({ success: false, code: error.code, message: error?.message || 'Team not found' });
+        }
         return res.status(500).json({ success: false, message: error?.message || 'Failed to get eligibility' });
     }
 }

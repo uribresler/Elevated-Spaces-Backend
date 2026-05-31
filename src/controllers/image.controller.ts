@@ -58,6 +58,10 @@ const { fallbackImageService } = require("../services/fallbackImage.service") as
   };
 };
 
+function canUseTeamWallet(roleName?: string | null): boolean {
+  return ["TEAM_OWNER", "TEAM_ADMIN", "ADMIN"].includes(String(roleName || "").toUpperCase());
+}
+
 
 // TypeScript: declare global property for demo upload counts
 declare global {
@@ -95,9 +99,11 @@ function toPublicImageUrl(rawPath: string, req: Request): string {
 async function sanitizeProjectIdForUser({
   projectId,
   userId,
+  strictWriteAccess = false,
 }: {
   projectId: string | null;
   userId: string | null;
+  strictWriteAccess?: boolean;
 }): Promise<string | null> {
   if (!projectId || !userId) {
     return null;
@@ -143,7 +149,34 @@ async function sanitizeProjectIdForUser({
     }),
   ]);
 
-  return membership || ownerTeam ? project.id : null;
+  if (membership || ownerTeam) {
+    return project.id;
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true },
+  });
+
+  const invite = user?.email
+    ? await (prisma as any).project_invites.findFirst({
+        where: {
+          project_id: project.id,
+          email: user.email,
+          status: { in: ["PENDING", "ACCEPTED"] },
+        },
+      })
+    : null;
+
+  if (invite) {
+    if (strictWriteAccess && invite.status === "PENDING") {
+      throw new Error("Project invitation is pending. Accept the invitation to continue.");
+    }
+
+    return project.id;
+  }
+
+  return null;
 }
 
 type MultiRunOriginalSummary = {
@@ -556,6 +589,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
   let projectId: string | null = req.body.projectId || null; // Get projectId from request body
   let teamMembership: any = null;
   let isTeamOwner = false;
+  let isTeamAdmin = false;
 
   // Check if user is authenticated
   if (req.user && req.user.id) {
@@ -579,7 +613,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     projectId = null;
   }
 
-  projectId = await sanitizeProjectIdForUser({ projectId, userId });
+  projectId = await sanitizeProjectIdForUser({ projectId, userId, strictWriteAccess: true });
 
   // If logged in and teamId provided, validate team access and credits
   if (userId && teamId) {
@@ -615,7 +649,8 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
           }
         },
         include: {
-          team: true
+          team: true,
+          role: true,
         }
       });
 
@@ -630,17 +665,32 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
         return;
       }
 
-      // Check if member has remaining credits
-      const remainingCredits = teamMembership.allocated - teamMembership.used;
-      if (remainingCredits <= 0) {
-        res.status(403).json({
-          success: false,
-          error: {
-            code: 'INSUFFICIENT_CREDITS',
-            message: 'You have no remaining credits in this team. Please contact your team owner.',
-          },
-        });
-        return;
+      isTeamAdmin = canUseTeamWallet(teamMembership?.role?.name);
+
+      if (isTeamAdmin) {
+        if (teamMembership.team.wallet <= 0) {
+          res.status(403).json({
+            success: false,
+            error: {
+              code: 'INSUFFICIENT_CREDITS',
+              message: 'Team has insufficient credits. Please purchase more credits.',
+            },
+          });
+          return;
+        }
+      } else {
+        // Check if member has remaining credits
+        const remainingCredits = teamMembership.allocated - teamMembership.used;
+        if (remainingCredits <= 0) {
+          res.status(403).json({
+            success: false,
+            error: {
+              code: 'INSUFFICIENT_CREDITS',
+              message: 'You have no remaining credits in this team. Please contact your team owner.',
+            },
+          });
+          return;
+        }
       }
     }
   } else if (userId && !teamId) {
@@ -699,7 +749,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
   // Demo mode: guests OR logged-in users who haven't purchased credits
   let isDemo = !userId;
   let hasPurchasedCredits = false;
-  const usingTeamCredits = Boolean(userId && teamId && (isTeamOwner || teamMembership));
+  const usingTeamCredits = Boolean(userId && teamId && (isTeamOwner || isTeamAdmin || teamMembership));
 
   // If logged in, check if they have purchased credits or personal credit balance
   if (userId) {
@@ -1002,7 +1052,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     // Deduct credits after successful generation (1 credit per image set)
     if (hasSuccessfulGeneration && userId && teamId) {
       try {
-        if (isTeamOwner) {
+        if (isTeamOwner || isTeamAdmin) {
           // Deduct from team wallet
           await prisma.teams.update({
             where: { id: teamId },
@@ -1147,15 +1197,11 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
   let projectId: string | null = req.body.projectId || null;
   let teamMembership: any = null;
   let isTeamOwner = false;
+  let isTeamAdmin = false;
 
   if (req.user && req.user.id) {
     userId = req.user.id;
-    const verifyRole = await prisma.user_roles.findFirst({
-      where: { user_id: userId },
-      include: { role: true }
-    });
-    const isAdmin = verifyRole?.role.name === "ADMIN";
-    if (!isAdmin && teamId && teamId !== 'undefined' && teamId !== 'null' && teamId.trim() !== '') {
+    if (teamId && teamId !== 'undefined' && teamId !== 'null' && teamId.trim() !== '') {
       const team = await prisma.teams.findFirst({
         where: { id: teamId, owner_id: userId, deleted_at: null }
       });
@@ -1163,9 +1209,10 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
       if (!isTeamOwner) {
         teamMembership = await prisma.team_membership.findUnique({
           where: { team_id_user_id: { team_id: teamId, user_id: userId } },
-          include: { team: true }
+          include: { team: true, role: true }
         });
       }
+      isTeamAdmin = canUseTeamWallet(teamMembership?.role?.name);
     }
   } else {
     teamId = null;
@@ -1175,7 +1222,7 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
   let inputImagePath: string | null = null;
   let isDemo = !userId;
   let hasPurchasedCredits = false;
-  const usingTeamCredits = Boolean(userId && teamId && (isTeamOwner || teamMembership));
+  const usingTeamCredits = Boolean(userId && teamId && (isTeamOwner || isTeamAdmin || teamMembership));
   let unifiedCount = 0;
   let stagingTrace: SingleImageTrace | null = null;
   let sseHeartbeat: NodeJS.Timeout | null = null;
@@ -1850,9 +1897,9 @@ export async function generateMultipleImages(
     projectId = null;
   }
 
-  projectId = await sanitizeProjectIdForUser({ projectId, userId });
+  projectId = await sanitizeProjectIdForUser({ projectId, userId, strictWriteAccess: true });
 
-  projectId = await sanitizeProjectIdForUser({ projectId, userId });
+  projectId = await sanitizeProjectIdForUser({ projectId, userId, strictWriteAccess: true });
 
   let originalsWithUrls: Array<{ file: Express.Multer.File; originalUrl: string }> = [];
   try {
@@ -1876,6 +1923,7 @@ export async function generateMultipleImages(
 
   let teamMembership: any = null;
   let isTeamOwner = false;
+  let isTeamAdmin = false;
 
   if (teamId) {
     const team = await prisma.teams.findFirst({
@@ -1908,6 +1956,7 @@ export async function generateMultipleImages(
         },
         include: {
           team: true,
+          role: true,
         },
       });
 
@@ -1922,16 +1971,31 @@ export async function generateMultipleImages(
         return;
       }
 
-      const remainingCredits = Number(teamMembership.allocated) - Number(teamMembership.used);
-      if (remainingCredits < creditsRequired) {
-        res.status(403).json({
-          success: false,
-          error: {
-            code: "INSUFFICIENT_CREDITS",
-            message: `You have ${remainingCredits} remaining team credits, but staging ${creditsRequired} images requires ${creditsRequired} credits.`,
-          },
-        });
-        return;
+      isTeamAdmin = canUseTeamWallet(teamMembership?.role?.name);
+
+      if (isTeamAdmin) {
+        if (Number(teamMembership.team.wallet) < creditsRequired) {
+          res.status(403).json({
+            success: false,
+            error: {
+              code: "INSUFFICIENT_CREDITS",
+              message: `Team has insufficient credits. Staging ${creditsRequired} images requires ${creditsRequired} credits.`,
+            },
+          });
+          return;
+        }
+      } else {
+        const remainingCredits = Number(teamMembership.allocated) - Number(teamMembership.used);
+        if (remainingCredits < creditsRequired) {
+          res.status(403).json({
+            success: false,
+            error: {
+              code: "INSUFFICIENT_CREDITS",
+              message: `You have ${remainingCredits} remaining team credits, but staging ${creditsRequired} images requires ${creditsRequired} credits.`,
+            },
+          });
+          return;
+        }
       }
     }
   } else {
@@ -1972,7 +2036,7 @@ export async function generateMultipleImages(
     );
 
     if (teamId) {
-      if (isTeamOwner) {
+      if (isTeamOwner || isTeamAdmin) {
         await tx.teams.update({
           where: { id: teamId },
           data: { wallet: { decrement: creditsRequired } },
