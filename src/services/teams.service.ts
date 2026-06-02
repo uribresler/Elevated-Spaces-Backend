@@ -1481,11 +1481,50 @@ export async function removeTeamMemberService({
         where: { id, team_id },
     });
 
-    if (!invite || !invite.accepted_by_user_id) {
+    const membershipFallback = await prisma.team_membership.findFirst({
+        where: {
+            id,
+            team_id,
+            deleted_at: null,
+        },
+        select: {
+            user_id: true,
+        },
+    });
+
+    const targetUserId = invite?.accepted_by_user_id || membershipFallback?.user_id;
+
+    if (!targetUserId) {
         throw new Error("No such member exists in the team");
     }
 
-    if (invite.accepted_by_user_id === userId) {
+    const team = await prisma.teams.findUnique({
+        where: { id: team_id },
+        select: { owner_id: true },
+    });
+
+    if (!team) {
+        throw new Error("Team not found");
+    }
+
+    if (owner_id && owner_id !== team.owner_id) {
+        throw new Error("Only the team owner can remove members");
+    }
+
+    const actingMember = await prisma.team_membership.findFirst({
+        where: {
+            team_id,
+            user_id: userId,
+            deleted_at: null,
+        },
+        include: { role: true },
+    });
+
+    const actingRole = normalizeTeamRoleName(actingMember?.role?.name || "");
+    const isTeamOwner = team.owner_id === userId;
+    const isTeamAdmin = actingRole === "TEAM_ADMIN";
+
+    if (targetUserId === userId) {
         const userCredits = await prisma.team_membership.findFirst({
             where: {
                 team_id,
@@ -1531,7 +1570,7 @@ export async function removeTeamMemberService({
         console.log("TEAM_MEMBER_REMOVED", {
             action: "SELF_REMOVE",
             team_id,
-            invite_id: invite.id,
+            invite_id: invite?.id || id,
             member_user_id: userId,
             removed_by_user_id: userId,
             timestamp: new Date().toISOString(),
@@ -1543,21 +1582,18 @@ export async function removeTeamMemberService({
         };
     }
 
-    const ownerVerify = await prisma.teams.findFirst({
-        where: {
-            id: team_id,
-            owner_id: owner_id || userId,
-        },
-    });
+    if (!isTeamOwner && !isTeamAdmin) {
+        throw new Error("Only the team owner or an admin can remove members");
+    }
 
-    if (!ownerVerify) {
-        throw new Error("Only the team owner can remove members");
+    if (!isTeamOwner && targetUserId === team.owner_id) {
+        throw new Error("Admins cannot remove the team owner");
     }
 
     const memberCredits = await prisma.team_membership.findFirst({
         where: {
             team_id,
-            user_id: invite.accepted_by_user_id,
+            user_id: targetUserId,
             deleted_at: null,
         }
     });
@@ -1584,7 +1620,7 @@ export async function removeTeamMemberService({
     const removedMembership = await prisma.team_membership.updateMany({
         where: {
             team_id,
-            user_id: invite.accepted_by_user_id,
+            user_id: targetUserId,
             deleted_at: null,
         },
         data: {
@@ -1599,9 +1635,9 @@ export async function removeTeamMemberService({
     console.log("TEAM_MEMBER_REMOVED", {
         action: "OWNER_REMOVE",
         team_id,
-        invite_id: invite.id,
-        member_user_id: invite.accepted_by_user_id,
-        removed_by_user_id: ownerVerify.owner_id,
+        invite_id: invite?.id || id,
+        member_user_id: targetUserId,
+        removed_by_user_id: userId,
         timestamp: new Date().toISOString(),
     });
 

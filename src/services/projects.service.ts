@@ -239,6 +239,21 @@ export async function createProjectService({
         if (!hasActivePurchase) {
             throw new Error("Creating projects requires an active paid subscription. Please subscribe to a plan.");
         }
+        // Ensure personal project name uniqueness per user
+        const existingPersonalProject = await prisma.team_project.findFirst({
+            where: {
+                created_by_user_id: userId,
+                team_id: null,
+                name: { equals: normalizedName, mode: "insensitive" },
+            },
+            select: { id: true },
+        });
+
+        if (existingPersonalProject) {
+            const error: any = new Error("A personal project with this name already exists. Please choose a different name.");
+            error.code = "PROJECT_NAME_TAKEN";
+            throw error;
+        }
     }
 
     if (photographerEmail && !sanitizedTeamId) {
