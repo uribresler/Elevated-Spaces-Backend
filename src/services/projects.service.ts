@@ -1,11 +1,29 @@
 import crypto from "crypto";
 import prisma from "../dbConnection";
 import { invitationService } from "./teams.service";
+import { sendEmail } from "../config/mail.config";
 
 const GRACE_PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
 
 function normalizeProjectName(name: string) {
     return name.trim().replace(/\s+/g, " ");
+}
+
+async function getProjectWithAccess({ projectId, userId }: { projectId: string; userId: string }) {
+    const project = await prisma.team_project.findUnique({
+        where: { id: projectId },
+        include: { team: true },
+    });
+
+    if (!project) {
+        throw new Error("Project not found");
+    }
+
+    if (project.created_by_user_id !== userId) {
+        throw new Error("You are not allowed to rename this project");
+    }
+
+    return project;
 }
 
 function isSubscriptionEffectivelyActive(purchase: { status?: string; completed_at: Date | null; cancelledAt: Date | null; autoRenewEnabled: boolean }): boolean {
@@ -62,6 +80,54 @@ async function getTeamRole({ teamId, userId }: { teamId: string; userId: string 
     }
 
     return { team, roleName: membership.role.name };
+}
+
+async function sendProjectCollaborationEmail({
+    photographerId,
+    projectName,
+    invitedByUserId,
+}: {
+    photographerId: string;
+    projectName: string;
+    invitedByUserId: string;
+}) {
+    try {
+        const [photographer, inviter] = await Promise.all([
+            prisma.user.findUnique({ where: { id: photographerId }, select: { email: true, name: true } }),
+            prisma.user.findUnique({ where: { id: invitedByUserId }, select: { name: true, email: true } }),
+        ]);
+
+        if (!photographer?.email) return;
+
+        const inviterName = inviter?.name || inviter?.email || "Someone";
+        const subject = `You've been invited to collaborate on "${projectName}"`;
+        const text = `Hi${photographer.name ? ` ${photographer.name}` : ""},\n\n${inviterName} has invited you to collaborate on the project "${projectName}" as a Photographer.\n\nLog in to Elevated Spaces to view and manage this project.\n\nBest,\nThe Elevated Spaces Team`;
+        const html = `
+<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+  <div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);padding:32px 24px;border-radius:8px 8px 0 0">
+    <h1 style="color:#fff;margin:0;font-size:24px">Project Collaboration Invite</h1>
+  </div>
+  <div style="background:#fff;padding:32px 24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px">
+    <p style="color:#374151;font-size:16px">Hi${photographer.name ? ` ${photographer.name}` : ""},</p>
+    <p style="color:#374151;font-size:16px"><strong>${inviterName}</strong> has invited you to collaborate on the project <strong>"${projectName}"</strong> as a <strong>Photographer</strong>.</p>
+    <p style="color:#374151;font-size:16px">Log in to Elevated Spaces to view and manage this project.</p>
+    <p style="color:#6b7280;font-size:14px;margin-top:32px">Best,<br>The Elevated Spaces Team</p>
+  </div>
+</div>`;
+
+        setImmediate(() => {
+            sendEmail({
+                from: process.env.SENDGRID_VERIFIED_SENDER || "noreply@elevatespacesai.com",
+                senderName: "Elevated Spaces",
+                to: photographer.email!,
+                subject,
+                text,
+                html,
+            }).catch((err) => console.error("Failed to send project collaboration email:", err));
+        });
+    } catch (err) {
+        console.error("Error preparing project collaboration email:", err);
+    }
 }
 
 async function inviteProjectPhotographer({
@@ -314,6 +380,7 @@ export async function createProjectService({
                 role: "PHOTOGRAPHER",
             },
         });
+        sendProjectCollaborationEmail({ photographerId, projectName: project.name, invitedByUserId: userId });
     } else if (invitedPhotographerEmail && team) {
         await inviteProjectPhotographer({
             projectId: project.id,
@@ -331,6 +398,74 @@ export async function createProjectService({
             : "Personal project created successfully",
         project,
         data: { project },
+    };
+}
+
+export async function updateProjectNameService({
+    projectId,
+    userId,
+    name,
+}: {
+    projectId: string;
+    userId: string;
+    name: string;
+}) {
+    const normalizedName = normalizeProjectName(name);
+
+    if (!normalizedName) {
+        throw new Error("Project name is required");
+    }
+
+    const project = await getProjectWithAccess({ projectId, userId });
+
+    if (project.team_id) {
+        const duplicate = await prisma.team_project.findFirst({
+            where: {
+                id: { not: project.id },
+                team_id: project.team_id,
+                name: { equals: normalizedName, mode: "insensitive" },
+            },
+            select: { id: true },
+        });
+
+        if (duplicate) {
+            const error: any = new Error("A project with this name already exists in this team. Please choose a different name.");
+            error.code = "PROJECT_NAME_TAKEN";
+            throw error;
+        }
+    } else {
+        const duplicate = await prisma.team_project.findFirst({
+            where: {
+                id: { not: project.id },
+                created_by_user_id: userId,
+                team_id: null,
+                name: { equals: normalizedName, mode: "insensitive" },
+            },
+            select: { id: true },
+        });
+
+        if (duplicate) {
+            const error: any = new Error("A personal project with this name already exists. Please choose a different name.");
+            error.code = "PROJECT_NAME_TAKEN";
+            throw error;
+        }
+    }
+
+    const updatedProject = await prisma.team_project.update({
+        where: { id: project.id },
+        data: { name: normalizedName },
+        include: {
+            team: true,
+            created_by: true,
+            members: { include: { user: true } },
+        },
+    });
+
+    return {
+        success: true,
+        message: "Project renamed successfully",
+        project: updatedProject,
+        data: { project: updatedProject },
     };
 }
 
@@ -475,6 +610,7 @@ export async function addProjectPhotographerService({
             },
             update: {},
         });
+        sendProjectCollaborationEmail({ photographerId, projectName: project.name, invitedByUserId: userId });
     } else {
         throw new Error("Photographer is required");
     }

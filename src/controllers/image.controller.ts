@@ -1824,6 +1824,7 @@ export async function generateMultipleImages(
   let roomTypesList: string[] = [];
   let stagingStylesList: string[] = [];
   let areaTypesList: string[] = [];
+  let promptsList: string[] = [];
   
   try {
     if (req.body.roomTypes && typeof req.body.roomTypes === 'string') {
@@ -1854,11 +1855,22 @@ export async function generateMultipleImages(
   } catch (e) {
     logger(`Failed to parse areaTypes: ${e}`);
   }
+
+  try {
+    if (req.body.prompts && typeof req.body.prompts === 'string') {
+      promptsList = JSON.parse(req.body.prompts);
+    } else if (Array.isArray(req.body.prompts)) {
+      promptsList = req.body.prompts;
+    }
+  } catch (e) {
+    logger(`Failed to parse prompts: ${e}`);
+  }
   
   // Use per-image settings if provided, otherwise use single values for all
   roomTypesList = roomTypesList.length > 0 ? roomTypesList : Array(req.files?.length || 1).fill(roomType);
   stagingStylesList = stagingStylesList.length > 0 ? stagingStylesList : Array(req.files?.length || 1).fill(stagingStyle);
   areaTypesList = areaTypesList.length > 0 ? areaTypesList : Array(req.files?.length || 1).fill("interior");
+  promptsList = promptsList.length > 0 ? promptsList : Array(req.files?.length || 1).fill(prompt || "");
   
   let teamId: string | null = req.body.teamId || null;
   let projectId: string | null = req.body.projectId || null;
@@ -2018,8 +2030,10 @@ export async function generateMultipleImages(
   // Create DB records and deduct credits atomically
   const images = await prisma.$transaction(async (tx) => {
     const createdImages = await Promise.all(
-      originalsWithUrls.map(({ originalUrl }, index) =>
-        tx.image.create({
+      originalsWithUrls.map(({ originalUrl }, index) => {
+        const imagePrompt = promptsList[index] || prompt || null;
+
+        return tx.image.create({
           data: {
             user_id: userId,
             project_id: projectId,
@@ -2027,12 +2041,12 @@ export async function generateMultipleImages(
             status: image_status.PROCESSING,
             room_type: roomTypesList[index] || roomType,
             staging_style: stagingStylesList[index] || stagingStyle,
-            prompt: prompt || null,
+            prompt: imagePrompt,
             source: "user",
             is_demo: false,
           },
-        })
-      )
+        });
+      })
     );
 
     if (teamId) {
@@ -2079,13 +2093,14 @@ export async function generateMultipleImages(
   // - Credit deduction: 5 images = 5 credits (NOT 15 for variants)
   imageQueue.reset();
   images.forEach((image, index) => {
+    const imagePrompt = promptsList[index] || prompt || "";
     imageQueue.add({
       imageId: image.id,
       originalPath: originalsWithUrls[index].file.path,
       roomType: roomTypesList[index] || roomType,
       stagingStyle: stagingStylesList[index] || stagingStyle,
       areaType: areaTypesList[index] || "interior",
-      customPrompt: prompt,
+      customPrompt: imagePrompt,
     });
   });
   const queueStatus = imageQueue.getStatus();
@@ -2198,7 +2213,7 @@ export async function generateMultipleImages(
                 stagedId,
                 roomType,
                 stagingStyle,
-                prompt: prompt || null,
+                prompt: promptsList[originalIndex] || prompt || null,
                 storage: "supabase",
                 isDemo,
                 demoCount: isDemo ? unifiedCount : undefined,
