@@ -82,6 +82,48 @@ async function getTeamRole({ teamId, userId }: { teamId: string; userId: string 
     return { team, roleName: membership.role.name };
 }
 
+async function sendPersonalProjectInvitationEmail({
+    email,
+    projectName,
+    invitedByUserId,
+}: {
+    email: string;
+    projectName: string;
+    invitedByUserId: string;
+}) {
+    try {
+        const inviter = await prisma.user.findUnique({ where: { id: invitedByUserId }, select: { name: true, email: true } });
+        const inviterName = inviter?.name || inviter?.email || "Someone";
+        const subject = `You've been invited to collaborate on "${projectName}"`;
+        const text = `Hi,\n\n${inviterName} has invited you to collaborate on the project "${projectName}" as a Photographer on Elevated Spaces.\n\nSign up or log in to Elevated Spaces to view and manage this project.\n\nBest,\nThe Elevated Spaces Team`;
+        const html = `
+<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+  <div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);padding:32px 24px;border-radius:8px 8px 0 0">
+    <h1 style="color:#fff;margin:0;font-size:24px">Project Collaboration Invite</h1>
+  </div>
+  <div style="background:#fff;padding:32px 24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px">
+    <p style="color:#374151;font-size:16px">Hi,</p>
+    <p style="color:#374151;font-size:16px"><strong>${inviterName}</strong> has invited you to collaborate on the project <strong>"${projectName}"</strong> as a <strong>Photographer</strong>.</p>
+    <p style="color:#374151;font-size:16px">Sign up or log in to Elevated Spaces to view and manage this project.</p>
+    <p style="color:#6b7280;font-size:14px;margin-top:32px">Best,<br>The Elevated Spaces Team</p>
+  </div>
+</div>`;
+
+        setImmediate(() => {
+            sendEmail({
+                from: process.env.SENDGRID_VERIFIED_SENDER || "noreply@elevatespacesai.com",
+                senderName: "Elevated Spaces",
+                to: email,
+                subject,
+                text,
+                html,
+            }).catch((err) => console.error("Failed to send personal project invitation email:", err));
+        });
+    } catch (err) {
+        console.error("Error preparing personal project invitation email:", err);
+    }
+}
+
 async function sendProjectCollaborationEmail({
     photographerId,
     projectName,
@@ -566,8 +608,53 @@ export async function addProjectPhotographerService({
         throw new Error("Project not found");
     }
 
+    // Personal project path
     if (!project.team_id) {
-        throw new Error("Project must belong to a team to add photographers");
+        if (project.created_by_user_id !== userId) {
+            throw new Error("Only the project creator can add photographers to a personal project");
+        }
+        if (!photographerEmail) {
+            throw new Error("Photographer email is required for personal projects");
+        }
+
+        const normalizedEmail = photographerEmail.trim().toLowerCase();
+        const existingUser = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+
+        if (existingUser && existingUser.id === userId) {
+            throw new Error("You cannot add yourself as a photographer on your own project");
+        }
+
+        if (existingUser) {
+            const member = await prisma.team_project_member.upsert({
+                where: { project_id_user_id: { project_id: project.id, user_id: existingUser.id } },
+                create: { project_id: project.id, user_id: existingUser.id, role: "PHOTOGRAPHER" },
+                update: {},
+                include: { user: true },
+            });
+            sendProjectCollaborationEmail({ photographerId: existingUser.id, projectName: project.name, invitedByUserId: userId });
+            return { success: true, message: "Photographer added to project", member, projectInvite: null };
+        } else {
+            const projectInvite = await prisma.project_invites.upsert({
+                where: { project_id_email: { project_id: project.id, email: normalizedEmail } },
+                create: {
+                    project_id: project.id,
+                    team_id: null,
+                    email: normalizedEmail,
+                    invited_by_user_id: userId,
+                    token: crypto.randomUUID(),
+                    status: "PENDING",
+                },
+                update: {
+                    invited_by_user_id: userId,
+                    status: "PENDING",
+                    accepted_at: null,
+                    accepted_by_user_id: null,
+                    token: crypto.randomUUID(),
+                },
+            });
+            sendPersonalProjectInvitationEmail({ email: normalizedEmail, projectName: project.name, invitedByUserId: userId });
+            return { success: true, message: "Photographer invitation sent", member: null, projectInvite };
+        }
     }
 
     const { team } = await getTeamRole({ teamId: project.team_id, userId });
@@ -641,8 +728,23 @@ export async function deleteProjectPhotographerService({
         throw new Error("Project not found");
     }
 
+    // Personal project path
     if (!project.team_id) {
-        throw new Error("Project must belong to a team to remove photographers");
+        if (project.created_by_user_id !== userId) {
+            throw new Error("Only the project creator can remove photographers from a personal project");
+        }
+
+        const membership = await prisma.team_project_member.findUnique({
+            where: { project_id_user_id: { project_id: project.id, user_id: photographerId } },
+        });
+
+        if (!membership) {
+            throw new Error("Photographer is not assigned to this project");
+        }
+
+        await prisma.team_project_member.delete({ where: { id: membership.id } });
+
+        return { success: true, message: "Photographer removed from project" };
     }
 
     const { team } = await getTeamRole({ teamId: project.team_id, userId });

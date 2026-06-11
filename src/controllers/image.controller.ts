@@ -1691,9 +1691,9 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
     }
 
     // Deduct 1 credit for the primary image
-    if (userId && teamId) {
+    if (userId && usingTeamCredits && teamId) {
       try {
-        if (isTeamOwner) {
+        if (isTeamOwner || isTeamAdmin) {
           await prisma.teams.update({
             where: { id: teamId },
             data: { wallet: { decrement: 1 } }
@@ -1713,7 +1713,17 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
           });
         }
       } catch (err) {
-        logger(`[DUAL_MODEL] Failed to deduct credits: ${err}`);
+        logger(`[DUAL_MODEL] Failed to deduct team credits: ${err}`);
+      }
+    } else if (userId && !isDemo) {
+      // Deduct from personal credits
+      try {
+        await prisma.user_credit_balance.update({
+          where: { user_id: userId },
+          data: { balance: { decrement: 1 } }
+        });
+      } catch (err) {
+        logger(`[DUAL_MODEL] Failed to deduct personal credits: ${err}`);
       }
     }
   } catch (err) {
