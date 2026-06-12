@@ -42,13 +42,17 @@ async function cleanupExpiredInvitations() {
  * Starts the cron job that runs cleanup every 24 hours
  */
 export function startCleanupCron() {
-    // Run immediately on startup
-    cleanupExpiredInvitations();
+    // Run immediately on startup (non-blocking, with error handling)
+    cleanupExpiredInvitations().catch((error) => {
+        console.warn("[CRON] Initial cleanup run failed (will retry on next interval):", error instanceof Error ? error.message : error);
+    });
 
     // Run every 24 hours (24 * 60 * 60 * 1000 milliseconds)
     const CRON_INTERVAL = 24 * 60 * 60 * 1000;
     const intervalId = setInterval(() => {
-        cleanupExpiredInvitations();
+        cleanupExpiredInvitations().catch((error) => {
+            console.error("[CRON] Cleanup job failed:", error instanceof Error ? error.message : error);
+        });
     }, CRON_INTERVAL);
 
     console.log("[CRON] Expired invitations cleanup job started (runs every 24 hours)");

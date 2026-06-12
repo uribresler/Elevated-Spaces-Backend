@@ -13,6 +13,8 @@ model user {
   name                  String?                @map("name")
   created_at            DateTime               @default(now()) @map("created_at")
   updated_at            DateTime               @updatedAt @map("updated_at")
+  ai_generation_consent_first_at DateTime?      @map("ai_generation_consent_first_at")
+  ai_generation_consent_last_at  DateTime?      @map("ai_generation_consent_last_at")
   stripe_customer_id    String?                @map("stripe_customer_id")
   deleted_at            DateTime?              @map("deleted_at")
   auth_provider         auth_provider          @default(LOCAL) @map("auth_provider")
@@ -47,7 +49,10 @@ model user {
   direct_conversations_as_b direct_conversation[] @relation("ConversationUserB")
   sent_direct_messages      direct_message[]      @relation("DirectMessageSender")
   received_direct_messages  direct_message[]      @relation("DirectMessageReceiver")
+  project_invites_sent      project_invites[]     @relation("ProjectInvitesSent")
+  project_invites_accepted   project_invites[]     @relation("ProjectInvitesAccepted")
 
+  @@index([ai_generation_consent_last_at])
   @@map("user")
 }
 
@@ -66,6 +71,7 @@ model teams {
   purchases   team_purchase[]
   usage_log   team_usage[]
   teamInvites team_invites[]
+  projectInvites project_invites[]
   projects    team_project[]
 
   @@map("teams")
@@ -80,6 +86,11 @@ model team_membership {
   allocated    Int          @default(0) @map("allocated")
   // Credits used by this member (sum of team_usage for this member)
   used         Int          @default(0) @map("used")
+  is_paid_extra_seat Boolean @default(false) @map("is_paid_extra_seat")
+  seat_auto_renew Boolean @default(false) @map("seat_auto_renew")
+  seat_last_paid_at DateTime? @map("seat_last_paid_at")
+  seat_expires_at DateTime? @map("seat_expires_at")
+  seat_payment_product_key String? @map("seat_payment_product_key")
   joined_at    DateTime     @default(now()) @map("joined_at")
   updated_at   DateTime     @updatedAt @map("updated_at")
   deleted_at   DateTime?    @map("deleted_at")
@@ -109,18 +120,20 @@ model team_usage {
 
 // When owner purchases credits for team
 model team_purchase {
-  id                String    @id @default(uuid()) @map("id")
-  team_id           String    @map("team_id")
-  amount            Int       @map("amount")
-  price_usd         Float     @map("price_usd")
-  status            String    @default("pending") @map("status")
-  stripe_session_id String?   @map("stripe_session_id")
-  stripe_invoice_id String?   @map("stripe_invoice_id")
-  created_at        DateTime  @default(now()) @map("created_at")
-  completed_at      DateTime? @map("completed_at")
-  team              teams     @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  id                    String    @id @default(uuid()) @map("id")
+  team_id               String    @map("team_id")
+  amount                Int       @map("amount")
+  price_usd             Float     @map("price_usd")
+  status                String    @default("pending") @map("status")
+  stripe_session_id     String?   @map("stripe_session_id")
+  stripe_subscription_id String?  @map("stripe_subscription_id")
+  stripe_invoice_id     String?   @map("stripe_invoice_id")
+  created_at            DateTime  @default(now()) @map("created_at")
+  completed_at          DateTime? @map("completed_at")
+  team                  teams     @relation(fields: [team_id], references: [id], onDelete: Cascade)
 
   @@index([team_id, status])
+  @@index([stripe_subscription_id])
   @@map("team_purchase")
 }
 
@@ -154,6 +167,9 @@ model user_credit_purchase {
   // Cancellation fields
   cancelledAt          DateTime?      @map("cancelled_at")
   cancellationReason   String?        @map("cancellation_reason")
+  // Reminder and credit expiry fields
+  paymentReminderSentAt DateTime?     @map("payment_reminder_sent_at")
+  creditExpiresAt      DateTime?      @map("credit_expires_at")
   user                 user           @relation("CreditPurchases", fields: [user_id], references: [id])
   package              credit_package @relation("UserCreditPurchases", fields: [package_id], references: [id])
   invoices             invoice[]
@@ -213,6 +229,7 @@ model team_project {
   team               teams?                 @relation(fields: [team_id], references: [id], onDelete: Cascade)
   created_by         user                   @relation("ProjectCreator", fields: [created_by_user_id], references: [id])
   members            team_project_member[]
+  projectInvites     project_invites[]
   images             image[]                @relation("ProjectImages")
 
   @@index([team_id, created_by_user_id])
@@ -230,6 +247,28 @@ model team_project_member {
 
   @@unique([project_id, user_id])
   @@map("team_project_member")
+}
+
+model project_invites {
+  id                  String                @id @default(uuid()) @map("id")
+  project_id          String                @map("project_id")
+  team_id             String?               @map("team_id")
+  email               String                @map("email")
+  invited_by_user_id  String                @map("invited_by_user_id")
+  token               String                @unique @map("token")
+  status              project_invite_status @default(PENDING) @map("status")
+  invited_at          DateTime              @default(now()) @map("invited_at")
+  accepted_at         DateTime?             @map("accepted_at")
+  accepted_by_user_id String?               @map("accepted_by_user_id")
+  created_at          DateTime              @default(now()) @map("created_at")
+  updated_at          DateTime              @updatedAt @map("updated_at")
+  project             team_project          @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  team                teams?                @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  invited_by          user                  @relation("ProjectInvitesSent", fields: [invited_by_user_id], references: [id])
+  accepted_by         user?                 @relation("ProjectInvitesAccepted", fields: [accepted_by_user_id], references: [id])
+
+  @@unique([project_id, email])
+  @@map("project_invites")
 }
 
 model photographer_profile {
@@ -270,7 +309,7 @@ model photographer_profile {
   created_at                  DateTime  @default(now()) @map("created_at")
   updated_at                  DateTime  @updatedAt @map("updated_at")
   bookings                    booking[] @relation("PhotographerBookings")
-  user                        user      @relation(fields: [user_id], references: [id])
+  user                        user      @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@map("photographer_profile")
 }
@@ -425,6 +464,17 @@ model webhook_event {
   @@map("webhook_event")
 }
 
+model gemini_api_key_state {
+  id                     String    @id @default(uuid()) @map("id")
+  key_name               String    @unique @map("key_name")
+  blocked_until          DateTime? @map("blocked_until")
+  last_quota_exceeded_at DateTime? @map("last_quota_exceeded_at")
+  created_at             DateTime  @default(now()) @map("created_at")
+  updated_at             DateTime  @updatedAt @map("updated_at")
+
+  @@map("gemini_api_key_state")
+}
+
 model booking {
   id               String               @id @default(uuid()) @map("id")
   user_id          String               @map("user_id")
@@ -477,6 +527,28 @@ model admin_content {
   created_at DateTime @default(now()) @map("created_at")
 
   @@map("admin_content")
+}
+
+model resource {
+  id             String   @id @default(uuid()) @map("id")
+  slug           String   @unique @map("slug")
+  title          String   @map("title")
+  content_html   String?  @map("content_html")
+
+  pdf            Bytes?   @map("pdf")
+  pdf_filename   String?  @map("pdf_filename")
+  pdf_mime       String?  @map("pdf_mime")
+
+  video          Bytes?   @map("video")
+  video_filename String?  @map("video_filename")
+  video_mime     String?  @map("video_mime")
+  youtube_url    String?  @map("youtube_url")
+
+  updated_by     String?  @map("updated_by")
+  created_at     DateTime @default(now()) @map("created_at")
+  updated_at     DateTime @updatedAt @map("updated_at")
+
+  @@map("resource")
 }
 
 model roles {
@@ -554,6 +626,7 @@ model invoice {
   amount            Float                  @map("amount")
   status            String                 @default("generated") @map("status")
   html_content      String?                @map("html_content")
+  stripe_invoice_pdf_url String?           @map("stripe_invoice_pdf_url")
   metadata          Json?                  @map("metadata")
   created_at        DateTime               @default(now()) @map("created_at")
   updated_at        DateTime               @updatedAt @map("updated_at")
@@ -605,6 +678,15 @@ enum project_member_role {
   @@map("project_member_role")
 }
 
+enum project_invite_status {
+  PENDING
+  ACCEPTED
+  CANCELLED
+  EXPIRED
+
+  @@map("project_invite_status")
+}
+
 enum invite_status {
   PENDING
   ACCEPTED
@@ -624,3 +706,4 @@ enum photographer_application_status {
 
   @@map("photographer_application_status")
 }
+

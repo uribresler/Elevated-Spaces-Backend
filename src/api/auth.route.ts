@@ -8,6 +8,7 @@ import {
   oauthCallback,
   oauthFailure,
   getAvailableProviders,
+  getCurrentUser,
   updateProfileImage,
   deleteProfileImage,
 } from "../controllers/auth.controller";
@@ -79,6 +80,24 @@ const getCookieFromHeader = (rawCookieHeader: unknown, name: string): string | n
 
 router.post("/signup", signup);
 router.post("/login", login);
+router.post("/forgot", async (req, res) => {
+  // forward to controller if implemented
+  try {
+    const { forgotPassword } = await import("../controllers/auth.controller");
+    return forgotPassword(req, res);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: "Not implemented" });
+  }
+});
+router.post("/reset", async (req, res) => {
+  try {
+    const { resetPassword } = await import("../controllers/auth.controller");
+    return resetPassword(req, res);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: "Not implemented" });
+  }
+});
+router.get("/me", requireAuth, getCurrentUser);
 router.patch("/profile-image", requireAuth, uploadImage, updateProfileImage);
 router.delete("/profile-image", requireAuth, deleteProfileImage);
 

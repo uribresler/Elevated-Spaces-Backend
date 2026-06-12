@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { acceptInvitation, createTeam, getMyTeams, getMyTeamsWithCredits, getTeamsByUserId, reinviteInvitation, removeMemberById, sendInvitation, updateTeamMemberRole, leaveTeam, transferCreditsBeforeLeaving, completeLeaveTeam, deleteTeam, cancelInvitation, updateTeamName } from "../controllers/team.controller";
+import { acceptInvitation, createTeam, getMyTeams, getMyTeamsWithCredits, getTeamsByUserId, reinviteInvitation, removeMemberById, sendInvitation, updateTeamMemberRole, leaveTeam, transferCreditsBeforeLeaving, completeLeaveTeam, deleteTeam, cancelInvitation, updateTeamName, getTeamEligibility } from "../controllers/team.controller";
 import { optionalAuth, requireAuth } from "../middlewares/auth";
 
 const router = Router();
@@ -19,5 +19,6 @@ router.post('/transfer-credits-before-leave', requireAuth, transferCreditsBefore
 router.post('/complete-leave', requireAuth, completeLeaveTeam)
 router.post('/delete', requireAuth, deleteTeam)
 router.get('/my/:id', requireAuth, getTeamsByUserId)
+router.get('/eligibility/:teamId', requireAuth, getTeamEligibility)
 
 export default router;

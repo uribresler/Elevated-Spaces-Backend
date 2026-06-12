@@ -1,3 +1,8 @@
+import { Request, Response } from "express";
+import prisma from "../dbConnection";
+import { allocateCreditsToUsers, TransferPersonalCreditsPromptError } from "../services/teams.credits.service";
+
+
 // Transfer credits from personal wallet to team wallet (owner only)
 export async function transferPersonalCreditsToTeam(req: Request, res: Response) {
     try {
@@ -54,9 +59,6 @@ export async function transferPersonalCreditsToTeam(req: Request, res: Response)
         });
     }
 }
-import { Request, Response } from "express";
-import prisma from "../dbConnection";
-import { allocateCreditsToUsers } from "../services/teams.credits.service";
 
 export async function allocateCreditToMember(req: Request, res: Response) {
     try {
@@ -77,6 +79,14 @@ export async function allocateCreditToMember(req: Request, res: Response) {
     } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to allocate credits";
         console.error("ALLOCATE_CREDITS_ERROR", error);
+        if (error instanceof TransferPersonalCreditsPromptError) {
+            return res.status(error.statusCode).json({
+                success: false,
+                code: error.code,
+                message: error.message,
+                data: error.payload,
+            });
+        }
         return res.status(400).json({
             success: false,
             message,

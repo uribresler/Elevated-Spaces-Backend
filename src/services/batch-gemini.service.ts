@@ -81,7 +81,7 @@ export class BatchGeminiService {
 
     if (canUseInline) {
       const inlineBatchJob = await this.client.batches.create({
-        model: "gemini-3-pro-image-preview",
+        model: "gemini-3.1-flash-image-preview",
         src: inlineRequests,
         config: {
           display_name: `staging-inline-${Date.now()}`,
@@ -117,7 +117,7 @@ export class BatchGeminiService {
       } as any);
 
       const batchJob = await this.client.batches.create({
-        model: "gemini-3-pro-image-preview",
+        model: "gemini-3.1-flash-image-preview",
         src: uploadedFile.name,
         config: {
           display_name: `staging-${Date.now()}`,

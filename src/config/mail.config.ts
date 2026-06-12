@@ -30,9 +30,15 @@ export interface EmailProps {
     html?: string; // optional HTML content
     replyTo?: string;
     senderEmail?: string;
+    attachments?: Array<{
+        filename: string;
+        content: string;
+        type?: string;
+        disposition?: string;
+    }>;
 }
 
-// Send email function with spam prevention
+// Send email function with spam preventions
 export const sendEmail = async ({
     from,
     senderName,
@@ -42,9 +48,10 @@ export const sendEmail = async ({
     html,
     replyTo,
     senderEmail,
+    attachments,
 }: EmailProps) => {
     // SendGrid requires verified sender email
-    const verifiedSender = process.env.SENDGRID_VERIFIED_SENDER || "saifullahahmed380@gmail.com";
+    const verifiedSender = process.env.SENDGRID_VERIFIED_SENDER || "noreply@elevatespacesai.com";
     
     const msg = {
         to,
@@ -56,6 +63,7 @@ export const sendEmail = async ({
         subject,
         text,
         html,
+        attachments,
         // Anti-spam headers
         headers: {
             'X-Entity-Ref-ID': `invite-${Date.now()}`,

@@ -9,6 +9,8 @@ import {
   FALLBACK_VARIANT_COUNT,
 } from "../config/fallback.config";
 
+const FALLBACK_OPERATION_TIMEOUT_MS = Number(process.env.FALLBACK_OPERATION_TIMEOUT_MS || "15000");
+
 type VariantReadyPayload = {
   index: number;
   variantId: string;
@@ -29,6 +31,24 @@ class FallbackImageService {
       throw new Error("GEMINI_API_KEY is not set in environment variables");
     }
     this.client = new GoogleGenAI({ apiKey });
+  }
+
+  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+    let timeoutHandle: NodeJS.Timeout | null = null;
+
+    const timeoutPromise = new Promise<T>((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
   }
 
   private getMimeType(filePath: string): string {
@@ -84,31 +104,35 @@ class FallbackImageService {
   ): Promise<Buffer | null> {
     for (let attempt = 1; attempt <= FALLBACK_MAX_RETRIES; attempt++) {
       try {
-        const response = await this.client.models.generateContent({
-          model,
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  inlineData: {
-                    mimeType,
-                    data: baseImageBuffer.toString("base64"),
+        const timedResponse = await this.withTimeout(
+          this.client.models.generateContent({
+            model,
+            contents: [
+              {
+                role: "user",
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType,
+                      data: baseImageBuffer.toString("base64"),
+                    },
                   },
-                },
-                {
-                  text: prompt,
-                },
-              ],
+                  {
+                    text: prompt,
+                  },
+                ],
+              },
+            ],
+            config: {
+              responseModalities: ["IMAGE"],
+              temperature: FALLBACK_TEMPERATURE,
             },
-          ],
-          config: {
-            responseModalities: ["IMAGE"],
-            temperature: FALLBACK_TEMPERATURE,
-          },
-        } as any);
+          } as any),
+          FALLBACK_OPERATION_TIMEOUT_MS,
+          `fallback ${model} image generation`
+        );
 
-        const extracted = this.extractFirstImageBuffer(response);
+        const extracted = this.extractFirstImageBuffer(timedResponse);
         if (extracted) {
           return extracted;
         }
@@ -129,11 +153,16 @@ class FallbackImageService {
     baseStyle: string,
     userPrompt?: string,
     traceHook?: TraceHook,
-    onVariantReady?: VariantReadyHook
+    onVariantReady?: VariantReadyHook,
+    options?: {
+      maxDurationMs?: number;
+    }
   ): Promise<Buffer[]> {
     const variantCount = Math.max(1, FALLBACK_VARIANT_COUNT);
     const mimeType = this.getMimeType(inputImagePath);
     const results: Buffer[] = [];
+    const startedAt = Date.now();
+    const maxDurationMs = options?.maxDurationMs;
 
     await traceHook?.("phase2.fallback.start", {
       model: FALLBACK_PRIMARY_MODEL,
@@ -142,6 +171,15 @@ class FallbackImageService {
     });
 
     for (let index = 0; index < variantCount; index++) {
+      if (maxDurationMs && Date.now() - startedAt >= maxDurationMs) {
+        await traceHook?.("phase2.fallback.timeout_budget_reached", {
+          generated: results.length,
+          requested: variantCount,
+          maxDurationMs,
+        });
+        break;
+      }
+
       const variantNumber = index + 1;
       const variantId = `variant-${variantNumber}-${Date.now()}`;
       const prompt = this.buildVariantPrompt(roomType, baseStyle, variantNumber, variantCount, userPrompt);

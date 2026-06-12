@@ -1,8 +1,7 @@
 import { Request, Response } from "express";
 import { createTeamSchema } from "../utils/teamSchema";
-import { acceptInvitationService, createTeamService, invitationService, reinviteService, removeTeamMemberService, updateTeamMemberRoleService, leaveTeamService, transferCreditsBeforeLeavingService, completeLeaveTeamService, deleteTeamService, cancelInvitationService } from "../services/teams.service";
+import { acceptInvitationService, createTeamService, invitationService, reinviteService, removeTeamMemberService, updateTeamMemberRoleService, leaveTeamService, transferCreditsBeforeLeavingService, completeLeaveTeamService, deleteTeamService, cancelInvitationService, enforceTeamSeatCapacityForExistingMembers, getTeamEligibilityService } from "../services/teams.service";
 import prisma from "../dbConnection";
-import { success } from "zod";
 
 export async function createTeam(req: Request, res: Response) {
     try {
@@ -33,8 +32,20 @@ export async function createTeam(req: Request, res: Response) {
             return res.status(404).json({ message: error.message });
         }
 
+        // Surface plan/seat related errors to frontend with suitable status codes
+        const isPlanRequired = error.code === "TEAM_PLAN_REQUIRED";
+        const isSeatLimit = error.code === "TEAM_SEAT_LIMIT_REACHED";
+        if (isPlanRequired || isSeatLimit) {
+            console.warn("Team create blocked:", { code: error.code, message: error.message });
+            return res.status(409).json({
+                message: error.message || "Team creation not allowed",
+                ...(error.code ? { code: error.code } : {}),
+                ...(error.details ? { details: error.details } : {}),
+            });
+        }
+
         console.error(error);
-        return res.status(500).json({ message: "Something went wrong" });
+        return res.status(500).json({ message: error.message || "Something went wrong" });
     }
 }
 
@@ -108,8 +119,12 @@ export async function sendInvitation(req: Request, res: Response) {
         });
 
         // Return actual error message to frontend
-        return res.status(500).json({
-            message: error.message || "Failed to send invitation"
+        const isSeatLimit = error.code === "TEAM_SEAT_LIMIT_REACHED";
+        const isPlanRequired = error.code === "TEAM_PLAN_REQUIRED";
+        return res.status(isSeatLimit || isPlanRequired ? 409 : 500).json({
+            message: error.message || "Failed to send invitation",
+            ...(error.code ? { code: error.code } : {}),
+            ...(error.details ? { details: error.details } : {}),
         });
     }
 }
@@ -145,20 +160,78 @@ export async function getMyTeams(req: Request, res: Response) {
     try {
         const userId = req.user?.id;
 
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized",
+            });
+        }
+
         const teams = await prisma.teams.findMany({
             where: {
                 owner_id: userId,
                 deleted_at: null,
             },
             include: {
-                teamInvites: true,
-                owner: true,
+                teamInvites: {
+                    where: {
+                        OR: [
+                            { status: "PENDING" },
+                            { status: "FAILED" },
+                            { status: "ACCEPTED" },
+                        ],
+                    },
+                    select: {
+                        id: true,
+                        email: true,
+                        team_id: true,
+                        team_role_id: true,
+                        status: true,
+                        invited_by_user_id: true,
+                        credit_limit: true,
+                        token: true,
+                        invited_at: true,
+                        expires_at: true,
+                        accepted_at: true,
+                        accepted_by_user_id: true,
+                        created_at: true,
+                        updated_at: true,
+                        role: {
+                            select: {
+                                id: true,
+                                name: true,
+                                description: true,
+                            },
+                        },
+                    },
+                },
+                owner: {
+                    select: {
+                        id: true,
+                        name: true,
+                        email: true,
+                        avatar_url: true,
+                        created_at: true,
+                    },
+                },
                 members: {
                     where: { deleted_at: null },
-                    include: { role: true, user: true }
+                    include: {
+                        role: { select: { id: true, name: true, description: true } },
+                        user: { select: { id: true, name: true, email: true, avatar_url: true, created_at: true } },
+                    }
                 },
-                purchases: true,
-                usage_log: true
+                purchases: {
+                    where: { status: "completed" },
+                    select: {
+                        id: true,
+                        team_id: true,
+                        amount: true,
+                        price_usd: true,
+                        status: true,
+                        completed_at: true,
+                    },
+                },
             }
         })
         if (!teams) {
@@ -180,6 +253,14 @@ export async function getMyTeams(req: Request, res: Response) {
             return {
                 ...team,
                 teamInvites: filteredInvites,
+                members: team.members.map((member) => ({
+                    ...member,
+                    is_paid_extra_seat: Boolean((member as any).is_paid_extra_seat),
+                    seat_auto_renew: Boolean((member as any).seat_auto_renew),
+                    seat_last_paid_at: (member as any).seat_last_paid_at || null,
+                    seat_expires_at: (member as any).seat_expires_at || null,
+                    seat_payment_product_key: (member as any).seat_payment_product_key || null,
+                })),
             };
         });
 
@@ -204,7 +285,6 @@ export async function getMyTeamsWithCredits(req: Request, res: Response) {
             });
         }
 
-        // Get teams where user is owner
         const ownedTeams = await prisma.teams.findMany({
             where: {
                 owner_id: userId,
@@ -228,6 +308,7 @@ export async function getMyTeamsWithCredits(req: Request, res: Response) {
                     select: {
                         id: true,
                         name: true,
+                        wallet: true,
                         deleted_at: true,
                     }
                 },
@@ -252,14 +333,22 @@ export async function getMyTeamsWithCredits(req: Request, res: Response) {
         // Format member teams (exclude deleted teams)
         const memberTeamsFormatted = memberTeams
             .filter(membership => !membership.team.deleted_at)
-            .map(membership => ({
-                id: membership.team.id,
-                name: membership.team.name,
-                role: membership.role.name,
-                allocated: membership.allocated,
-                used: membership.used,
-                remaining: membership.allocated - membership.used,
-            }));
+            .map(membership => {
+                const roleName = String(membership.role?.name || "").toUpperCase();
+                const canUseTeamWallet = ["TEAM_OWNER", "TEAM_ADMIN", "ADMIN"].includes(roleName);
+                const walletBalance = Number(membership.team?.wallet || 0);
+                const allocatedBalance = canUseTeamWallet ? walletBalance : Number(membership.allocated || 0);
+                const usedBalance = canUseTeamWallet ? 0 : Number(membership.used || 0);
+
+                return {
+                    id: membership.team.id,
+                    name: membership.team.name,
+                    role: membership.role.name,
+                    allocated: allocatedBalance,
+                    used: usedBalance,
+                    remaining: Math.max(allocatedBalance - usedBalance, 0),
+                };
+            });
 
         // Combine and remove duplicates (user can't be both owner and member of same team)
         const allTeams = [...ownedTeamsFormatted, ...memberTeamsFormatted];
@@ -333,8 +422,12 @@ export async function reinviteInvitation(req: Request, res: Response) {
         });
 
         // Return actual error message to frontend
-        return res.status(500).json({
-            message: error.message || "Failed to re-send invitation"
+        const isSeatLimit = error.code === "TEAM_SEAT_LIMIT_REACHED";
+        const isPlanRequired = error.code === "TEAM_PLAN_REQUIRED";
+        return res.status(isSeatLimit || isPlanRequired ? 409 : 500).json({
+            message: error.message || "Failed to re-send invitation",
+            ...(error.code ? { code: error.code } : {}),
+            ...(error.details ? { details: error.details } : {}),
         });
     }
 }
@@ -359,14 +452,47 @@ export async function getTeamsByUserId(req: Request, res: Response) {
             include: {
                 team: {
                     include: {
-                        teamInvites: true,
-                        owner: true,
+                        teamInvites: {
+                            select: {
+                                id: true,
+                                email: true,
+                                team_id: true,
+                                team_role_id: true,
+                                status: true,
+                                invited_by_user_id: true,
+                                credit_limit: true,
+                                token: true,
+                                invited_at: true,
+                                expires_at: true,
+                                accepted_at: true,
+                                accepted_by_user_id: true,
+                                created_at: true,
+                                updated_at: true,
+                                role: {
+                                    select: {
+                                        id: true,
+                                        name: true,
+                                        description: true,
+                                    },
+                                },
+                            },
+                        },
+                        owner: {
+                            select: {
+                                id: true,
+                                name: true,
+                                email: true,
+                                avatar_url: true,
+                                created_at: true,
+                            },
+                        },
                         members: {
                             where: { deleted_at: null },
-                            include: { role: true, user: true }
+                            include: {
+                                role: { select: { id: true, name: true, description: true } },
+                                user: { select: { id: true, name: true, email: true, avatar_url: true, created_at: true } },
+                            }
                         },
-                        purchases: true,
-                        usage_log: true,
                     }
                 }
             }
@@ -392,6 +518,14 @@ export async function getTeamsByUserId(req: Request, res: Response) {
             return {
                 ...team,
                 teamInvites: filteredInvites,
+                members: team.members.map((member) => ({
+                    ...member,
+                    is_paid_extra_seat: Boolean((member as any).is_paid_extra_seat),
+                    seat_auto_renew: Boolean((member as any).seat_auto_renew),
+                    seat_last_paid_at: (member as any).seat_last_paid_at || null,
+                    seat_expires_at: (member as any).seat_expires_at || null,
+                    seat_payment_product_key: (member as any).seat_payment_product_key || null,
+                })),
             };
         });
 
@@ -519,5 +653,23 @@ export async function deleteTeam(req: Request, res: Response) {
     } catch (error: any) {
         console.error(error);
         return res.status(400).json({ message: error.message || "Failed to delete team" });
+    }
+}
+
+export async function getTeamEligibility(req: Request, res: Response) {
+    try {
+        const teamId = req.params.teamId;
+        const userId = req.user?.id;
+        if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
+        if (!teamId) return res.status(400).json({ success: false, message: 'teamId is required' });
+
+        const result = await getTeamEligibilityService({ teamId, userId });
+        return res.status(200).json(result);
+    } catch (error: any) {
+        console.error('GET_TEAM_ELIGIBILITY_ERROR:', error);
+        if (error?.code === 'TEAM_NOT_FOUND') {
+            return res.status(404).json({ success: false, code: error.code, message: error?.message || 'Team not found' });
+        }
+        return res.status(500).json({ success: false, message: error?.message || 'Failed to get eligibility' });
     }
 }

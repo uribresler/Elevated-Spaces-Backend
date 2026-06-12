@@ -1,5 +1,22 @@
 import prisma from "../dbConnection";
 
+export class TransferPersonalCreditsPromptError extends Error {
+    statusCode = 409;
+    code = "TRANSFER_PERSONAL_CREDITS_TO_TEAM";
+    payload: {
+        teamId: string;
+        teamName: string;
+        personalCreditsBalance: number;
+        teamWalletBalance: number;
+    };
+
+    constructor(message: string, payload: TransferPersonalCreditsPromptError["payload"]) {
+        super(message);
+        this.name = "TransferPersonalCreditsPromptError";
+        this.payload = payload;
+    }
+}
+
 export async function allocateCreditsToUsers({
     team_id,
     userId,
@@ -69,12 +86,29 @@ export async function allocateCreditsToUsers({
             });
         }
 
-        if (allocatorRoleName === "TEAM_AGENT" && activeMembership.role.name !== "TEAM_PHOTOGRAPHER") {
+        if (allocatorRoleName === "TEAM_MEMBER" && activeMembership.role.name !== "TEAM_PHOTOGRAPHER") {
             throw new Error("Agents can only allocate credits to photographers");
         }
 
         if (allocatorRoleName === "TEAM_OWNER" || allocatorRoleName === "TEAM_ADMIN") {
             if (Number(team.wallet) - Number(credits) < 0) {
+                const personalCredits = await prisma.user_credit_balance.findUnique({
+                    where: { user_id: userId },
+                });
+
+                const personalCreditsBalance = Number(personalCredits?.balance || 0);
+                if (team.owner_id === userId && personalCreditsBalance > 0) {
+                    throw new TransferPersonalCreditsPromptError(
+                        "Insufficient Credits in the team. You have unused personal credits. Transfer them into this team wallet before allocating credits to a member.",
+                        {
+                            teamId: team.id,
+                            teamName: team.name,
+                            personalCreditsBalance,
+                            teamWalletBalance: Number(team.wallet || 0),
+                        }
+                    );
+                }
+
                 throw new Error("Low credits, please buy more credits");
             }
 
@@ -100,7 +134,7 @@ export async function allocateCreditsToUsers({
             }
         }
 
-        if (allocatorRoleName === "TEAM_AGENT") {
+        if (allocatorRoleName === "TEAM_MEMBER") {
             const allocatorMembership = await prisma.team_membership.findUnique({
                 where: { team_id_user_id: { team_id, user_id: userId } },
             });

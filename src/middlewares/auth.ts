@@ -23,12 +23,8 @@ export function optionalAuth(
                 email: payload.email,
                 role: payload.role,
             };
-            console.log("[optionalAuth] Token verified, user attached:", req.user);
-        } catch (e) {
-            console.log("[optionalAuth] Invalid token, treating as guest.", e);
+        } catch {
         }
-    } else {
-        console.log("[optionalAuth] No Authorization header, treating as guest.");
     }
     next();
 }
@@ -39,7 +35,6 @@ export function requireAuth(
     next: NextFunction
 ) {
     const authHeader = req.headers.authorization;
-    console.log("Auth Header:", authHeader);
     if (!authHeader?.startsWith("Bearer ")) {
         return res.status(401).json({
             success: false,

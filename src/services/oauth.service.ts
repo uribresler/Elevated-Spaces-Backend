@@ -38,6 +38,7 @@ class OAuthService {
       role: string[];
       avatarUrl: string | null;
       authProvider: string;
+      created_at: Date;
     };
     success: boolean;
     isNewUser: boolean;
@@ -57,6 +58,7 @@ class OAuthService {
       role: string[];
       avatarUrl: string | null;
       authProvider: string;
+      created_at: Date;
     };
     success: boolean;
     isNewUser: boolean;
@@ -77,7 +79,7 @@ class OAuthService {
 
       if (user) {
         // Link OAuth account to existing user
-        user = await this.linkProviderToUser(user.id, provider, providerId, avatarUrl);
+        user = await this.linkProviderToUser(user.id, provider, providerId);
         logger(`Linked ${provider} account to existing user: ${user.id}`);
       } else {
         if (!options.allowCreate) {
@@ -98,8 +100,9 @@ class OAuthService {
         logger(`Created new user via ${provider}: ${user.id}`);
       }
     } else {
-      // Update user info if changed
-      user = await this.updateUserProfile(user.id, name, avatarUrl);
+      // Existing OAuth users: do not overwrite profile fields from provider on login.
+      // Avatar is only set during first-time OAuth signup in createOAuthUser().
+      user = await this.updateUserProfile(user.id, name, null);
     }
 
     const roles = await prisma.user_roles.findMany({
@@ -126,6 +129,7 @@ class OAuthService {
         role: roleNames,
         avatarUrl: user.avatar_url,
         authProvider: user.auth_provider,
+        created_at: user.created_at,
       },
       success: true,
       isNewUser,
@@ -147,17 +151,13 @@ class OAuthService {
   private async linkProviderToUser(
     userId: string,
     provider: OAuthProvider,
-    providerId: string,
-    avatarUrl: string | null
+    providerId: string
   ) {
     const updateData: any = {};
     updateData[providerIdFields[provider]] = providerId;
 
-    // Update avatar if user doesn't have one
+    // Do not copy provider avatar when linking an existing account.
     const currentUser = await prisma.user.findUnique({ where: { id: userId } });
-    if (!currentUser?.avatar_url && avatarUrl) {
-      updateData.avatar_url = avatarUrl;
-    }
 
     // Only update auth_provider if user doesn't have a password (pure OAuth user)
     if (!currentUser?.password_hash) {
@@ -185,15 +185,22 @@ class OAuthService {
 
     createData[providerIdFields[provider]] = providerId;
 
-    const user = await prisma.user.create({ data: createData });
+    const user = await prisma.user.upsert({
+      where: { email },
+      create: createData,
+      update: {},
+    });
 
     const defaultRole = await prisma.roles.findUnique({ where: { name: "USER" } });
     if (defaultRole) {
-      await prisma.user_roles.create({
-        data: {
-          user_id: user.id,
-          role_id: defaultRole.id,
-        },
+      await prisma.user_roles.createMany({
+        data: [
+          {
+            user_id: user.id,
+            role_id: defaultRole.id,
+          },
+        ],
+        skipDuplicates: true,
       });
     }
 
@@ -219,7 +226,7 @@ class OAuthService {
       updateData.name = name;
     }
 
-    // Update avatar if changed
+    // Avatar sync from provider is intentionally disabled after initial signup.
     if (avatarUrl && avatarUrl !== currentUser.avatar_url) {
       updateData.avatar_url = avatarUrl;
     }

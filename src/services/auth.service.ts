@@ -42,16 +42,28 @@ export async function signupService({
     data: { email, password_hash: hash, name, auth_provider: "LOCAL" },
   });
 
-  const defaultRole = await prisma.roles.findUnique({ where: { name: "USER" } });
-  if (!defaultRole) {
-    throw new Error("Default role 'USER' not found");
-  }
-  const assignRole = await prisma.user_roles.create({
-    data: {
-      user_id: user?.id,
-      role_id: defaultRole?.id
-    }
-  })
+  const defaultRole = await prisma.roles.upsert({
+    where: { name: "USER" },
+    update: {},
+    create: {
+      name: "USER",
+      description: "Default role for all users",
+    },
+  });
+
+  await prisma.user_roles.upsert({
+    where: {
+      user_id_role_id: {
+        user_id: user.id,
+        role_id: defaultRole.id,
+      },
+    },
+    update: {},
+    create: {
+      user_id: user.id,
+      role_id: defaultRole.id,
+    },
+  });
 
   if (requestedRole === "PHOTOGRAPHER") {
     const photographerRole = await prisma.roles.findUnique({ where: { name: "PHOTOGRAPHER" } });
@@ -103,7 +115,7 @@ export async function signupService({
   const token = jwt.sign({ userId: user.id, role: defaultRole.name }, JWT_SECRET, { expiresIn: "7d" });
   return {
     token,
-    user: { id: user.id, email: user.email, name: user.name, role: requestedRole === "PHOTOGRAPHER" ? "PHOTOGRAPHER" : defaultRole.name },
+    user: { id: user.id, email: user.email, name: user.name, role: requestedRole === "PHOTOGRAPHER" ? "PHOTOGRAPHER" : defaultRole.name, created_at: user.created_at },
     success: true,
   };
 }
@@ -150,8 +162,12 @@ export async function loginService({ email, password }: { email: string; passwor
     throw err;
   }
   const userWithRole = {
-    ...user,
+    id: user.id,
+    email: user.email,
+    name: user.name,
     role: userRole.role.name,
+    avatarUrl: user.avatar_url,
+    created_at: user.created_at,
   };
   const token = jwt.sign({ userId: user.id, role: userRole.role.name }, JWT_SECRET, { expiresIn: "7d" });
   return {
@@ -199,6 +215,7 @@ export async function updateProfileImageService({
       name: updatedUser.name,
       role: userRole?.role.name || "USER",
       avatar_url: updatedUser.avatar_url,
+      created_at: updatedUser.created_at,
     },
   };
 }
@@ -235,6 +252,7 @@ export async function deleteProfileImageService({ userId }: { userId: string }) 
       name: updatedUser.name,
       role: userRole?.role.name || "USER",
       avatar_url: updatedUser.avatar_url,
+      created_at: updatedUser.created_at,
     },
   };
 }

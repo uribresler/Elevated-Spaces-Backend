@@ -51,7 +51,7 @@ export async function initGuest(req: Request, res: Response): Promise<void> {
             remainingDemoCredits: 0,
             isDemo: false,
             hasPurchasedCredits: true,
-            resetInfo: "N/A - Demo credits converted to paid credits on your first subscription purchase",
+            resetInfo: "N/A - Demo credits converted to paid credits on your first credit purchase",
           },
         });
         return;

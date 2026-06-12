@@ -2,6 +2,8 @@ import { Request, Response } from "express";
 import { ZodError } from "zod";
 import { loginSchema, signupSchema } from "../utils/authSchemas";
 import { loginService, signupService, updateProfileImageService, deleteProfileImageService } from "../services/auth.service";
+import bcrypt from 'bcrypt';
+import { sendEmail } from '../config/mail.config';
 import { oauthService } from "../services/oauth.service";
 import { logger } from "../utils/logger";
 import { OAuthResult } from "../types/auth";
@@ -155,7 +157,8 @@ export async function oauthCallback(req: Request, res: Response) {
       name: authResult.user.name || "",
       provider: authResult.user.authProvider.toLowerCase(),
       isNewUser: authResult.isNewUser ? "true" : "false",
-      role: roleString
+      role: roleString,
+      created_at: latestUser?.created_at?.toISOString() || new Date().toISOString(),
     });
 
     if (authResult.user.avatarUrl) {
@@ -215,6 +218,50 @@ export async function getAvailableProviders(req: Request, res: Response) {
   });
 }
 
+export async function getCurrentUser(req: Request, res: Response) {
+  try {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+    });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    const userRole = await prisma.user_roles.findFirst({
+      where: { user_id: user.id },
+      include: { role: true },
+    });
+
+    if (!userRole) {
+      return res.status(404).json({ success: false, message: "Invalid Role" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: userRole.role.name,
+        avatar_url: user.avatar_url,
+        created_at: user.created_at,
+      },
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error?.message || "Failed to fetch current user",
+    });
+  }
+}
+
 export async function updateProfileImage(req: Request, res: Response) {
   try {
     const userId = req.user?.id;
@@ -256,5 +303,80 @@ export async function deleteProfileImage(req: Request, res: Response) {
       success: false,
       message: error?.message || "Failed to delete profile image",
     });
+  }
+}
+
+// Forgot password: send reset link if account exists (always return 200)
+export async function forgotPassword(req: Request, res: Response) {
+  try {
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    if (!email) return res.status(200).json({ success: true });
+
+    const user = await prisma.user.findUnique({ where: { email } });
+
+    // Always return success to avoid account enumeration
+    if (!user) {
+      return res.status(200).json({ success: true });
+    }
+
+    // create a short-lived JWT token for password reset
+    const token = jwt.sign({ userId: user.id }, process.env.RESET_PASSWORD_SECRET || (process.env.JWT_SECRET || 'change-me'), { expiresIn: '1h' });
+
+    const resetUrl = `${FRONTEND_URL}/reset-password?token=${encodeURIComponent(token)}`;
+
+    // send email via project's configured SendGrid helper
+    try {
+      await sendEmail({
+        from: process.env.EMAIL_FROM || 'no-reply@elevatespacesai.com',
+        senderName: 'Elevated Spaces',
+        to: user.email,
+        subject: 'Reset your Elevated Spaces password',
+        text: `We received a password reset request. Use this link to reset your password: ${resetUrl}. This link expires in 1 hour.`,
+        html: `<p>We received a password reset request. Click the link below to reset your password. The link expires in 1 hour.</p><p><a href="${resetUrl}">${resetUrl}</a></p>`,
+      });
+      logger(`Reset email sent via configured SendGrid to ${user.email}`);
+    } catch (emailErr) {
+      logger(`Failed to send reset email via configured provider: ${String(emailErr)}`);
+    }
+
+    return res.status(200).json({ success: true });
+  } catch (err) {
+    logger(`forgotPassword error: ${String(err)}`);
+    return res.status(200).json({ success: true });
+  }
+}
+
+// Reset password: accept token and newPassword
+export async function resetPassword(req: Request, res: Response) {
+  try {
+    const token = typeof req.body?.token === 'string' ? req.body.token : '';
+    const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
+
+    if (!token || !newPassword || newPassword.length < 8) {
+      return res.status(400).json({ success: false, message: 'Invalid request' });
+    }
+
+    let payload: any = null;
+    try {
+      payload = jwt.verify(token, process.env.RESET_PASSWORD_SECRET || (process.env.JWT_SECRET || 'change-me')) as any;
+    } catch (err) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired token' });
+    }
+
+    const userId = payload?.userId;
+    if (!userId) return res.status(400).json({ success: false, message: 'Invalid token' });
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) return res.status(400).json({ success: false, message: 'Invalid token' });
+
+    const saltRounds = 10;
+    const hashed = await bcrypt.hash(newPassword, saltRounds);
+
+    await prisma.user.update({ where: { id: userId }, data: { password_hash: hashed } });
+
+    return res.status(200).json({ success: true });
+  } catch (err) {
+    logger(`resetPassword error: ${String(err)}`);
+    return res.status(500).json({ success: false, message: 'Server error' });
   }
 }

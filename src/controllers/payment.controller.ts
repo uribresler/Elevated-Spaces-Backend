@@ -1,8 +1,10 @@
 import { Request, Response } from "express";
-import { constructStripeEvent, createCheckoutSession, handleCheckoutCompleted, handleInvoicePaid, getSessionDetails, processPendingPurchases } from "../services/payment.service";
+import { constructStripeEvent, createCheckoutSession, handleCheckoutCompleted, handleInvoicePaid, getSessionDetails, processPendingPurchases, sendContactSalesInquiry, sendSupportInquiry } from "../services/payment.service";
+import { resendInvoiceById } from "../services/payment.service";
 import Stripe from "stripe";
 import prisma from "../dbConnection";
 import { loggingService } from "../services/logging.service";
+import { DEMO_LIMIT, isNewMonth } from "../utils/demoTracking";
 
 export async function createCheckoutSessionHandler(req: Request, res: Response) {
     try {
@@ -11,7 +13,19 @@ export async function createCheckoutSessionHandler(req: Request, res: Response) 
             return res.status(401).json({ message: "Unauthorized" });
         }
 
-        const { productKey, purchaseFor, teamId, quantity, confirmPlanChange } = req.body;
+        const { productKey, uiUnitAmountUsd, purchaseFor, teamId, quantity, confirmPlanChange, seatAutoRenew, autoRenewEnabled, downgradeSeatTopUpUsdMonthly } = req.body;
+        console.log("📋 Checkout session request:", {
+            userId,
+            productKey,
+            uiUnitAmountUsd,
+            purchaseFor,
+            teamId,
+            quantity,
+            confirmPlanChange,
+            seatAutoRenew,
+            autoRenewEnabled,
+            requestBody: req.body,
+        });
         if (!productKey || !purchaseFor) {
             return res.status(400).json({ message: "Product key and purchase type are required" });
         }
@@ -19,18 +33,29 @@ export async function createCheckoutSessionHandler(req: Request, res: Response) 
         const result = await createCheckoutSession({
             userId,
             productKey,
+            uiUnitAmountUsd,
             purchaseFor,
             teamId,
             quantity,
             confirmPlanChange,
+            seatAutoRenew,
+            autoRenewEnabled,
+            downgradeSeatTopUpUsdMonthly,
         });
 
         return res.status(200).json(result);
     } catch (error: any) {
+        console.error("❌ Checkout session error:", {
+            message: error?.message,
+            code: error?.code,
+            requestBody: req.body,
+            stack: error?.stack,
+        });
         if (error?.code === "PLAN_CHANGE_CONFIRMATION_REQUIRED") {
             return res.status(409).json({
                 message: error.message || "Plan change confirmation required",
                 code: error.code,
+                details: error.details || null,
             });
         }
         return res.status(400).json({
@@ -47,11 +72,6 @@ export async function getCreditsHandler(req: Request, res: Response) {
             return res.status(401).json({ message: "Unauthorized" });
         }
 
-        // Get user's personal credit balance
-        const creditBalance = await prisma.user_credit_balance.findUnique({
-            where: { user_id: userId }
-        });
-
         // Get user's purchase history
         const purchases = await prisma.user_credit_purchase.findMany({
             where: { user_id: userId },
@@ -59,6 +79,65 @@ export async function getCreditsHandler(req: Request, res: Response) {
             orderBy: { completed_at: 'desc' },
             take: 10
         });
+
+        let creditBalance = await prisma.user_credit_balance.findUnique({
+            where: { user_id: userId }
+        });
+
+        // One-time self-heal: if user already purchased credits but still has demo credits,
+        // convert remaining demo credits into paid wallet credits.
+        const hasCompletedPurchase = purchases.some((purchase) => purchase.status === "completed");
+        if (hasCompletedPurchase) {
+            const now = new Date();
+
+            const [userTracking, guestTracking] = await Promise.all([
+                prisma.user_demo_tracking.findUnique({ where: { user_id: userId } }),
+                prisma.guest_tracking.findFirst({ where: { userId } }),
+            ]);
+
+            const userUsage = userTracking
+                ? (isNewMonth(userTracking.last_reset_at, now) ? 0 : userTracking.uploads_count)
+                : 0;
+            const guestUsage = guestTracking
+                ? (isNewMonth(guestTracking.last_used_at, now) ? 0 : guestTracking.uploads_count)
+                : 0;
+
+            const unifiedUsage = Math.max(userUsage, guestUsage);
+            const remainingDemoCredits = Math.max(0, DEMO_LIMIT - unifiedUsage);
+
+            if (remainingDemoCredits > 0) {
+                await prisma.$transaction([
+                    prisma.user_credit_balance.upsert({
+                        where: { user_id: userId },
+                        create: { user_id: userId, balance: remainingDemoCredits },
+                        update: { balance: { increment: remainingDemoCredits } },
+                    }),
+                    prisma.user_demo_tracking.upsert({
+                        where: { user_id: userId },
+                        create: {
+                            user_id: userId,
+                            uploads_count: DEMO_LIMIT,
+                            last_reset_at: now,
+                        },
+                        update: {
+                            uploads_count: DEMO_LIMIT,
+                            last_reset_at: now,
+                        },
+                    }),
+                    prisma.guest_tracking.updateMany({
+                        where: { userId },
+                        data: {
+                            uploads_count: DEMO_LIMIT,
+                            last_used_at: now,
+                        },
+                    }),
+                ]);
+
+                creditBalance = await prisma.user_credit_balance.findUnique({
+                    where: { user_id: userId }
+                });
+            }
+        }
 
         return res.status(200).json({
             success: true,
@@ -321,5 +400,111 @@ export async function testPaymentLogHandler(req: Request, res: Response) {
             message: error.message || "Failed to log test payment",
             error: error.toString()
         });
+    }
+}
+
+export async function contactSalesHandler(req: Request, res: Response) {
+    try {
+        const { email, fullName, message, companyName, teamSize, billingPreference, phone, preferredContactMethod, estimatedMonthlyCreditVolume, primaryUseCase, preferredStartDate } = req.body;
+        if (!email || typeof email !== "string") {
+            return res.status(400).json({ message: "Email is required" });
+        }
+
+        if (!fullName || typeof fullName !== "string") {
+            return res.status(400).json({ message: "Full name is required" });
+        }
+
+        await sendContactSalesInquiry({
+            email,
+            fullName,
+            message: typeof message === "string" ? message : undefined,
+            companyName: typeof companyName === "string" ? companyName : undefined,
+            teamSize: typeof teamSize === "string" ? teamSize : undefined,
+            billingPreference: typeof billingPreference === "string" ? billingPreference : undefined,
+            phone: typeof phone === "string" ? phone : undefined,
+            preferredContactMethod: typeof preferredContactMethod === "string" ? preferredContactMethod : undefined,
+            estimatedMonthlyCreditVolume: typeof estimatedMonthlyCreditVolume === "string" ? estimatedMonthlyCreditVolume : undefined,
+            primaryUseCase: typeof primaryUseCase === "string" ? primaryUseCase : undefined,
+            preferredStartDate: typeof preferredStartDate === "string" ? preferredStartDate : undefined,
+            userId: req.user?.id,
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: "Your request has been sent to sales.",
+        });
+    } catch (error: any) {
+        return res.status(400).json({
+            message: error?.message || "Failed to send contact sales request",
+        });
+    }
+}
+
+export async function supportRequestHandler(req: Request, res: Response) {
+    try {
+        const { fullName, companyName, email, briefDescription, orderNumber, additionalContext, screenshots } = req.body;
+
+        if (!fullName || typeof fullName !== "string") {
+            return res.status(400).json({ message: "Full name is required" });
+        }
+
+        if (!email || typeof email !== "string") {
+            return res.status(400).json({ message: "Email is required" });
+        }
+
+        if (!briefDescription || typeof briefDescription !== "string") {
+            return res.status(400).json({ message: "Brief description is required" });
+        }
+
+        const caseNumber = `CASE-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+
+        await sendSupportInquiry({
+            fullName,
+            companyName: typeof companyName === "string" ? companyName : undefined,
+            email,
+            briefDescription,
+            orderNumber: typeof orderNumber === "string" ? orderNumber : undefined,
+            additionalContext: typeof additionalContext === "string" ? additionalContext : undefined,
+            screenshots: Array.isArray(screenshots)
+                ? screenshots
+                    .filter((item) => item && typeof item.filename === "string" && typeof item.content === "string")
+                    .map((item) => ({
+                        filename: item.filename,
+                        content: item.content,
+                        type: typeof item.type === "string" ? item.type : undefined,
+                    }))
+                : undefined,
+            userId: req.user?.id,
+            caseNumber,
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: "Your support request has been sent.",
+            caseNumber,
+        });
+    } catch (error: any) {
+        return res.status(400).json({
+            message: error?.message || "Failed to send support request",
+        });
+    }
+}
+
+export async function resendInvoiceHandler(req: Request, res: Response) {
+    try {
+        const { invoiceId } = req.body;
+        if (!invoiceId || typeof invoiceId !== 'string') {
+            return res.status(400).json({ message: 'invoiceId is required' });
+        }
+
+        const result = await resendInvoiceById(invoiceId);
+        if (result.success) {
+            return res.status(200).json({ success: true, method: result.method });
+        }
+
+        return res.status(500).json({ success: false, error: result.error });
+    } catch (error: any) {
+        console.error('[CONTROLLER] resendInvoiceHandler error:', error);
+        return res.status(400).json({ message: error?.message || 'Failed to resend invoice' });
     }
 }

@@ -1,5 +1,182 @@
 import { Request, Response } from "express";
 import prisma from "../dbConnection";
+import Stripe from "stripe";
+
+const STRIPE_API_VERSION = "2025-12-15.clover";
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY, { apiVersion: STRIPE_API_VERSION }) : null;
+
+// 30-day grace period for expired/cancelled subscriptions (in milliseconds)
+const GRACE_PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
+
+function isSubscriptionEffectivelyActive(purchase: { status?: string; completed_at: Date | null; cancelledAt: Date | null; autoRenewEnabled: boolean }): boolean {
+  if (purchase.status && purchase.status !== "completed") {
+    return false;
+  }
+
+  const now = new Date();
+
+    if (purchase.cancelledAt && purchase.cancelledAt.getTime() > now.getTime()) {
+        return true;
+    }
+  
+  // If not cancelled and auto-renew enabled, it's active
+  if (!purchase.cancelledAt && purchase.autoRenewEnabled) {
+    return true;
+  }
+  
+  // If cancelled or auto-renew disabled, check if within 30-day grace period from completed_at
+  if (purchase.completed_at) {
+    const graceExpiry = new Date(purchase.completed_at.getTime() + GRACE_PERIOD_MS);
+    return now < graceExpiry;
+  }
+  
+  return false;
+}
+
+function normalizePackageName(packageName?: string | null): string {
+    if (!packageName) return "Unknown Package";
+
+    const trimmed = packageName.trim();
+    const withoutPrefix = trimmed.startsWith("plan_") ? trimmed.slice(5) : trimmed;
+    return withoutPrefix
+        .split("_")
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+}
+
+type BillingCycle = "monthly" | "annual";
+type PlanTier = "starter" | "pro" | "team" | "enterprise" | "unknown";
+
+function getBillingCycleFromPackageName(packageName?: string | null): BillingCycle {
+    const normalized = String(packageName || "").toLowerCase();
+    if (normalized.includes("annual") || normalized.includes("year")) {
+        return "annual";
+    }
+    return "monthly";
+}
+
+function getPlanTierFromPackageName(packageName?: string | null): PlanTier {
+    const normalized = String(packageName || "").toLowerCase();
+    if (normalized.includes("enterprise")) return "enterprise";
+    if (normalized.includes("team")) return "team";
+    if (normalized.includes("pro")) return "pro";
+    if (normalized.includes("starter")) return "starter";
+    return "unknown";
+}
+
+function getIncludedSeatsForTier(tier: PlanTier): number {
+    switch (tier) {
+        case "pro":
+            return 2;
+        case "team":
+            return 5;
+        case "enterprise":
+            return 6;
+        case "starter":
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+function formatSeatCapacity(params: { tier: PlanTier; extraSeats?: number; isExtraSeatPurchase?: boolean; seatUnits?: number }): string {
+    const { tier, extraSeats = 0, isExtraSeatPurchase = false, seatUnits = 0 } = params;
+    if (isExtraSeatPurchase) {
+        return `+${Math.max(0, seatUnits)} extra`;
+    }
+
+    const included = getIncludedSeatsForTier(tier);
+    if (!included) return "-";
+    if (tier === "enterprise") {
+        return extraSeats > 0 ? `6 + ${extraSeats} extra` : "6";
+    }
+    return extraSeats > 0 ? `${included}/${included} + ${extraSeats} extra` : `${included}/${included}`;
+}
+
+function resolveAmountWithFallback(params: {
+    amount: number;
+    tier: PlanTier;
+    billingCycle: BillingCycle;
+    packageFallbackPrice?: number | null;
+}): number {
+    if (params.amount > 0) {
+        return params.amount;
+    }
+
+    if (params.packageFallbackPrice && params.packageFallbackPrice > 0) {
+        return params.packageFallbackPrice;
+    }
+
+    const { tier, billingCycle } = params;
+    if (tier === "starter") return billingCycle === "annual" ? 300 : 29;
+    if (tier === "pro") return billingCycle === "annual" ? 744 : 69;
+    if (tier === "team") return billingCycle === "annual" ? 1500 : 139;
+    return 0;
+}
+
+function isExtraSeatPackageName(packageName?: string | null): boolean {
+    const normalized = String(packageName || "").toLowerCase();
+    return normalized.includes("extra") && normalized.includes("seat");
+}
+
+function resolveDisplayStatus(record: {
+    status: string;
+    completed_at?: Date | null;
+    stripe_session_id?: string | null;
+    stripe_subscription_id?: string | null;
+    stripe_invoice_id?: string | null;
+}, paidOrCompleteSessionIds?: Set<string>): string {
+    if (record.status !== "pending") {
+        return record.status;
+    }
+
+    // If Stripe confirms the checkout session is paid/complete, surface this as in-process.
+    if (record.stripe_session_id && paidOrCompleteSessionIds?.has(record.stripe_session_id)) {
+        return "in_process";
+    }
+
+    // Pending with only a checkout session means user started checkout but did not pay yet.
+    // Move to "in_process" only when there is payment evidence and final completion is still pending.
+    const hasPaymentEvidence = Boolean(
+        record.completed_at || record.stripe_subscription_id || record.stripe_invoice_id
+    );
+
+    return hasPaymentEvidence ? "in_process" : "pending";
+}
+
+function inferTeamPurchaseMeta(params: { amount: number; priceUsd: number }) {
+    const { amount, priceUsd } = params;
+    const unitPrice = amount > 0 ? priceUsd / amount : 0;
+    const isExtraSeat = amount > 0 && (Math.abs(unitPrice - 15) < 0.01 || Math.abs(unitPrice - 20) < 0.01);
+
+    if (isExtraSeat) {
+        return {
+            packageName: `Extra Seats (${amount})`,
+            billingCycle: "monthly" as const,
+            isExtraSeatPurchase: true,
+            seatUnits: amount,
+            tier: "unknown" as PlanTier,
+        };
+    }
+
+    const credits = Number(amount);
+    let tier: PlanTier = "unknown";
+    if (credits === 60 || credits === 720) tier = "starter";
+    else if (credits === 160 || credits === 1920) tier = "pro";
+    else if (credits === 360 || credits === 4320) tier = "team";
+    else if (credits >= 500) tier = "enterprise";
+
+    const billingCycle: BillingCycle = credits === 720 || credits === 1920 || credits === 4320 ? "annual" : "monthly";
+
+    return {
+        packageName: tier === "unknown" ? "Team Plan Purchase" : normalizePackageName(tier),
+        billingCycle,
+        isExtraSeatPurchase: false,
+        seatUnits: 0,
+        tier,
+    };
+}
 
 /**
  * Payment History Controller
@@ -18,23 +195,108 @@ export class PaymentHistoryController {
                 return res.status(401).json({ error: "Unauthorized" });
             }
 
-            // Get all credit purchases (subscriptions)
-            const subscriptions = await prisma.user_credit_purchase.findMany({
-                where: { user_id: userId },
-                include: { package: true },
-                orderBy: { created_at: "desc" },
-            });
+            const [subscriptions, ownedTeams, addonPayments] = await Promise.all([
+                prisma.user_credit_purchase.findMany({
+                    where: { user_id: userId },
+                    include: { package: true },
+                    orderBy: { created_at: "desc" },
+                }),
+                prisma.teams.findMany({
+                    where: {
+                        owner_id: userId,
+                        deleted_at: null,
+                    },
+                    select: {
+                        id: true,
+                        name: true,
+                    },
+                }),
+                prisma.payment.findMany({
+                    where: { user_id: userId, status: "PAID" },
+                    orderBy: { created_at: "desc" },
+                }),
+            ]);
 
-            // Transform to transaction format
-            const transactions = subscriptions.map((sub) => ({
+            const ownedTeamIds = ownedTeams.map((team) => team.id);
+            const teamPurchases = ownedTeamIds.length > 0
+                ? await prisma.team_purchase.findMany({
+                    where: {
+                        team_id: { in: ownedTeamIds },
+                    },
+                    include: {
+                        team: {
+                            select: {
+                                id: true,
+                                name: true,
+                            },
+                        },
+                    },
+                    orderBy: { created_at: "desc" },
+                })
+                : [];
+
+            const personalExtraSeats = subscriptions
+                .filter((purchase) => purchase.status === "completed" && isExtraSeatPackageName(purchase.package.name))
+                .reduce((sum, purchase) => sum + Math.max(0, Number(purchase.amount || 0)), 0);
+
+            const teamExtraSeatsByTeamId = teamPurchases.reduce<Record<string, number>>((acc, purchase) => {
+                if (purchase.status !== "completed") return acc;
+                const inferred = inferTeamPurchaseMeta({ amount: purchase.amount, priceUsd: purchase.price_usd });
+                if (!inferred.isExtraSeatPurchase) return acc;
+                acc[purchase.team_id] = (acc[purchase.team_id] || 0) + Math.max(0, inferred.seatUnits);
+                return acc;
+            }, {});
+
+            const paidOrCompleteSessionIds = new Set<string>();
+            if (stripe) {
+                const pendingSessionIds = Array.from(
+                    new Set(
+                        ([] as Array<string | null | undefined>)
+                            .concat(
+                                subscriptions
+                                    .filter((sub) => sub.status === "pending")
+                                    .map((sub) => sub.stripe_session_id),
+                                teamPurchases
+                                    .filter((purchase) => purchase.status === "pending")
+                                    .map((purchase) => purchase.stripe_session_id)
+                            )
+                            .filter((id): id is string => Boolean(id))
+                    )
+                );
+
+                await Promise.all(
+                    pendingSessionIds.map(async (sessionId) => {
+                        try {
+                            const session = await stripe.checkout.sessions.retrieve(sessionId);
+                            if (session.payment_status === "paid" || session.status === "complete") {
+                                paidOrCompleteSessionIds.add(sessionId);
+                            }
+                        } catch (error) {
+                            console.error("Failed to retrieve Stripe session for status mapping:", sessionId, error);
+                        }
+                    })
+                );
+            }
+
+            const personalTransactions = subscriptions.map((sub) => {
+                const resolvedStatus = resolveDisplayStatus(sub, paidOrCompleteSessionIds);
+                const packageName = sub.package.name;
+                const tier = getPlanTierFromPackageName(packageName);
+                const billingCycle = getBillingCycleFromPackageName(packageName);
+                const amount = resolveAmountWithFallback({
+                    amount: Number(sub.price_usd || 0),
+                    tier,
+                    billingCycle,
+                    packageFallbackPrice: Number(sub.package.price || 0),
+                });
+                return {
                 id: sub.id,
                 type: "subscription",
-                packageName: sub.package.name,
+                scope: "personal",
+                packageName: normalizePackageName(packageName),
                 credits: sub.amount,
-                monthlyAmount: sub.price_usd,
-                // Total amount charged including renewals
-                totalAmount: sub.price_usd * (1 + sub.renewalCount),
-                status: sub.status,
+                amount,
+                status: resolvedStatus,
                 autoRenewal: sub.autoRenewEnabled,
                 renewalCount: sub.renewalCount,
                 createdAt: sub.created_at,
@@ -43,17 +305,120 @@ export class PaymentHistoryController {
                 cancelledAt: sub.cancelledAt,
                 cancellationReason: sub.cancellationReason,
                 stripeInvoiceId: sub.stripe_invoice_id,
-            }));
+                billingCycle,
+                isExtraSeatPurchase: isExtraSeatPackageName(packageName),
+                seatUnits: isExtraSeatPackageName(packageName) ? Math.max(0, sub.amount) : 0,
+                seatCapacityLabel: formatSeatCapacity({
+                    tier,
+                    extraSeats: personalExtraSeats,
+                    isExtraSeatPurchase: isExtraSeatPackageName(packageName),
+                    seatUnits: isExtraSeatPackageName(packageName) ? Math.max(0, sub.amount) : 0,
+                }),
+                teamId: null,
+                teamName: null,
+            };
+            });
+
+            const teamTransactions = teamPurchases.map((purchase) => {
+                const inferred = inferTeamPurchaseMeta({ amount: purchase.amount, priceUsd: purchase.price_usd });
+                const amount = resolveAmountWithFallback({
+                    amount: Number(purchase.price_usd || 0),
+                    tier: inferred.tier,
+                    billingCycle: inferred.billingCycle,
+                });
+                return {
+                    id: purchase.id,
+                    type: "team_purchase",
+                    scope: "team",
+                    packageName: inferred.packageName,
+                    credits: inferred.isExtraSeatPurchase ? 0 : purchase.amount,
+                    amount,
+                    status: resolveDisplayStatus(purchase, paidOrCompleteSessionIds),
+                    autoRenewal: inferred.isExtraSeatPurchase ? true : false,
+                    renewalCount: 0,
+                    createdAt: purchase.created_at,
+                    completedAt: purchase.completed_at,
+                    nextRenewalDate: null,
+                    cancelledAt: null,
+                    cancellationReason: null,
+                    stripeInvoiceId: purchase.stripe_invoice_id,
+                    billingCycle: inferred.billingCycle as any,
+                    isExtraSeatPurchase: inferred.isExtraSeatPurchase,
+                    seatUnits: inferred.seatUnits,
+                    seatCapacityLabel: formatSeatCapacity({
+                        tier: inferred.tier,
+                        extraSeats: teamExtraSeatsByTeamId[purchase.team_id] || 0,
+                        isExtraSeatPurchase: inferred.isExtraSeatPurchase,
+                        seatUnits: inferred.seatUnits,
+                    }),
+                    teamId: purchase.team_id,
+                    teamName: purchase.team?.name || null,
+                };
+            });
+
+            const addonTransactions = addonPayments.map((payment) => {
+                return {
+                    id: payment.id,
+                    type: "addon",
+                    scope: "personal",
+                    packageName: "Physical Staging Add-On",
+                    credits: 0,
+                    amount: Number(payment.amount || 0),
+                    status: payment.status.toLowerCase() === "paid" ? "completed" : payment.status.toLowerCase(),
+                    autoRenewal: false,
+                    renewalCount: 0,
+                    createdAt: payment.created_at,
+                    completedAt: payment.created_at,
+                    nextRenewalDate: null,
+                    cancelledAt: null,
+                    cancellationReason: null,
+                    stripeInvoiceId: null,
+                    billingCycle: "one_time" as any,
+                    isExtraSeatPurchase: false,
+                    seatUnits: 0,
+                    seatCapacityLabel: "-",
+                    teamId: null,
+                    teamName: null,
+                };
+            });
+
+            // For extra seat purchases, fetch Stripe subscription to get auto-renewal status
+            const transactionsWithAutoRenewal = await Promise.all(
+                ([] as any[]).concat(personalTransactions)
+                    .concat(teamTransactions)
+                    .concat(addonTransactions)
+                    .map(async (transaction) => {
+                        if (transaction.type === "team_purchase" && transaction.isExtraSeatPurchase) {
+                            const purchase = teamPurchases.find((p) => p.id === transaction.id);
+                            if (purchase?.stripe_subscription_id && stripe) {
+                                try {
+                                    const subscription = await stripe.subscriptions.retrieve(purchase.stripe_subscription_id);
+                                    const autoRenewFromMetadata = String(subscription.metadata?.seatAutoRenew || "true").toLowerCase() !== "false";
+                                    return { ...transaction, autoRenewal: autoRenewFromMetadata };
+                                } catch (error) {
+                                    console.error("Failed to fetch subscription for auto-renewal status:", error);
+                                    return { ...transaction, autoRenewal: false };
+                                }
+                            }
+                        }
+                        return transaction;
+                    })
+            );
+
+            const transactions = transactionsWithAutoRenewal.sort((a, b) => {
+                const aDate = new Date(a.completedAt || a.createdAt).getTime();
+                const bDate = new Date(b.completedAt || b.createdAt).getTime();
+                return bDate - aDate;
+            });
 
             return res.status(200).json({
                 success: true,
                 data: {
                     userId,
                     totalTransactions: transactions.length,
-                    // Total spent includes all charges: initial purchase + all renewal charges
                     totalSpent: transactions
-                        .filter((t) => t.completedAt)
-                        .reduce((sum, t) => sum + (t.monthlyAmount * (1 + (t.renewalCount || 0))), 0),
+                        .filter((transaction) => transaction.status === "completed" || transaction.status === "paid")
+                        .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0),
                     transactions,
                 },
             });
@@ -89,7 +454,6 @@ export class PaymentHistoryController {
             const minAmount = req.query.minAmount ? parseFloat(req.query.minAmount as string) : null;
             const maxAmount = req.query.maxAmount ? parseFloat(req.query.maxAmount as string) : null;
 
-            // Build where clause
             const whereClause: any = {
                 user_id: userId,
                 status: "completed",
@@ -108,43 +472,307 @@ export class PaymentHistoryController {
                 }
             }
 
-            // Get subscriptions to show as invoices (without amount filtering first)
-            const subscriptions = await prisma.user_credit_purchase.findMany({
-                where: whereClause,
-                include: { package: true },
-                orderBy: { completed_at: "desc" },
-                take: limit * 2, // Fetch more to account for filtering
+            const addonWhereClause: any = {
+                user_id: userId,
+                status: "PAID",
+            };
+            if (dateFrom || dateTo) {
+                addonWhereClause.created_at = {};
+                if (dateFrom) {
+                    addonWhereClause.created_at.gte = dateFrom;
+                }
+                if (dateTo) {
+                    const endOfDay = new Date(dateTo);
+                    endOfDay.setHours(23, 59, 59, 999);
+                    addonWhereClause.created_at.lte = endOfDay;
+                }
+            }
+
+            const [subscriptions, ownedTeams, addonPayments] = await Promise.all([
+                prisma.user_credit_purchase.findMany({
+                    where: whereClause,
+                    include: { package: true },
+                    orderBy: { completed_at: "desc" },
+                    take: limit * 3,
+                }),
+                prisma.teams.findMany({
+                    where: {
+                        owner_id: userId,
+                        deleted_at: null,
+                    },
+                    select: {
+                        id: true,
+                        name: true,
+                    },
+                }),
+                prisma.payment.findMany({
+                    where: addonWhereClause,
+                    orderBy: { created_at: "desc" },
+                    take: limit * 3,
+                }),
+            ]);
+
+            const invoiceRows = await prisma.$queryRaw<Array<{
+                id: string;
+                subscription_id: string;
+                user_id: string;
+                amount: number;
+                status: string;
+                html_content: string | null;
+                metadata: unknown;
+                created_at: Date;
+                updated_at: Date;
+            }>>`
+                SELECT id, subscription_id, user_id, amount, status, html_content, metadata, created_at, updated_at
+                FROM "invoice"
+                WHERE user_id = ${userId}
+                ORDER BY created_at DESC
+                LIMIT ${limit * 3}
+            `;
+            const invoiceRowBySubscriptionId = new Map(invoiceRows.map((row) => [row.subscription_id, row]));
+
+            const ownedTeamIds = ownedTeams.map((team) => team.id);
+            const teamPurchases = ownedTeamIds.length > 0
+                ? await prisma.team_purchase.findMany({
+                    where: {
+                        team_id: { in: ownedTeamIds },
+                        status: "completed",
+                    },
+                    include: {
+                        team: {
+                            select: {
+                                id: true,
+                                name: true,
+                            },
+                        },
+                    },
+                    orderBy: { completed_at: "desc" },
+                    take: limit * 3,
+                })
+                : [];
+
+            const personalExtraSeats = subscriptions
+                .filter((purchase) => purchase.status === "completed" && isExtraSeatPackageName(purchase.package.name))
+                .reduce((sum, purchase) => sum + Math.max(0, Number(purchase.amount || 0)), 0);
+
+            const teamExtraSeatsByTeamId = teamPurchases.reduce<Record<string, number>>((acc, purchase) => {
+                if (purchase.status !== "completed") return acc;
+                const inferred = inferTeamPurchaseMeta({ amount: purchase.amount, priceUsd: purchase.price_usd });
+                if (!inferred.isExtraSeatPurchase) return acc;
+                acc[purchase.team_id] = (acc[purchase.team_id] || 0) + Math.max(0, inferred.seatUnits);
+                return acc;
+            }, {});
+
+            const personalInvoices = subscriptions.map((sub, index) => {
+                const invoiceRow = invoiceRowBySubscriptionId.get(sub.id) as any;
+                const invoiceMetadata = (invoiceRow?.metadata || {}) as Record<string, any>;
+                const storedInvoicePdfUrl = invoiceRow?.stripe_invoice_pdf_url || invoiceMetadata.stripeInvoicePdfUrl || null;
+                const storedHostedInvoiceUrl = invoiceRow?.stripe_invoice_hosted_url || invoiceMetadata.stripeInvoiceHostedUrl || null;
+                const packageName = sub.package.name;
+                const tier = getPlanTierFromPackageName(packageName);
+                const billingCycle = getBillingCycleFromPackageName(packageName);
+                const amount = resolveAmountWithFallback({
+                    amount: Number(invoiceRow?.amount || sub.price_usd || 0),
+                    tier,
+                    billingCycle,
+                    packageFallbackPrice: Number(sub.package.price || 0),
+                });
+                // compute dateSubscribed and validTill
+                const dateSubscribed = invoiceMetadata.dateSubscribed ? new Date(invoiceMetadata.dateSubscribed) : sub.created_at || sub.completed_at || new Date();
+                let validTill: Date | null = null;
+                if (invoiceMetadata.validTill) {
+                    validTill = new Date(invoiceMetadata.validTill);
+                } else if (dateSubscribed) {
+                    const base = new Date(dateSubscribed);
+                    if (billingCycle === "monthly") {
+                        validTill = new Date(base.getTime() + 30 * 24 * 60 * 60 * 1000);
+                    } else if (billingCycle === "annual") {
+                        validTill = new Date(base.getTime() + 365 * 24 * 60 * 60 * 1000);
+                    }
+                }
+
+                return {
+                    id: `INV-P-${sub.id}`,
+                    subscriptionId: sub.id,
+                    invoiceNumber: invoiceMetadata.invoiceNumber || sub.stripe_invoice_id || `INV-P-${subscriptions.length - index}`,
+                    packageName: invoiceMetadata.packageName || normalizePackageName(packageName),
+                    credits: sub.amount,
+                    amount,
+                    issueDate: invoiceRow?.created_at || sub.completed_at,
+                    dueDate: invoiceRow?.created_at || sub.completed_at,
+                    status: "paid",
+                    renewalNumber: (invoiceMetadata.renewalNumber ?? sub.renewalCount) || 0,
+                    nextBillingDate: sub.nextRenewalDate,
+                    billingCycle: invoiceMetadata.billingCycle || billingCycle,
+                    scope: "personal",
+                    planFor: invoiceMetadata.planFor || "personal",
+                    autoRenewal: typeof invoiceMetadata.autoRenewal === "boolean" ? invoiceMetadata.autoRenewal : !!sub.autoRenewEnabled,
+                    dateSubscribed: dateSubscribed,
+                    validTill: validTill,
+                    teamName: null,
+                    isExtraSeatPurchase: isExtraSeatPackageName(packageName),
+                    seatUnits: isExtraSeatPackageName(packageName) ? Math.max(0, sub.amount) : 0,
+                    seatCapacityLabel: formatSeatCapacity({
+                        tier,
+                        extraSeats: personalExtraSeats,
+                        isExtraSeatPurchase: isExtraSeatPackageName(packageName),
+                        seatUnits: isExtraSeatPackageName(packageName) ? Math.max(0, sub.amount) : 0,
+                    }),
+                    previewAvailable: Boolean(storedInvoicePdfUrl || storedHostedInvoiceUrl || invoiceRow?.html_content),
+                    stripeInvoicePdfUrl: storedInvoicePdfUrl,
+                    stripeInvoiceHostedUrl: storedHostedInvoiceUrl,
+                };
             });
 
-            // Map and apply client-side filtering for search and amount
-            let invoices = subscriptions
-                .map((sub, index) => ({
-                    id: `INV-${Date.now()}-${sub.id}`,
-                    subscriptionId: sub.id,
-                    invoiceNumber: `INV-${subscriptions.length - index}`,
-                    packageName: sub.package.name,
-                    credits: sub.amount,
-                    monthlyAmount: sub.price_usd,
-                    // Total amount charged including all renewal charges
-                    totalAmount: sub.price_usd * (1 + (sub.renewalCount || 0)),
-                    issueDate: sub.completed_at,
-                    dueDate: sub.completed_at,
+            const teamInvoices = await Promise.all(teamPurchases.map(async (purchase, index) => {
+                const inferred = inferTeamPurchaseMeta({ amount: purchase.amount, priceUsd: purchase.price_usd });
+                const amount = resolveAmountWithFallback({
+                    amount: Number(purchase.price_usd || 0),
+                    tier: inferred.tier,
+                    billingCycle: inferred.billingCycle,
+                });
+                const dateSubscribed = purchase.created_at || purchase.completed_at || new Date();
+                let validTill: Date | null = null;
+                let stripeInvoicePdfUrl: string | null = null;
+                let stripeInvoiceHostedUrl: string | null = null;
+                let autoRenewal = false;
+                if (dateSubscribed) {
+                    const base = new Date(dateSubscribed);
+                    if (inferred.billingCycle === "monthly") {
+                        validTill = new Date(base.getTime() + 30 * 24 * 60 * 60 * 1000);
+                    } else if (inferred.billingCycle === "annual") {
+                        validTill = new Date(base.getTime() + 365 * 24 * 60 * 60 * 1000);
+                    }
+                }
+
+                if (purchase.stripe_invoice_id && stripe) {
+                    try {
+                        const invoice = await stripe.invoices.retrieve(purchase.stripe_invoice_id);
+                        stripeInvoicePdfUrl = invoice.invoice_pdf || null;
+                        stripeInvoiceHostedUrl = invoice.hosted_invoice_url || null;
+                    } catch (error) {
+                        console.error("Failed to fetch Stripe invoice for team purchase:", {
+                            purchaseId: purchase.id,
+                            stripeInvoiceId: purchase.stripe_invoice_id,
+                            error,
+                        });
+                    }
+                }
+
+                if (purchase.stripe_subscription_id && stripe) {
+                    try {
+                        const subscription = await stripe.subscriptions.retrieve(purchase.stripe_subscription_id);
+                        autoRenewal = subscription.cancel_at_period_end ? false : true;
+                    } catch (error) {
+                        console.error("Failed to fetch Stripe subscription for team auto-renewal:", {
+                            purchaseId: purchase.id,
+                            stripeSubscriptionId: purchase.stripe_subscription_id,
+                            error,
+                        });
+                    }
+                }
+
+                return {
+                    id: `INV-T-${purchase.id}`,
+                    subscriptionId: purchase.id,
+                    invoiceNumber: purchase.stripe_invoice_id || `INV-T-${teamPurchases.length - index}`,
+                    packageName: inferred.packageName,
+                    credits: inferred.isExtraSeatPurchase ? 0 : purchase.amount,
+                    amount,
+                    issueDate: purchase.completed_at,
+                    dueDate: purchase.completed_at,
                     status: "paid",
-                    renewalNumber: sub.renewalCount || 0,
-                    nextBillingDate: sub.nextRenewalDate,
-                }))
+                    renewalNumber: 0,
+                    nextBillingDate: null,
+                    billingCycle: inferred.billingCycle as any,
+                    scope: "team",
+                    planFor: "team",
+                    autoRenewal,
+                    dateSubscribed: dateSubscribed,
+                    validTill: validTill,
+                    teamName: purchase.team?.name || null as any,
+                    isExtraSeatPurchase: inferred.isExtraSeatPurchase,
+                    seatUnits: inferred.seatUnits,
+                    seatCapacityLabel: formatSeatCapacity({
+                        tier: inferred.tier,
+                        extraSeats: teamExtraSeatsByTeamId[purchase.team_id] || 0,
+                        isExtraSeatPurchase: inferred.isExtraSeatPurchase,
+                        seatUnits: inferred.seatUnits,
+                    }),
+                    previewAvailable: Boolean(stripeInvoicePdfUrl || stripeInvoiceHostedUrl),
+                    stripeInvoicePdfUrl,
+                    stripeInvoiceHostedUrl,
+                };
+            }));
+
+            const addonInvoices = addonPayments.map((payment, index) => {
+                const dateSubscribed = payment.created_at || new Date();
+                return {
+                    id: `INV-A-${payment.id}`,
+                    subscriptionId: payment.id,
+                    invoiceNumber: `INV-A-${addonPayments.length - index}`,
+                    packageName: "Physical Staging Add-On",
+                    credits: 0,
+                    amount: Number(payment.amount || 0),
+                    issueDate: payment.created_at,
+                    dueDate: payment.created_at,
+                    status: "paid",
+                    renewalNumber: 0,
+                    nextBillingDate: null,
+                    billingCycle: "one_time",
+                    scope: "personal",
+                    planFor: "personal",
+                    autoRenewal: false,
+                    dateSubscribed: dateSubscribed,
+                    validTill: null,
+                    teamName: null,
+                    isExtraSeatPurchase: false,
+                    seatUnits: 0,
+                    seatCapacityLabel: "-",
+                    previewAvailable: false,
+                };
+            });
+
+            // For extra seat invoices, fetch Stripe subscription to get auto-renewal status
+            const invoicesWithAutoRenewal = await Promise.all(
+                ([] as any[]).concat(personalInvoices)
+                    .concat(teamInvoices)
+                    .concat(addonInvoices)
+                    .map(async (invoice) => {
+                        if (invoice.id.startsWith("INV-T-") && invoice.isExtraSeatPurchase) {
+                            const purchase = teamPurchases.find((p) => p.id === invoice.subscriptionId);
+                            if (purchase?.stripe_subscription_id && stripe) {
+                                try {
+                                    const subscription = await stripe.subscriptions.retrieve(purchase.stripe_subscription_id);
+                                    // Note: invoices don't have autoRenewal field in response type, but we can add it for consistency
+                                    return invoice;
+                                } catch (error) {
+                                    console.error("Failed to fetch subscription for invoice auto-renewal:", error);
+                                    return invoice;
+                                }
+                            }
+                        }
+                        return invoice;
+                    })
+            );
+
+            let invoices = invoicesWithAutoRenewal
+                .sort((a, b) => {
+                    const aDate = new Date(a.issueDate || 0).getTime();
+                    const bDate = new Date(b.issueDate || 0).getTime();
+                    return bDate - aDate;
+                })
                 .filter((invoice) => {
-                    // Search filter
                     if (search) {
                         const searchMatch =
                             invoice.invoiceNumber.toLowerCase().includes(search) ||
-                            invoice.packageName.toLowerCase().includes(search);
+                            invoice.packageName.toLowerCase().includes(search) ||
+                            String(invoice.teamName || "").toLowerCase().includes(search);
                         if (!searchMatch) return false;
                     }
 
-                    // Amount filtering
-                    if (minAmount !== null && invoice.totalAmount < minAmount) return false;
-                    if (maxAmount !== null && invoice.totalAmount > maxAmount) return false;
+                    if (minAmount !== null && invoice.amount < minAmount) return false;
+                    if (maxAmount !== null && invoice.amount > maxAmount) return false;
 
                     return true;
                 })
@@ -212,6 +840,14 @@ export class PaymentHistoryController {
                 userName: subscription.user.name || "Valued Customer",
                 userEmail: subscription.user.email,
                 companyName: "Elevated Spaces",
+                billingCycle: (subscription.package.name.toLowerCase().includes("annual") ? "annual" : "monthly") as "monthly" | "annual",
+                planFor: "personal" as const,
+                autoRenewal: !!subscription.autoRenewEnabled,
+                seatCapacityLabel: `${subscription.amount} Credits`,
+                dateSubscribed: subscription.created_at || subscription.completed_at || new Date(),
+                validTill: subscription.completed_at
+                    ? new Date(new Date(subscription.completed_at).getTime() + 30 * 24 * 60 * 60 * 1000)
+                    : null,
             };
 
             const invoiceHTML = InvoiceService.generateInvoiceHTML(invoiceData);
@@ -250,39 +886,205 @@ export class PaymentHistoryController {
                 include: { package: true },
             });
 
+            const ownedTeams = await prisma.teams.findMany({
+                where: {
+                    owner_id: userId,
+                    deleted_at: null,
+                },
+                select: { id: true },
+            });
+
+            const ownedTeamIds = ownedTeams.map((team) => team.id);
+            const teamPurchases = ownedTeamIds.length > 0
+                ? await prisma.team_purchase.findMany({
+                    where: {
+                        team_id: { in: ownedTeamIds },
+                    },
+                })
+                : [];
+
+
             const completed = purchases.filter((p) => p.status === "completed");
             const pending = purchases.filter((p) => p.status === "pending");
             const failed = purchases.filter((p) => p.status === "failed");
-            const active = purchases.filter(
-                (p) => p.autoRenewEnabled && !p.cancelledAt
+            const activeCandidates = purchases.filter(
+                (p) => p.status === "completed" && isSubscriptionEffectivelyActive(p)
             );
+            const active: typeof activeCandidates = [];
+            const hasInFlightPlanChangeCheckout = pending.some((p) => Boolean(p.stripe_session_id));
+
+            console.log('[DEBUG] getPaymentSummary - completed purchases:', completed.length);
+            console.log('[DEBUG] getPaymentSummary - activeCandidates:', activeCandidates.map(p => ({
+                id: p.id,
+                package: p.package?.name,
+                status: p.status,
+                autoRenewEnabled: p.autoRenewEnabled,
+                cancelledAt: p.cancelledAt,
+                completed_at: p.completed_at,
+                stripe_session_id: p.stripe_session_id ? '***' : null,
+            })));
+
+            for (const purchase of activeCandidates) {
+                if (hasInFlightPlanChangeCheckout) {
+                    console.log('[DEBUG] Skipping Stripe sync while plan-change checkout is in progress:', purchase.id);
+                    active.push(purchase);
+                    continue;
+                }
+
+                if (!purchase.stripe_session_id) {
+                    console.log('[DEBUG] Marking purchase as cancelled - no stripe_session_id:', purchase.id);
+                    await prisma.user_credit_purchase.updateMany({
+                        where: {
+                            id: purchase.id,
+                            cancelledAt: null,
+                        },
+                        data: {
+                            autoRenewEnabled: false,
+                            cancelledAt: new Date(),
+                            cancellationReason: "Auto-synced: missing Stripe session id",
+                            nextRenewalDate: null,
+                        },
+                    });
+                    continue;
+                }
+
+                // If auto-renew is disabled, don't validate against Stripe
+                // The subscription is still valid within grace period
+                if (!purchase.autoRenewEnabled) {
+                    console.log('[DEBUG] Auto-renew disabled for purchase, accepting as active:', purchase.id);
+                    active.push(purchase);
+                    continue;
+                }
+
+                if (!stripe) {
+                    active.push(purchase);
+                    continue;
+                }
+
+                try {
+                    const session = await stripe.checkout.sessions.retrieve(purchase.stripe_session_id);
+                    const subscriptionId = typeof session.subscription === "string"
+                        ? session.subscription
+                        : session.subscription?.id;
+
+                    if (!subscriptionId) {
+                        console.log('[DEBUG] No subscription ID found for purchase:', purchase.id);
+                        await prisma.user_credit_purchase.updateMany({
+                            where: {
+                                id: purchase.id,
+                                cancelledAt: null,
+                            },
+                            data: {
+                                autoRenewEnabled: false,
+                                cancelledAt: new Date(),
+                                cancellationReason: "Auto-synced from Stripe: checkout has no subscription",
+                                nextRenewalDate: null,
+                            },
+                        });
+                        continue;
+                    }
+
+                    const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+                    const isStripeActive =
+                        subscription.status === "active" ||
+                        subscription.status === "trialing" ||
+                        subscription.status === "past_due";
+
+                    console.log('[DEBUG] Stripe validation - purchase:', purchase.id, 'status:', subscription.status, 'isActive:', isStripeActive);
+
+                    if (isStripeActive) {
+                        active.push(purchase);
+                        continue;
+                    }
+
+                    console.log('[DEBUG] Marking purchase as cancelled due to Stripe status:', purchase.id, subscription.status);
+                    await prisma.user_credit_purchase.updateMany({
+                        where: {
+                            id: purchase.id,
+                            cancelledAt: null,
+                        },
+                        data: {
+                            autoRenewEnabled: false,
+                            cancelledAt: new Date(),
+                            cancellationReason: `Auto-synced from Stripe status: ${subscription.status}`,
+                            nextRenewalDate: null,
+                        },
+                    });
+                } catch (error: any) {
+                    const isMissingSubscription =
+                        error?.type === "StripeInvalidRequestError" &&
+                        error?.code === "resource_missing";
+
+                    if (isMissingSubscription) {
+                        console.log('[DEBUG] Stripe subscription not found for purchase:', purchase.id);
+                        await prisma.user_credit_purchase.updateMany({
+                            where: {
+                                id: purchase.id,
+                                cancelledAt: null,
+                            },
+                            data: {
+                                autoRenewEnabled: false,
+                                cancelledAt: new Date(),
+                                cancellationReason: "Auto-synced from Stripe: subscription not found",
+                                nextRenewalDate: null,
+                            },
+                        });
+                        continue;
+                    }
+
+                    // Fall back to DB state on transient Stripe failures.
+                    console.log('[DEBUG] Stripe error for purchase, using DB state:', purchase.id, error.message);
+                    active.push(purchase);
+                }
+            }
             const cancelled = purchases.filter((p) => p.cancelledAt);
 
-            // Total spent includes initial purchases + all renewal charges
+            const completedTeamPurchases = teamPurchases.filter((purchase) => purchase.status === "completed");
             const totalSpent = completed.reduce(
-                (sum, p) => sum + (p.price_usd * (1 + p.renewalCount)),
+                (sum, purchase) => sum + (purchase.price_usd * (1 + purchase.renewalCount)),
                 0
-            );
+            ) + completedTeamPurchases.reduce((sum, purchase) => sum + purchase.price_usd, 0);
+
             const totalCredits = completed.reduce((sum, p) => sum + p.amount, 0);
             const totalRenewals = completed.reduce(
                 (sum, p) => sum + p.renewalCount,
                 0
             );
 
+            const recentTransactions = [
+                ...completed.map((purchase) => ({
+                    id: purchase.id,
+                    package: normalizePackageName(purchase.package.name),
+                    amount: purchase.price_usd,
+                    date: purchase.completed_at,
+                })),
+                ...completedTeamPurchases.map((purchase) => {
+                    const inferred = inferTeamPurchaseMeta({ amount: purchase.amount, priceUsd: purchase.price_usd });
+                    return {
+                        id: purchase.id,
+                        package: inferred.packageName,
+                        amount: purchase.price_usd,
+                        date: purchase.completed_at,
+                    };
+                }),
+            ]
+                .sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime())
+                .slice(0, 5);
+
             return res.status(200).json({
                 success: true,
                 data: {
                     summary: {
-                        totalPurchases: purchases.length,
+                        totalPurchases: purchases.length + teamPurchases.length,
                         totalSpent: parseFloat(totalSpent.toFixed(2)),
                         totalCredits,
                         totalRenewals,
                         averageTransactionValue: parseFloat(
-                            (totalSpent / completed.length || 0).toFixed(2)
+                            (totalSpent / Math.max(1, completed.length + completedTeamPurchases.length)).toFixed(2)
                         ),
                     },
                     breakdown: {
-                        completed: completed.length,
+                        completed: completed.length + completedTeamPurchases.length,
                         pending: pending.length,
                         failed: failed.length,
                         active: active.length,
@@ -295,13 +1097,11 @@ export class PaymentHistoryController {
                         monthlyAmount: sub.price_usd,
                         nextRenewal: sub.nextRenewalDate,
                         renewals: sub.renewalCount,
+                        cancelledAt: sub.cancelledAt,
+                        autoRenewEnabled: sub.autoRenewEnabled,
+                        completedAt: sub.completed_at,
                     })),
-                    recentTransactions: completed.slice(0, 5).map((p) => ({
-                        id: p.id,
-                        package: p.package.name,
-                        amount: p.price_usd,
-                        date: p.completed_at,
-                    })),
+                    recentTransactions,
                 },
             });
         } catch (error) {
