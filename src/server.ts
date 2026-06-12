@@ -5,10 +5,20 @@ import { mongoDb } from './config/mongodb.config';
 import { supabaseStorage } from './services/supabaseStorage.service';
 import { startCleanupCron } from './cron/cleanupExpiredInvitations';
 import { startImageCleanupCron } from './cron/cleanupExpiredImages';
+import { startUploadsDiskCleanupCron } from './cron/cleanupUploadsDir';
 import processSubscriptionRenewals from './cron/processSubscriptionRenewals';
 import { processPendingPurchases } from './services/payment.service';
 import { processTeamPaidExtraSeatsDaily } from './services/teams.service';
 import 'dotenv/config';
+
+// Crash-safety: surface unexpected async errors instead of silently dying.
+// Logging only; we deliberately do NOT exit to preserve current flow.
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[FATAL] Unhandled promise rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err);
+});
 
 (async () => {
     const encodedAuthApiKey = process.env.AUTH_API_KEY;
@@ -47,8 +57,17 @@ app.get("/", (_req, res) => {
   });
 });
 
-app.listen(PORT, async () => {
+// Track intervals/timeouts so we can clear them during graceful shutdown.
+const scheduledTimers: Array<NodeJS.Timeout> = [];
+
+const httpServer = app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
+
+  // Tune Node HTTP timeouts. requestTimeout left at 0 (disabled) by default
+  // so long-lived SSE streams aren't killed; override with REQUEST_TIMEOUT_MS.
+  httpServer.keepAliveTimeout = Number(process.env.KEEP_ALIVE_TIMEOUT_MS) || 65_000;
+  httpServer.headersTimeout = Number(process.env.HEADERS_TIMEOUT_MS) || 66_000;
+  httpServer.requestTimeout = Number(process.env.REQUEST_TIMEOUT_MS) || 0;
 
   // Initialize MongoDB for logging
   try {
@@ -72,10 +91,11 @@ app.listen(PORT, async () => {
   try {
     await prisma.$connect();
     console.log('✅ Connected to PostgreSQL database');
-    
+
     // Only start cron job if database connection succeeds
     startCleanupCron();
     startImageCleanupCron();
+    startUploadsDiskCleanupCron();
   } catch (err: any) {
     console.error('❌ Failed to connect to database:', err.message || err);
     console.error('Please verify your DATABASE_URL credentials in .env');
@@ -102,12 +122,56 @@ app.listen(PORT, async () => {
   }
 
   // Schedule pending purchase processing every 5 minutes
-  setInterval(() => {
+  scheduledTimers.push(setInterval(() => {
     processPendingPurchases().catch(err => {
       console.error('Scheduled pending purchase processing failed:', err);
     });
-  }, 60 * 1000); // 5 minutes
+  }, 60 * 1000)); // 5 minutes
 });
+
+// --- Graceful shutdown -------------------------------------------------------
+let shuttingDown = false;
+async function gracefulShutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[SHUTDOWN] Received ${signal}. Closing server...`);
+
+  // Stop accepting new connections; existing requests are allowed to finish.
+  httpServer.close(() => {
+    console.log('[SHUTDOWN] HTTP server closed');
+  });
+
+  // Clear background intervals/timeouts we own.
+  for (const t of scheduledTimers) {
+    try { clearInterval(t as any); clearTimeout(t as any); } catch { /* noop */ }
+  }
+
+  // Hard ceiling so a stuck request can't keep us alive forever.
+  const forceExitMs = Number(process.env.SHUTDOWN_FORCE_EXIT_MS) || 30_000;
+  const forceTimer = setTimeout(() => {
+    console.error('[SHUTDOWN] Force-exiting after timeout');
+    process.exit(1);
+  }, forceExitMs);
+  forceTimer.unref();
+
+  try {
+    await prisma.$disconnect();
+    console.log('[SHUTDOWN] Prisma disconnected');
+  } catch (err) {
+    console.warn('[SHUTDOWN] Prisma disconnect error:', err);
+  }
+  try {
+    await mongoDb.disconnect();
+    console.log('[SHUTDOWN] MongoDB disconnected');
+  } catch (err) {
+    console.warn('[SHUTDOWN] MongoDB disconnect error:', err);
+  }
+
+  console.log('[SHUTDOWN] Clean exit');
+  process.exit(0);
+}
+process.on('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
+process.on('SIGINT', () => { void gracefulShutdown('SIGINT'); });
 
 /**
  * Schedules subscription renewals.
@@ -144,11 +208,11 @@ function scheduleSubscriptionRenewalsCron() {
       console.error('[CRON] Initial test renewal processing failed:', err);
     });
 
-    setInterval(() => {
+    scheduledTimers.push(setInterval(() => {
       void runRenewalCycle().catch((err) => {
         console.error('[CRON] Scheduled test renewal processing failed:', err);
       });
-    }, intervalMs);
+    }, intervalMs));
 
     return;
   }
@@ -174,14 +238,14 @@ function scheduleSubscriptionRenewalsCron() {
       `[CRON] Subscription renewals scheduled for ${nextRun.toISOString()} (in ${Math.round(timeUntilNext / 1000 / 60)} minutes)`
     );
     
-    setTimeout(() => {
+    scheduledTimers.push(setTimeout(() => {
       void runRenewalCycle().catch((err) => {
           console.error('[CRON] Scheduled subscription renewal processing failed:', err);
         }).finally(() => {
           // Schedule the next run
           scheduleNextRun();
         });
-    }, timeUntilNext);
+    }, timeUntilNext));
   }
 
   // Schedule the first run

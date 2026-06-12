@@ -42,6 +42,10 @@ class MongoDBConnection {
     try {
       await mongoose.connect(mongoUri, {
         dbName: process.env.MONGODB_DB_NAME || 'elevate_logs',
+        maxPoolSize: Number(process.env.MONGO_POOL_MAX) || 50,
+        minPoolSize: Number(process.env.MONGO_POOL_MIN) || 0,
+        serverSelectionTimeoutMS: Number(process.env.MONGO_SERVER_SELECTION_MS) || 10_000,
+        socketTimeoutMS: Number(process.env.MONGO_SOCKET_TIMEOUT_MS) || 45_000,
       });
 
       this.isConnected = true;

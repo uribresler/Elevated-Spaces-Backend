@@ -23,10 +23,16 @@ import { stripeWebhookHandler } from "./controllers/payment.controller";
 import { errorHandler } from "./middlewares/errorHandler";
 import { zodErrorHandler } from "./middlewares/zodErrorHandler";
 import { requestLoggingMiddleware } from "./middlewares/requestLogging.middleware";
+import { noSqlInjectionGuard, globalRateLimiter, authRateLimiter } from "./middlewares/security";
 import cors from "cors";
+import helmet from "helmet";
 
 const app = express();
 const SUPPORT_REQUEST_JSON_LIMIT = process.env.SUPPORT_REQUEST_JSON_LIMIT || "5mb";
+// Global JSON body cap. Multi-image uploads use multipart (multer), not JSON,
+// so a 2mb default is safe. Override with JSON_BODY_LIMIT if needed.
+const JSON_BODY_LIMIT = process.env.JSON_BODY_LIMIT || "2mb";
+const URLENCODED_BODY_LIMIT = process.env.URLENCODED_BODY_LIMIT || "2mb";
 
 /* =======================
    CORS CONFIG (FIXED)
@@ -43,6 +49,16 @@ const allowedOrigins = corsOriginsEnv
 if (!allowedOrigins.includes("http://localhost:3000")) {
     allowedOrigins.push("http://localhost:3000");
 }
+
+// Security headers. crossOriginResourcePolicy relaxed so that /uploads static
+// files remain loadable cross-origin (existing behavior preserved).
+app.use(helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    contentSecurityPolicy: false,
+}));
+
+// IP-based rate limit. Skips webhook + SSE; see security.ts.
+app.use(globalRateLimiter);
 
 app.use(
     cors({
@@ -73,8 +89,12 @@ app.post("/api/payment/webhook", express.raw({ type: "application/json" }),
 // Support requests can include base64 screenshots, so allow a larger JSON payload on this endpoint only.
 app.use("/api/payment/support-request", express.json({ limit: SUPPORT_REQUEST_JSON_LIMIT }));
 
-app.use(express.json());
+app.use(express.json({ limit: JSON_BODY_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: URLENCODED_BODY_LIMIT }));
 app.use(cookieParser());
+
+// NoSQL injection guard runs after body parsing so it sees the parsed object.
+app.use(noSqlInjectionGuard);
 
 // Initialize Passport
 app.use(passport.initialize());
@@ -99,7 +119,9 @@ app.get("/", (_req, res) => {
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 app.use("/api", healthRoute);
-app.use("/api/auth", authRoute);
+// Tighter rate limit in front of auth endpoints (brute-force / credential
+// stuffing protection). Handlers are unchanged.
+app.use("/api/auth", authRateLimiter, authRoute);
 app.use("/api/guest", guestRoute);
 app.use("/api/images", imageRoute);
 app.use('/api/teams', teamsRoute)
