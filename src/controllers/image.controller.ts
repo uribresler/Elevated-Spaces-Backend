@@ -965,10 +965,11 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     // ============================================
     // MULTI-VARIATION AI GENERATION
     // SSE streaming response
-    const NUM_VARIATIONS = Math.max(
-      1,
-      Math.min(Number(process.env.STAGE_STREAM_VARIATIONS || "1"), 50)
-    );
+    // Demo users always get 3 watermarked previews so they can see the range of
+    // outputs the AI produces. Paid users honor the env-configured count.
+    const NUM_VARIATIONS = isDemo
+      ? 3
+      : Math.max(1, Math.min(Number(process.env.STAGE_STREAM_VARIATIONS || "1"), 50));
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');

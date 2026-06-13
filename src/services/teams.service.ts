@@ -870,7 +870,8 @@ function buildInviteEmail({
         `Invited by: ${safeInviterName} (${inviterEmail})\n` +
         `Team: ${teamName}\n` +
         `Valid until: ${expiryText}\n\n` +
-        `Accept invite: ${acceptUrl}`;
+        `Accept invite: ${acceptUrl}\n\n` +
+        `Note: If you continue by creating an account with Google, please come back to this email and click "Accept Invitation" again to finish joining the team.`;
 
     const html = `
         <!DOCTYPE html>
@@ -912,6 +913,14 @@ function buildInviteEmail({
                                         </tr>
                                     </table>
                                     
+                                    <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; margin: 16px 0 0 0;">
+                                        <tr>
+                                            <td style="padding: 14px 18px;">
+                                                <p style="margin: 0; font-size: 13px; line-height: 1.6; color: #92400e;"><strong>Note:</strong> If you continue by creating an account with Google, please come back to this email and click <strong>Accept Invitation</strong> again to finish joining the team.</p>
+                                            </td>
+                                        </tr>
+                                    </table>
+
                                     <p style="margin: 24px 0 0 0; font-size: 13px; line-height: 1.6; color: #64748b; text-align: center;">If the button doesn't work, copy and paste this URL into your browser:<br><a href="${acceptUrl}" style="color: #667eea; word-break: break-all;">${acceptUrl}</a></p>
                                 </td>
                             </tr>

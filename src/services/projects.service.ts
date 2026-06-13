@@ -304,7 +304,7 @@ export async function createProjectService({
         roleName = teamData.roleName;
 
         if (!["TEAM_OWNER", "TEAM_ADMIN", "TEAM_MEMBER"].includes(roleName)) {
-            throw new Error("You are not allowed to create projects for this team");
+            throw new Error("You are not allowed to create projects for this team, Please contact Mmeber / Admin, so they can create and add you");
         }
 
         // Check if TEAM has an active subscription OR user has an active personal subscription
@@ -538,6 +538,9 @@ export async function getMyProjectsService({ userId }: { userId: string }) {
 
     // Include personal projects (no team) created by the user
     orFilters.push({ team_id: null, created_by_user_id: userId });
+
+    // Include personal projects where the user was added as a member (e.g. photographer)
+    orFilters.push({ team_id: null, members: { some: { user_id: userId } } });
 
     // Owners and admins can see all projects in their teams
     if (ownerOrAdminTeamIds.length > 0) {

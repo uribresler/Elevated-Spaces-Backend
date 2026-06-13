@@ -332,7 +332,23 @@ export async function forgotPassword(req: Request, res: Response) {
         to: user.email,
         subject: 'Reset your Elevated Spaces password',
         text: `We received a password reset request. Use this link to reset your password: ${resetUrl}. This link expires in 1 hour.`,
-        html: `<p>We received a password reset request. Click the link below to reset your password. The link expires in 1 hour.</p><p><a href="${resetUrl}">${resetUrl}</a></p>`,
+        html: `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 24px; color: #0f172a;">
+            <h2 style="margin: 0 0 12px; font-size: 22px; color: #0f172a;">Reset your password</h2>
+            <p style="margin: 0 0 16px; font-size: 14px; line-height: 1.5; color: #334155;">
+              We received a password reset request for your Elevated Spaces account. Click the button below to set a new password. This link expires in 1 hour.
+            </p>
+            <p style="margin: 24px 0;">
+              <a href="${resetUrl}"
+                 style="display: inline-block; background: #4f46e5; color: #ffffff; text-decoration: none; padding: 14px 28px; border-radius: 8px; font-weight: 700; font-size: 15px;">
+                Reset password now
+              </a>
+            </p>
+            <p style="margin: 16px 0 0; font-size: 12px; color: #64748b; line-height: 1.5;">
+              If you didn't request this, you can safely ignore this email — your password will not change.
+            </p>
+          </div>
+        `,
       });
       logger(`Reset email sent via configured SendGrid to ${user.email}`);
     } catch (emailErr) {
