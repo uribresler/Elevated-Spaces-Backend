@@ -24,7 +24,7 @@ import { stripeWebhookHandler } from "./controllers/payment.controller";
 import { errorHandler } from "./middlewares/errorHandler";
 import { zodErrorHandler } from "./middlewares/zodErrorHandler";
 import { requestLoggingMiddleware } from "./middlewares/requestLogging.middleware";
-import { noSqlInjectionGuard, globalRateLimiter, authRateLimiter } from "./middlewares/security";
+import { noSqlInjectionGuard, globalRateLimiter } from "./middlewares/security";
 import cors from "cors";
 import helmet from "helmet";
 
@@ -120,9 +120,7 @@ app.get("/", (_req, res) => {
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 app.use("/api", healthRoute);
-// Tighter rate limit in front of auth endpoints (brute-force / credential
-// stuffing protection). Handlers are unchanged.
-app.use("/api/auth", authRateLimiter, authRoute);
+app.use("/api/auth", authRoute);
 app.use("/api/guest", guestRoute);
 app.use("/api/images", imageRoute);
 app.use('/api/teams', teamsRoute)
