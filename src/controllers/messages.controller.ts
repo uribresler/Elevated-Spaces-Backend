@@ -1,6 +1,8 @@
 import { Request, Response } from "express";
+import jwt from "jsonwebtoken";
 import prisma from "../dbConnection";
 import { logger } from "../utils/logger";
+import { pushSseEvent, registerSseClient } from "../utils/messagesSse";
 
 function sortUsers(a: string, b: string): [string, string] {
   return a < b ? [a, b] : [b, a];
@@ -194,9 +196,68 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
       data: { updated_at: new Date() },
     });
 
+    pushSseEvent(peerUserId, "message", message);
+    pushSseEvent(senderId, "message", message);
+
     res.status(201).json({ success: true, data: message });
   } catch (error) {
     logger(`[MESSAGES] send message failed: ${String(error)}`);
     res.status(500).json({ success: false, message: "Failed to send message" });
   }
+}
+
+export async function streamMessages(req: Request, res: Response): Promise<void> {
+  const token =
+    (typeof req.query.token === "string" && req.query.token) ||
+    (req.headers.authorization?.startsWith("Bearer ") ? req.headers.authorization.split(" ")[1] : "");
+
+  if (!token) {
+    res.status(401).json({ success: false, message: "Unauthorized" });
+    return;
+  }
+
+  let userId: string | null = null;
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET!) as any;
+    userId = payload.userId || payload.id || null;
+  } catch {
+    res.status(401).json({ success: false, message: "Invalid or expired token" });
+    return;
+  }
+
+  if (!userId) {
+    res.status(401).json({ success: false, message: "Unauthorized" });
+    return;
+  }
+
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+  res.write(`event: ready\ndata: {"ok":true}\n\n`);
+
+  const unregister = registerSseClient(userId, res);
+
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`: ping\n\n`);
+    } catch {
+      // socket may already be torn down
+    }
+  }, 25000);
+
+  const cleanup = () => {
+    clearInterval(heartbeat);
+    unregister();
+    try {
+      res.end();
+    } catch {
+      // ignore
+    }
+  };
+
+  req.on("close", cleanup);
+  req.on("aborted", cleanup);
 }

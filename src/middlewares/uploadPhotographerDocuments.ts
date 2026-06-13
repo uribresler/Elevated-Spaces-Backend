@@ -30,14 +30,24 @@ const storage = multer.diskStorage({
   },
 });
 
+const allowedDocMimes = [
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+  "image/heic",
+  "image/heif",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+];
+const allowedPortfolioMimes = ["image/jpeg", "image/png", "image/webp"];
+
 const fileFilter = (
   _req: Express.Request,
   file: Express.Multer.File,
   cb: multer.FileFilterCallback
 ) => {
-  const allowedDocMimes = ["application/pdf", "image/jpeg", "image/png", "image/webp"];
-  const allowedPortfolioMimes = ["image/jpeg", "image/png", "image/webp"];
-
   if (file.fieldname === "portfolioImages") {
     if (allowedPortfolioMimes.includes(file.mimetype)) {
       cb(null, true);
@@ -52,20 +62,19 @@ const fileFilter = (
     return;
   }
 
-  cb(new Error("Only PDF, JPEG, PNG, and WebP files are allowed"));
+  cb(new Error("Verification documents must be PDF, DOC/DOCX, or an image (JPEG/PNG/WebP/GIF/HEIC)"));
 };
 
 const upload = multer({
   storage,
   fileFilter,
   limits: {
-    fileSize: 8 * 1024 * 1024,
+    fileSize: 30 * 1024 * 1024,
   },
 });
 
 export const uploadPhotographerDocument = upload.single("document");
 export const uploadPhotographerOnboardingFiles = upload.fields([
-  { name: "drivingLicense", maxCount: 1 },
-  { name: "utilityBill", maxCount: 1 },
+  { name: "verificationDocuments", maxCount: 5 },
   { name: "portfolioImages", maxCount: 5 },
 ]);

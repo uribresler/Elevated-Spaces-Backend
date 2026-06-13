@@ -97,6 +97,54 @@ function parseStringArray(raw: unknown): string[] {
     .filter(Boolean);
 }
 
+const WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+type WeekdayKey = (typeof WEEKDAY_KEYS)[number];
+type DayRange = { start: string; end: string };
+
+function parseWeeklyAvailability(raw: unknown): Partial<Record<WeekdayKey, DayRange>> | null {
+  if (!raw) return null;
+  let parsed: any = raw;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const result: Partial<Record<WeekdayKey, DayRange>> = {};
+  const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+  for (const day of WEEKDAY_KEYS) {
+    const entry = parsed[day];
+    if (!entry || typeof entry !== "object") continue;
+    const start = typeof entry.start === "string" ? entry.start : "";
+    const end = typeof entry.end === "string" ? entry.end : "";
+    if (!timeRegex.test(start) || !timeRegex.test(end)) continue;
+    if (start >= end) continue;
+    result[day] = { start, end };
+  }
+  return Object.keys(result).length ? result : null;
+}
+
+function parseDocumentUrls(raw: unknown): string[] {
+  if (!raw || typeof raw !== "string") return [];
+  const trimmed = raw.trim();
+  if (!trimmed) return [];
+  if (trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((item): item is string => typeof item === "string" && item.length > 0);
+      }
+    } catch {
+      // fall through
+    }
+  }
+  return [trimmed];
+}
+
 function parseRefundPolicy(raw: unknown): Array<{ hoursBefore: number; refundPercent: number }> {
   const parsed = Array.isArray(raw)
     ? raw
@@ -141,6 +189,7 @@ export async function submitPhotographerApplication(req: Request, res: Response)
 
     const bio = typeof req.body.bio === "string" ? req.body.bio.trim() : "";
     const availability = typeof req.body.availability === "string" ? req.body.availability.trim() : null;
+    const weeklyAvailability = parseWeeklyAvailability(req.body.weeklyAvailability);
     const photographerType = typeof req.body.photographerType === "string" ? req.body.photographerType.trim() : null;
     const experienceLevel = typeof req.body.experienceLevel === "string" ? req.body.experienceLevel.trim() : null;
     const serviceArea = typeof req.body.serviceArea === "string" ? req.body.serviceArea.trim() : null;
@@ -162,14 +211,14 @@ export async function submitPhotographerApplication(req: Request, res: Response)
     const priceMax = Number(req.body.priceMax);
 
     const files = (req.files as Record<string, Express.Multer.File[]> | undefined) || {};
-    const drivingLicense = files.drivingLicense?.[0];
-    const utilityBill = files.utilityBill?.[0];
+    const verificationDocuments = files.verificationDocuments || [];
     const portfolioImages = files.portfolioImages || [];
     const portfolioServiceTypes = parseStringArray(req.body.portfolioServiceTypes);
 
     const baseHost = `${req.protocol}://${req.get("host") || "localhost:3003"}`;
-    const drivingLicenseUrl = drivingLicense ? `${baseHost}/uploads/documents/${drivingLicense.filename}` : null;
-    const utilityBillUrl = utilityBill ? `${baseHost}/uploads/documents/${utilityBill.filename}` : null;
+    const verificationDocumentUrls = verificationDocuments.map(
+      (file) => `${baseHost}/uploads/documents/${file.filename}`
+    );
     const portfolioItems = portfolioImages.map((file, index) => ({
       imageUrl: `${baseHost}/uploads/photographer-portfolio/${file.filename}`,
       serviceType: portfolioServiceTypes[index] || "General",
@@ -223,61 +272,86 @@ export async function submitPhotographerApplication(req: Request, res: Response)
     const existingProfile = (await prisma.photographer_profile.findUnique({
       where: { user_id: userId },
     })) as (typeof prisma.photographer_profile extends { findUnique: (...args: any[]) => Promise<infer T> } ? T : unknown) & {
-      driving_license_url?: string | null;
-      utility_bill_url?: string | null;
+      documents_url?: string | null;
       portfolio_items?: unknown;
+      application_status?: string | null;
     } | null;
 
-    if (!drivingLicenseUrl && !existingProfile?.driving_license_url) {
-      res.status(400).json({ success: false, message: "Driving license document is required" });
+    const currentStatus = existingProfile?.application_status ?? null;
+    const isFullEdit = !existingProfile || currentStatus === "REJECTED";
+    const isPartialEdit = currentStatus === "NEEDS_MORE_INFO";
+
+    if (existingProfile && !isFullEdit && !isPartialEdit) {
+      res.status(403).json({
+        success: false,
+        message: "Your application is locked while it is being reviewed. You can only edit it after admin marks it as 'Needs more info' or 'Rejected'.",
+      });
       return;
     }
 
-    if (!utilityBillUrl && !existingProfile?.utility_bill_url) {
-      res.status(400).json({ success: false, message: "Latest utility bill document is required" });
+    const existingDocumentUrls = parseDocumentUrls(existingProfile?.documents_url);
+    const mergedDocumentUrls = verificationDocumentUrls.length > 0 ? verificationDocumentUrls : existingDocumentUrls;
+
+    if (mergedDocumentUrls.length === 0) {
+      res.status(400).json({ success: false, message: "Please upload at least one verification document" });
       return;
     }
+
+    if (mergedDocumentUrls.length > 5) {
+      res.status(400).json({ success: false, message: "You can upload a maximum of 5 verification documents" });
+      return;
+    }
+
+    const documentsUrlSerialized = JSON.stringify(mergedDocumentUrls);
 
     const existingPortfolioItems = Array.isArray(existingProfile?.portfolio_items)
       ? (existingProfile?.portfolio_items as Array<{ imageUrl: string; serviceType?: string }>)
       : [];
 
     const mergedPortfolioItems = portfolioItems.length > 0 ? portfolioItems : existingPortfolioItems;
-    if (mergedPortfolioItems.length < 3 || mergedPortfolioItems.length > 5) {
-      res.status(400).json({ success: false, message: "Please provide between 3 and 5 portfolio images" });
+    if (mergedPortfolioItems.length > 5) {
+      res.status(400).json({ success: false, message: "You can upload a maximum of 5 portfolio images" });
       return;
     }
 
+    const fullUpdatePayload = {
+      bio,
+      availability,
+      weekly_availability: (weeklyAvailability as any) ?? undefined,
+      photographer_type: photographerType,
+      years_experience: yearsExperience,
+      service_area: serviceAreas.join(", ") || serviceArea,
+      service_areas: serviceAreas,
+      portfolio_url: portfolioUrl,
+      instagram_url: instagramUrl,
+      facebook_url: facebookUrl,
+      linkedin_url: linkedinUrl,
+      x_url: xUrl,
+      website_url: websiteUrl,
+      phone_number: phoneNumber,
+      portfolio_items: mergedPortfolioItems,
+      service_keywords: serviceKeywords.join(", "),
+      price_min: Number.isFinite(priceMin) ? Math.max(0, Math.floor(priceMin)) : undefined,
+      price_max: Number.isFinite(priceMax) ? Math.max(0, Math.floor(priceMax)) : undefined,
+      refund_policy: refundPolicy,
+      gear_description: gearDescription,
+      business_name: businessName,
+      short_pitch: shortPitch,
+      approved: false,
+      application_status: "SUBMITTED" as const,
+      documents_url: documentsUrlSerialized,
+    };
+
+    const partialUpdatePayload = {
+      portfolio_items: mergedPortfolioItems,
+      documents_url: documentsUrlSerialized,
+      approved: false,
+      application_status: "SUBMITTED" as const,
+    };
+
     const profile = await prisma.photographer_profile.upsert({
       where: { user_id: userId },
-      update: {
-        bio,
-        availability,
-        photographer_type: photographerType,
-        years_experience: yearsExperience,
-        service_area: serviceAreas.join(", ") || serviceArea,
-        service_areas: serviceAreas,
-        portfolio_url: portfolioUrl,
-        instagram_url: instagramUrl,
-        facebook_url: facebookUrl,
-        linkedin_url: linkedinUrl,
-        x_url: xUrl,
-        website_url: websiteUrl,
-        phone_number: phoneNumber,
-        portfolio_items: mergedPortfolioItems,
-        service_keywords: serviceKeywords.join(", "),
-        price_min: Number.isFinite(priceMin) ? Math.max(0, Math.floor(priceMin)) : undefined,
-        price_max: Number.isFinite(priceMax) ? Math.max(0, Math.floor(priceMax)) : undefined,
-        refund_policy: refundPolicy,
-        gear_description: gearDescription,
-        business_name: businessName,
-        short_pitch: shortPitch,
-        approved: false,
-        application_status: "SUBMITTED",
-        documents_url: drivingLicenseUrl || existingProfile?.driving_license_url || undefined,
-        driving_license_url: drivingLicenseUrl || existingProfile?.driving_license_url || undefined,
-        utility_bill_url: utilityBillUrl || existingProfile?.utility_bill_url || undefined,
-      },
+      update: isPartialEdit ? partialUpdatePayload : fullUpdatePayload,
       create: {
         user_id: userId,
         bio,
@@ -303,9 +377,7 @@ export async function submitPhotographerApplication(req: Request, res: Response)
         short_pitch: shortPitch,
         approved: false,
         application_status: "SUBMITTED",
-        documents_url: drivingLicenseUrl || undefined,
-        driving_license_url: drivingLicenseUrl || undefined,
-        utility_bill_url: utilityBillUrl || undefined,
+        documents_url: documentsUrlSerialized,
       },
     });
 
@@ -390,6 +462,7 @@ export async function getMyPhotographerProfile(req: Request, res: Response): Pro
         approved: true,
         application_status: true,
         availability: true,
+        weekly_availability: true,
         photographer_type: true,
         years_experience: true,
         service_area: true,
@@ -437,7 +510,7 @@ export async function updateMyPhotographerProfile(req: Request, res: Response): 
       return;
     }
 
-    const updates: { bio?: string; availability?: string | null } = {};
+    const updates: { bio?: string; availability?: string | null; weekly_availability?: any } = {};
 
     if (typeof req.body.bio === "string") {
       const bio = req.body.bio.trim();
@@ -450,6 +523,11 @@ export async function updateMyPhotographerProfile(req: Request, res: Response): 
 
     if (typeof req.body.availability === "string") {
       updates.availability = req.body.availability.trim();
+    }
+
+    if (req.body.weeklyAvailability !== undefined) {
+      const weekly = parseWeeklyAvailability(req.body.weeklyAvailability);
+      updates.weekly_availability = weekly ?? (null as any);
     }
 
     if (Object.keys(updates).length === 0) {
@@ -711,6 +789,7 @@ export async function listApprovedPhotographers(req: Request, res: Response): Pr
         approved: true,
         application_status: true,
         availability: true,
+        weekly_availability: true,
         photographer_type: true,
         years_experience: true,
         service_area: true,
@@ -762,6 +841,7 @@ export async function createBookingRequestPlaceholder(req: Request, res: Respons
 
     const photographerId = typeof req.body.photographerId === "string" ? req.body.photographerId.trim() : "";
     const dateInput = typeof req.body.date === "string" ? req.body.date.trim() : "";
+    const endDateInput = typeof req.body.endDate === "string" ? req.body.endDate.trim() : "";
     const clientNoteHtml = typeof req.body.clientNoteHtml === "string" ? req.body.clientNoteHtml.trim() : "";
     const clientNoteAttachments = normalizeAttachments(req.body.clientNoteAttachments);
     const paymentConfirmed = Boolean(req.body.paymentConfirmed);
@@ -779,6 +859,19 @@ export async function createBookingRequestPlaceholder(req: Request, res: Respons
     if (Number.isNaN(date.getTime())) {
       res.status(400).json({ success: false, message: "Invalid booking date" });
       return;
+    }
+
+    let endDate: Date | null = null;
+    if (endDateInput) {
+      endDate = new Date(endDateInput);
+      if (Number.isNaN(endDate.getTime())) {
+        res.status(400).json({ success: false, message: "Invalid booking end time" });
+        return;
+      }
+      if (endDate.getTime() <= date.getTime()) {
+        res.status(400).json({ success: false, message: "End time must be after the start time" });
+        return;
+      }
     }
 
     const photographer = await prisma.photographer_profile.findUnique({
@@ -820,10 +913,11 @@ export async function createBookingRequestPlaceholder(req: Request, res: Respons
         user_id: userId,
         photographer_id: photographerId,
         date,
+        end_date: endDate ?? undefined,
         status: booking_status.PENDING,
         client_note_html: clientNoteHtml || null,
         client_note_attachments: clientNoteAttachments,
-      },
+      } as any,
       include: {
         photographer: {
           select: {
@@ -908,6 +1002,7 @@ export async function listMyBookingRequests(req: Request, res: Response): Promis
         user_id: true,
         photographer_id: true,
         date: true,
+        end_date: true,
         status: true,
         client_note_html: true,
         client_note_attachments: true,
@@ -963,6 +1058,7 @@ export async function listBookingsForPhotographer(req: Request, res: Response): 
         user_id: true,
         photographer_id: true,
         date: true,
+        end_date: true,
         status: true,
         client_note_html: true,
         client_note_attachments: true,

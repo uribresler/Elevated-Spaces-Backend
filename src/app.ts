@@ -19,6 +19,8 @@ import paymentHistoryRoutes from './api/payment-history.route'
 import debugRoutes from './api/debug.route'
 import photographerRoutes from './api/photographer.route'
 import messagesRoutes from './api/messages.route'
+import accountDeletionRoutes from './api/accountDeletion.route'
+import analyticsRoutes from './api/analytics.route'
 import consentsRoute from './api/consents.route'
 import { stripeWebhookHandler } from "./controllers/payment.controller";
 import { errorHandler } from "./middlewares/errorHandler";
@@ -148,6 +150,8 @@ app.use('/api/subscriptions', subscriptionRoutes)
 app.use('/debug', debugRoutes)
 app.use('/api/photographers', photographerRoutes)
 app.use('/api/messages', messagesRoutes)
+app.use('/api/account', accountDeletionRoutes)
+app.use('/api/analytics', analyticsRoutes)
 
 /* =======================
    ERROR HANDLERS
