@@ -301,6 +301,7 @@ model photographer_profile {
   service_keywords            String?   @map("service_keywords")
   price_min                   Int?      @map("price_min")
   price_max                   Int?      @map("price_max")
+  hourly_rate                 Int?      @map("hourly_rate")
   refund_policy               Json?     @map("refund_policy")
   gear_description            String?   @map("gear_description")
   business_name               String?   @map("business_name")

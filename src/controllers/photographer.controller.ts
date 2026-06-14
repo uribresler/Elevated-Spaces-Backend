@@ -209,6 +209,15 @@ export async function submitPhotographerApplication(req: Request, res: Response)
     const refundPolicy = parseRefundPolicy(req.body.refundPolicy);
     const priceMin = Number(req.body.priceMin);
     const priceMax = Number(req.body.priceMax);
+    const rawHourlyRate = req.body.hourlyRate;
+    const hourlyRateNumber =
+      rawHourlyRate === undefined || rawHourlyRate === null || rawHourlyRate === ""
+        ? null
+        : Number(rawHourlyRate);
+    const hourlyRate =
+      hourlyRateNumber !== null && Number.isFinite(hourlyRateNumber)
+        ? Math.max(0, Math.floor(hourlyRateNumber))
+        : null;
 
     const files = (req.files as Record<string, Express.Multer.File[]> | undefined) || {};
     const verificationDocuments = files.verificationDocuments || [];
@@ -333,6 +342,7 @@ export async function submitPhotographerApplication(req: Request, res: Response)
       service_keywords: serviceKeywords.join(", "),
       price_min: Number.isFinite(priceMin) ? Math.max(0, Math.floor(priceMin)) : undefined,
       price_max: Number.isFinite(priceMax) ? Math.max(0, Math.floor(priceMax)) : undefined,
+      hourly_rate: hourlyRate,
       refund_policy: refundPolicy,
       gear_description: gearDescription,
       business_name: businessName,
@@ -371,6 +381,7 @@ export async function submitPhotographerApplication(req: Request, res: Response)
         service_keywords: serviceKeywords.join(", "),
         price_min: Number.isFinite(priceMin) ? Math.max(0, Math.floor(priceMin)) : undefined,
         price_max: Number.isFinite(priceMax) ? Math.max(0, Math.floor(priceMax)) : undefined,
+        hourly_rate: hourlyRate,
         refund_policy: refundPolicy,
         gear_description: gearDescription,
         business_name: businessName,
@@ -472,6 +483,9 @@ export async function getMyPhotographerProfile(req: Request, res: Response): Pro
         gear_description: true,
         business_name: true,
         short_pitch: true,
+        hourly_rate: true,
+        price_min: true,
+        price_max: true,
         admin_feedback: true,
         feedback_provided_at: true,
         photographer_responses: true,
@@ -510,7 +524,7 @@ export async function updateMyPhotographerProfile(req: Request, res: Response): 
       return;
     }
 
-    const updates: { bio?: string; availability?: string | null; weekly_availability?: any } = {};
+    const updates: { bio?: string; availability?: string | null; weekly_availability?: any; hourly_rate?: number | null } = {};
 
     if (typeof req.body.bio === "string") {
       const bio = req.body.bio.trim();
@@ -528,6 +542,19 @@ export async function updateMyPhotographerProfile(req: Request, res: Response): 
     if (req.body.weeklyAvailability !== undefined) {
       const weekly = parseWeeklyAvailability(req.body.weeklyAvailability);
       updates.weekly_availability = weekly ?? (null as any);
+    }
+
+    if (req.body.hourlyRate !== undefined) {
+      if (req.body.hourlyRate === null || req.body.hourlyRate === "") {
+        updates.hourly_rate = null;
+      } else {
+        const parsed = Number(req.body.hourlyRate);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          res.status(400).json({ success: false, message: "Hourly rate must be a non-negative number" });
+          return;
+        }
+        updates.hourly_rate = Math.floor(parsed);
+      }
     }
 
     if (Object.keys(updates).length === 0) {
@@ -799,6 +826,9 @@ export async function listApprovedPhotographers(req: Request, res: Response): Pr
         gear_description: true,
         business_name: true,
         short_pitch: true,
+        hourly_rate: true,
+        price_min: true,
+        price_max: true,
         admin_feedback: true,
         feedback_provided_at: true,
         photographer_responses: true,

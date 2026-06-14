@@ -284,6 +284,31 @@ class SupabaseStorageService {
   }
 
   /**
+   * Upload an avatar image buffer to the bucket and return a public URL.
+   */
+  async uploadAvatarFromBuffer(
+    imageBuffer: Buffer,
+    fileName: string,
+    mimeType: string = "image/jpeg"
+  ): Promise<string> {
+    await this.ensureBucketExists();
+    const storagePath = `avatars/${fileName}`;
+    const { error } = await this.client.storage
+      .from(this.bucketName)
+      .upload(storagePath, imageBuffer, {
+        contentType: mimeType,
+        upsert: true,
+      });
+    if (error) {
+      throw new Error(`Avatar upload failed: ${error.message}`);
+    }
+    const { data: publicUrl } = this.client.storage
+      .from(this.bucketName)
+      .getPublicUrl(storagePath);
+    return publicUrl.publicUrl;
+  }
+
+  /**
    * Delete local files after successful upload to Supabase
    */
   cleanupLocalFiles(...filePaths: string[]): void {

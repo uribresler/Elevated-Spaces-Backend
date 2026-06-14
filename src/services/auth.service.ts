@@ -29,6 +29,7 @@ export async function signupService({
     gearDescription?: string;
     businessName?: string;
     shortPitch?: string;
+    hourlyRate?: number | string | null;
   };
 }) {
   const existing = await prisma.user.findUnique({ where: { email } });
@@ -70,6 +71,7 @@ export async function signupService({
     },
   });
 
+  let photographerProfileId: string | null = null;
   if (requestedRole === "PHOTOGRAPHER") {
     const photographerRole = await prisma.roles.findUnique({ where: { name: "PHOTOGRAPHER" } });
     if (photographerRole) {
@@ -79,7 +81,12 @@ export async function signupService({
           role_id: photographerRole.id,
         },
       });
-      await prisma.photographer_profile.create({
+      const rawHourly =
+        photographerProfile?.hourlyRate === undefined || photographerProfile?.hourlyRate === null || photographerProfile?.hourlyRate === ""
+          ? null
+          : Number(photographerProfile.hourlyRate);
+      const hourly = rawHourly !== null && Number.isFinite(rawHourly) ? Math.max(0, Math.floor(rawHourly)) : null;
+      const created = await prisma.photographer_profile.create({
         data: {
           user_id: user.id,
           bio: photographerProfile?.bio || null,
@@ -93,11 +100,13 @@ export async function signupService({
           gear_description: photographerProfile?.gearDescription || null,
           business_name: photographerProfile?.businessName || null,
           short_pitch: photographerProfile?.shortPitch || null,
+          hourly_rate: hourly,
           application_status: "SUBMITTED",
           approved: false,
           documents_url: null,
         },
       });
+      photographerProfileId = created.id;
     }
   }
 
@@ -121,6 +130,7 @@ export async function signupService({
   return {
     token,
     user: { id: user.id, email: user.email, name: user.name, role: requestedRole === "PHOTOGRAPHER" ? "PHOTOGRAPHER" : defaultRole.name, created_at: user.created_at },
+    photographerProfileId,
     success: true,
   };
 }

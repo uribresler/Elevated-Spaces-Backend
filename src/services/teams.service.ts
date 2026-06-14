@@ -2065,16 +2065,36 @@ export async function completeLeaveTeamService({ teamId, userId }: { teamId: str
         throw new Error("You are not a member of this team");
     }
 
-    // Soft delete the membership
-    await prisma.team_membership.update({
-        where: { id: userMembership.id },
-        data: { deleted_at: new Date() },
-    });
+    const unusedCredits = Math.max(
+        Number(userMembership.allocated) - Number(userMembership.used),
+        0
+    );
+
+    // Return any remaining unused credits to the team wallet and soft-delete the membership atomically.
+    await prisma.$transaction([
+        ...(unusedCredits > 0
+            ? [
+                  prisma.teams.update({
+                      where: { id: teamId },
+                      data: { wallet: { increment: unusedCredits } },
+                  }),
+                  prisma.team_membership.update({
+                      where: { id: userMembership.id },
+                      data: { allocated: { decrement: unusedCredits } },
+                  }),
+              ]
+            : []),
+        prisma.team_membership.update({
+            where: { id: userMembership.id },
+            data: { deleted_at: new Date() },
+        }),
+    ]);
 
     console.log("TEAM_MEMBER_LEFT", {
         action: "SELF_LEAVE_AFTER_CREDIT_TRANSFER",
         team_id: teamId,
         user_id: userId,
+        refunded_to_wallet: unusedCredits,
         timestamp: new Date().toISOString(),
     });
 

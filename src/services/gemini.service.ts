@@ -410,20 +410,22 @@ class GeminiService {
 
     let stagingPrompt: string;
 
-    if (prompt) {
+    const promptStr = typeof prompt === "string" ? prompt : prompt != null ? String(prompt) : "";
+
+    if (promptStr) {
       const priorityPrompt =
         "Treat the user prompt as the highest-priority instruction. Follow every request exactly, preserve the original architecture, camera angle, and room layout, and do not reinterpret or dilute the instruction set.";
       if (areaType === "exterior") {
-        stagingPrompt = `${priorityPrompt}\nThis is an EXTERIOR property staging request. Keep the scene outside the house and preserve the facade, roofline, windows, doors, driveway, landscaping, and perspective. DO NOT change layout, move structural elements, or alter the architecture. ${prompt}`;
+        stagingPrompt = `${priorityPrompt}\nThis is an EXTERIOR property staging request. Keep the scene outside the house and preserve the facade, roofline, windows, doors, driveway, landscaping, and perspective. DO NOT change layout, move structural elements, or alter the architecture. ${promptStr}`;
       } else {
         const doNotRemove =
           "ABSOLUTELY DO NOT REMOVE, HIDE, OR ALTER ANY EXISTING PAINTINGS, WALL ART, OR DECORATIVE ITEMS. THIS IS CRITICAL. ONLY ADD OR IMPROVE, NEVER REMOVE. DO NOT REMOVE ANYTHING FROM THE ORIGINAL IMAGE UNLESS I EXPLICITLY SAY SO.";
-        const lowerPrompt = prompt.toLocaleLowerCase()
+        const lowerPrompt = promptStr.toLocaleLowerCase();
         const userRequestsRemoval = /remove|delete|empty|clear|no decor|no painting|no wall art/.test(lowerPrompt);
         if (userRequestsRemoval) {
-          stagingPrompt = `${priorityPrompt}\n${prompt}`;
+          stagingPrompt = `${priorityPrompt}\n${promptStr}`;
         } else {
-          stagingPrompt = `${priorityPrompt}\n${doNotRemove}\n${prompt}\n${doNotRemove}`;
+          stagingPrompt = `${priorityPrompt}\n${doNotRemove}\n${promptStr}\n${doNotRemove}`;
         }
       }
     } else if (areaType === "exterior") {

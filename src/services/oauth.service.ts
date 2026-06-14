@@ -2,6 +2,34 @@ import prisma from "../dbConnection";
 import jwt from "jsonwebtoken";
 import { OAuthUserProfile, OAuthProvider, providerIdFields, providerEnumValues } from "../config/oauth.config";
 import { logger } from "../utils/logger";
+import { supabaseStorage } from "./supabaseStorage.service";
+
+async function persistRemoteAvatar(userId: string, remoteUrl: string | null | undefined): Promise<string | null> {
+  if (!remoteUrl) return null;
+  try {
+    const response = await fetch(remoteUrl);
+    if (!response.ok) {
+      logger(`[OAuth] Avatar download failed: status=${response.status} url=${remoteUrl}`);
+      return null;
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const contentType = response.headers.get("content-type") || "image/jpeg";
+    const extMap: Record<string, string> = {
+      "image/jpeg": "jpg",
+      "image/jpg": "jpg",
+      "image/png": "png",
+      "image/webp": "webp",
+      "image/gif": "gif",
+    };
+    const ext = extMap[contentType.toLowerCase().split(";")[0].trim()] || "jpg";
+    const fileName = `${userId}-${Date.now()}.${ext}`;
+    return await supabaseStorage.uploadAvatarFromBuffer(buffer, fileName, contentType.split(";")[0].trim());
+  } catch (err) {
+    logger(`[OAuth] Persist avatar error: ${String(err)}`);
+    return null;
+  }
+}
 
 const JWT_SECRET = process.env.JWT_SECRET || "changeme";
 
@@ -103,6 +131,26 @@ class OAuthService {
       // Existing OAuth users: do not overwrite profile fields from provider on login.
       // Avatar is only set during first-time OAuth signup in createOAuthUser().
       user = await this.updateUserProfile(user.id, name, null);
+
+      // One-time backfill: if the user's avatar still points at a provider CDN
+      // (googleusercontent.com / fbcdn / appleid) it is subject to provider rate limits.
+      // Re-host it on our bucket so it stays available.
+      const existingAvatar = user.avatar_url || "";
+      const isProviderHosted = /googleusercontent\.com|fbcdn\.net|appleid\.cdn/i.test(existingAvatar);
+      if (avatarUrl && (!existingAvatar || isProviderHosted)) {
+        const persistedUrl = await persistRemoteAvatar(user.id, avatarUrl);
+        if (persistedUrl) {
+          try {
+            const updated = await prisma.user.update({
+              where: { id: user.id },
+              data: { avatar_url: persistedUrl },
+            });
+            user.avatar_url = updated.avatar_url;
+          } catch (err) {
+            logger(`[OAuth] Failed to backfill avatar URL: ${String(err)}`);
+          }
+        }
+      }
     }
 
     const roles = await prisma.user_roles.findMany({
@@ -179,7 +227,7 @@ class OAuthService {
     const createData: any = {
       email,
       name: name || null,
-      avatar_url: avatarUrl,
+      avatar_url: null,
       auth_provider: providerEnumValues[provider] as any,
     };
 
@@ -190,6 +238,23 @@ class OAuthService {
       create: createData,
       update: {},
     });
+
+    // Persist provider avatar to our own bucket so it stays reachable even when
+    // the provider CDN throttles (Google returns 429 for hot avatar URLs).
+    if (avatarUrl) {
+      const persistedUrl = await persistRemoteAvatar(user.id, avatarUrl);
+      if (persistedUrl) {
+        try {
+          const updated = await prisma.user.update({
+            where: { id: user.id },
+            data: { avatar_url: persistedUrl },
+          });
+          user.avatar_url = updated.avatar_url;
+        } catch (err) {
+          logger(`[OAuth] Failed to save persisted avatar URL: ${String(err)}`);
+        }
+      }
+    }
 
     const defaultRole = await prisma.roles.findUnique({ where: { name: "USER" } });
     if (defaultRole) {
