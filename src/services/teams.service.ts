@@ -1404,6 +1404,8 @@ export async function acceptInvitationService({
             team_role_id: invite.team_role_id,
             deleted_at: null, // Ensure any previously deleted membership is reactivated
             joined_at: new Date(), // Reset joined_at to current time for reactivated members
+            allocated: 0, // Re-added members start with zero credits — must be re-allocated
+            used: 0,
         },
     });
 
@@ -1560,7 +1562,7 @@ export async function removeTeamMemberService({
             });
         }
 
-        // Soft delete - set deleted_at instead of hard delete
+        // Soft delete + zero out allocated/used so a future re-add starts fresh
         const removedMembership = await prisma.team_membership.updateMany({
             where: {
                 team_id,
@@ -1569,6 +1571,8 @@ export async function removeTeamMemberService({
             },
             data: {
                 deleted_at: new Date(),
+                allocated: 0,
+                used: 0,
             }
         });
 
@@ -1625,7 +1629,7 @@ export async function removeTeamMemberService({
         });
     }
 
-    // Soft delete - set deleted_at instead of hard delete
+    // Soft delete + zero out allocated/used so a future re-add starts fresh
     const removedMembership = await prisma.team_membership.updateMany({
         where: {
             team_id,
@@ -1634,6 +1638,8 @@ export async function removeTeamMemberService({
         },
         data: {
             deleted_at: new Date(),
+            allocated: 0,
+            used: 0,
         }
     });
 
@@ -1943,10 +1949,10 @@ export async function leaveTeamService({ teamId, userId }: { teamId: string, use
         };
     }
 
-    // Soft delete the membership
+    // Soft delete + zero counters so a future re-add starts fresh
     await prisma.team_membership.update({
         where: { id: userMembership.id },
-        data: { deleted_at: new Date() },
+        data: { deleted_at: new Date(), allocated: 0, used: 0 },
     });
 
     console.log("TEAM_MEMBER_LEFT", {
@@ -2074,10 +2080,10 @@ export async function completeLeaveTeamService({ teamId, userId }: { teamId: str
         throw new Error("You are not a member of this team");
     }
 
-    // Soft delete the membership
+    // Soft delete + zero counters so a future re-add starts fresh
     await prisma.team_membership.update({
         where: { id: userMembership.id },
-        data: { deleted_at: new Date() },
+        data: { deleted_at: new Date(), allocated: 0, used: 0 },
     });
 
     console.log("TEAM_MEMBER_LEFT", {

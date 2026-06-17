@@ -110,6 +110,11 @@ export async function signupService({
         },
       },
     });
+    // Stamp the user so admins can verify the bonus was actually claimed
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { demo_bonus_claimed_at: new Date() },
+    });
   }
 
   const token = jwt.sign({ userId: user.id, role: defaultRole.name }, JWT_SECRET, { expiresIn: "7d" });
@@ -166,7 +171,9 @@ export async function loginService({ email, password }: { email: string; passwor
     email: user.email,
     name: user.name,
     role: userRole.role.name,
-    avatarUrl: user.avatar_url,
+    avatarUrl: (user as any).manual_avatar_url ?? user.avatar_url,
+    manualAvatarUrl: (user as any).manual_avatar_url ?? null,
+    googleAvatarUrl: user.avatar_url,
     created_at: user.created_at,
   };
   const token = jwt.sign({ userId: user.id, role: userRole.role.name }, JWT_SECRET, { expiresIn: "7d" });
@@ -197,7 +204,7 @@ export async function updateProfileImageService({
   const updatedUser = await prisma.user.update({
     where: { id: userId },
     data: {
-      avatar_url: avatarUrl,
+      manual_avatar_url: avatarUrl,
     },
   });
 
@@ -214,7 +221,9 @@ export async function updateProfileImageService({
       email: updatedUser.email,
       name: updatedUser.name,
       role: userRole?.role.name || "USER",
-      avatar_url: updatedUser.avatar_url,
+      avatar_url: updatedUser.manual_avatar_url ?? updatedUser.avatar_url,
+      manual_avatar_url: updatedUser.manual_avatar_url,
+      google_avatar_url: updatedUser.avatar_url,
       created_at: updatedUser.created_at,
     },
   };
@@ -231,10 +240,12 @@ export async function deleteProfileImageService({ userId }: { userId: string }) 
     throw err;
   }
 
+  // Only clear the manually-uploaded avatar; preserve the Google avatar so it
+  // falls back to the OAuth picture instead of disappearing entirely.
   const updatedUser = await prisma.user.update({
     where: { id: userId },
     data: {
-      avatar_url: null,
+      manual_avatar_url: null,
     },
   });
 
@@ -251,7 +262,9 @@ export async function deleteProfileImageService({ userId }: { userId: string }) 
       email: updatedUser.email,
       name: updatedUser.name,
       role: userRole?.role.name || "USER",
-      avatar_url: updatedUser.avatar_url,
+      avatar_url: updatedUser.manual_avatar_url ?? updatedUser.avatar_url,
+      manual_avatar_url: updatedUser.manual_avatar_url,
+      google_avatar_url: updatedUser.avatar_url,
       created_at: updatedUser.created_at,
     },
   };

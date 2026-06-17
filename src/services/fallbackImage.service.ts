@@ -9,7 +9,9 @@ import {
   FALLBACK_VARIANT_COUNT,
 } from "../config/fallback.config";
 
-const FALLBACK_OPERATION_TIMEOUT_MS = Number(process.env.FALLBACK_OPERATION_TIMEOUT_MS || "15000");
+// Per-variant timeout. gemini-2.5-flash-image regularly takes 15-40s for a single image
+// generation (see PHASE1 logs); 15s guaranteed variant timeouts. Default raised to 60s.
+const FALLBACK_OPERATION_TIMEOUT_MS = Number(process.env.FALLBACK_OPERATION_TIMEOUT_MS || "60000");
 
 type VariantReadyPayload = {
   index: number;

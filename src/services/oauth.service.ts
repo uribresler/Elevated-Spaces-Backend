@@ -37,6 +37,8 @@ class OAuthService {
       name: string | null;
       role: string[];
       avatarUrl: string | null;
+      manualAvatarUrl: string | null;
+      googleAvatarUrl: string | null;
       authProvider: string;
       created_at: Date;
     };
@@ -57,6 +59,8 @@ class OAuthService {
       name: string | null;
       role: string[];
       avatarUrl: string | null;
+      manualAvatarUrl: string | null;
+      googleAvatarUrl: string | null;
       authProvider: string;
       created_at: Date;
     };
@@ -127,7 +131,9 @@ class OAuthService {
         email: user.email,
         name: user.name,
         role: roleNames,
-        avatarUrl: user.avatar_url,
+        avatarUrl: (user as any).manual_avatar_url ?? user.avatar_url,
+        manualAvatarUrl: (user as any).manual_avatar_url ?? null,
+        googleAvatarUrl: user.avatar_url,
         authProvider: user.auth_provider,
         created_at: user.created_at,
       },

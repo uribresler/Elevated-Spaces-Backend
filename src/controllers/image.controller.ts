@@ -1577,9 +1577,14 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
         const variants = await variantsPromise;
         
         let streamedVariantCount = 0;
+        let persistedVariantCount = 0;
         for (let index = 0; index < variants.length; index++) {
           const buffer = variants[index];
-          if (!buffer || responseClosed) continue;
+          // Only skip if the variant buffer itself is empty. Even if the SSE
+          // connection is gone, still upload + persist the variant so the
+          // generated image isn't thrown away — the client can fetch it from
+          // history on next page load.
+          if (!buffer) continue;
 
           try {
             let watermarked = buffer;
@@ -1610,26 +1615,40 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
               }
             });
 
-            streamedVariantCount++;
-            logger(`[DUAL_MODEL] VARIANT_${index + 1}_STREAMED sizeBytes=${buffer.length}`);
-            await stagingTrace?.append("phase2.variant.streamed", {
+            persistedVariantCount++;
+            logger(`[DUAL_MODEL] VARIANT_${index + 1}_PERSISTED sizeBytes=${buffer.length} responseClosed=${responseClosed}`);
+            await stagingTrace?.append("phase2.variant.persisted", {
               index: index + 1,
               bytes: buffer.length,
               variantUrl,
+              responseClosed,
             });
 
             if (!responseClosed) {
-              res.write(`event: image\ndata: ${JSON.stringify({
-                stagedImageUrl: variantUrl,
-                stagedId: variantFileName,
-                index: index + 1,
-                isDemo,
-                roomType,
-                stagingStyle,
-                prompt: prompt || null,
-                isVariant: true,
-                storage: "supabase",
-              })}\n\n`);
+              try {
+                res.write(`event: image\ndata: ${JSON.stringify({
+                  stagedImageUrl: variantUrl,
+                  stagedId: variantFileName,
+                  index: index + 1,
+                  isDemo,
+                  roomType,
+                  stagingStyle,
+                  prompt: prompt || null,
+                  isVariant: true,
+                  storage: "supabase",
+                })}\n\n`);
+                streamedVariantCount++;
+                logger(`[DUAL_MODEL] VARIANT_${index + 1}_STREAMED sizeBytes=${buffer.length}`);
+                await stagingTrace?.append("phase2.variant.streamed", {
+                  index: index + 1,
+                  bytes: buffer.length,
+                  variantUrl,
+                });
+              } catch (writeErr) {
+                // SSE write failed (socket closed mid-loop) — mark closed but variant is already saved.
+                responseClosed = true;
+                logger(`[DUAL_MODEL] VARIANT_${index + 1}_STREAM_DROPPED ${String(writeErr)}`);
+              }
             }
           } catch (err) {
             logger(`[DUAL_MODEL] VARIANT_${index + 1}_ERROR upload failed: ${err}`);
@@ -1641,9 +1660,10 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
         }
         
         const phase2Duration = Date.now() - phase2StartTime;
-        logger(`[DUAL_MODEL] PHASE2_SUCCESS processed ${variants.length} variants | streamed=${streamedVariantCount} | uploadDurationMs=${phase2Duration}`);
+        logger(`[DUAL_MODEL] PHASE2_SUCCESS processed ${variants.length} variants | persisted=${persistedVariantCount} | streamed=${streamedVariantCount} | uploadDurationMs=${phase2Duration}`);
         await stagingTrace?.append("phase2.fallback.success", {
           generatedVariants: variants.length,
+          persistedVariants: persistedVariantCount,
           streamedVariants: streamedVariantCount,
           uploadDurationMs: phase2Duration,
         });

@@ -125,6 +125,15 @@ router.get("/google", (req, res, next) => {
     maxAge: 10 * 60 * 1000,
   });
 
+  // Demo bonus claim from /sign-up?bonus=true — survives the OAuth round-trip
+  // so the callback can grant +5 credits when this Google signup is brand new.
+  const fromDemoBonus = req.query.fromDemoBonus === "true" || req.query.fromDemoBonus === "1";
+  res.cookie("oauth_from_demo_bonus", fromDemoBonus ? "true" : "false", {
+    httpOnly: true,
+    sameSite: "lax",
+    maxAge: 10 * 60 * 1000,
+  });
+
   const googleAuthOptions: any = {
     scope: ["profile", "email"],
     state,

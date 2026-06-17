@@ -109,8 +109,11 @@ export async function login(req: Request, res: Response) {
 
 export async function oauthCallback(req: Request, res: Response) {
   try {
+    // Read fromDemoBonus BEFORE clearing the cookie.
+    const fromDemoBonus = req.cookies?.oauth_from_demo_bonus === "true";
     res.clearCookie("oauth_intent");
     res.clearCookie("oauth_agreements_accepted");
+    res.clearCookie("oauth_from_demo_bonus");
     res.clearCookie("oauth_error");
 
     if (!req.user) {
@@ -139,6 +142,31 @@ export async function oauthCallback(req: Request, res: Response) {
       await linkGuestToUser(deviceId, authResult.user.id);
     }
 
+    // Demo-bonus grant for Google signup. Mirrors the manual signup path in
+    // signupService: +5 credits + stamp demo_bonus_claimed_at. Idempotent —
+    // only fires when (a) this OAuth flow actually created the account
+    // (isNewUser) AND (b) the user has not already claimed before.
+    let demoBonusGranted = false;
+    if (fromDemoBonus && authResult.isNewUser && authResult.user?.id) {
+      const existing = await prisma.user.findUnique({
+        where: { id: authResult.user.id },
+        select: { demo_bonus_claimed_at: true },
+      });
+      if (existing && !existing.demo_bonus_claimed_at) {
+        await prisma.user_credit_balance.upsert({
+          where: { user_id: authResult.user.id },
+          create: { user_id: authResult.user.id, balance: 5 },
+          update: { balance: { increment: 5 } },
+        });
+        await prisma.user.update({
+          where: { id: authResult.user.id },
+          data: { demo_bonus_claimed_at: new Date() },
+        });
+        demoBonusGranted = true;
+        logger(`OAuth callback: demo bonus +5 credits granted to ${authResult.user.email}`);
+      }
+    }
+
     // Now you have everything: token, isNewUser, avatarUrl, etc.
     // Always fetch the latest user from DB to get the latest role
     const latestUser = await oauthService.getUserById(authResult.user.id);
@@ -163,6 +191,9 @@ export async function oauthCallback(req: Request, res: Response) {
 
     if (authResult.user.avatarUrl) {
       params.append("avatarUrl", authResult.user.avatarUrl);
+    }
+    if (demoBonusGranted) {
+      params.append("demoBonusGranted", "true");
     }
 
     // Redirect to frontend callback page with token and user data
@@ -250,7 +281,9 @@ export async function getCurrentUser(req: Request, res: Response) {
         email: user.email,
         name: user.name,
         role: userRole.role.name,
-        avatar_url: user.avatar_url,
+        avatar_url: user.manual_avatar_url ?? user.avatar_url,
+        manual_avatar_url: user.manual_avatar_url,
+        google_avatar_url: user.avatar_url,
         created_at: user.created_at,
       },
     });
