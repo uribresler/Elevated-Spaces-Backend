@@ -1795,31 +1795,32 @@ export async function generateMultipleImages(
     return;
   }
 
-  if (!req.user) {
-    res.status(401).json({ success: false, message: "Unauthorized" });
-    return;
-  }
-
+  // Guests are allowed: they hit the demo branch and are tracked by fingerprint.
   const VARIATIONS_PER_IMAGE = 3;
   const MULTI_STAGE_BATCH_SIZE = 15;
   const wantsStream =
     req.query.stream === "1" ||
     (typeof req.headers.accept === "string" && req.headers.accept.includes("text/event-stream"));
 
-  const userId = req.user.id;
+  const userId: string | null = req.user?.id ?? null;
 
-  // Determine if user is a demo user (has no purchased credits)
-  let isDemo = false;
+  // Determine if user is a demo user (no userId → guest, always demo;
+  // logged-in user with no purchased credits → demo)
+  let isDemo = !userId;
   let unifiedCount = 0;
   try {
-    const personalCredits = await prisma.user_credit_balance.findUnique({
-      where: { user_id: userId }
-    });
-    const hasPersonalCredits = personalCredits && personalCredits.balance > 0;
-    const purchaseCount = await prisma.user_credit_purchase.count({
-      where: { user_id: userId, status: 'completed' }
-    });
-    const hasPurchasedCredits = purchaseCount > 0;
+    let hasPersonalCredits = false;
+    let hasPurchasedCredits = false;
+    if (userId) {
+      const personalCredits = await prisma.user_credit_balance.findUnique({
+        where: { user_id: userId }
+      });
+      hasPersonalCredits = !!(personalCredits && personalCredits.balance > 0);
+      const purchaseCount = await prisma.user_credit_purchase.count({
+        where: { user_id: userId, status: 'completed' }
+      });
+      hasPurchasedCredits = purchaseCount > 0;
+    }
 
     if (!hasPersonalCredits && !hasPurchasedCredits) {
       isDemo = true;
@@ -1940,9 +1941,14 @@ export async function generateMultipleImages(
     projectId = null;
   }
 
-  projectId = await sanitizeProjectIdForUser({ projectId, userId, strictWriteAccess: true });
-
-  projectId = await sanitizeProjectIdForUser({ projectId, userId, strictWriteAccess: true });
+  if (userId) {
+    projectId = await sanitizeProjectIdForUser({ projectId, userId, strictWriteAccess: true });
+    projectId = await sanitizeProjectIdForUser({ projectId, userId, strictWriteAccess: true });
+  } else {
+    // Guests can't own / belong to projects.
+    projectId = null;
+    teamId = null;
+  }
 
   let originalsWithUrls: Array<{ file: Express.Multer.File; originalUrl: string }> = [];
   try {
@@ -1968,7 +1974,7 @@ export async function generateMultipleImages(
   let isTeamOwner = false;
   let isTeamAdmin = false;
 
-  if (teamId) {
+  if (teamId && userId) {
     const team = await prisma.teams.findFirst({
       where: {
         id: teamId,
@@ -2041,7 +2047,7 @@ export async function generateMultipleImages(
         }
       }
     }
-  } else {
+  } else if (userId && !isDemo) {
     const personalCredits = await prisma.user_credit_balance.findUnique({
       where: { user_id: userId },
     });
@@ -2057,6 +2063,9 @@ export async function generateMultipleImages(
       return;
     }
   }
+  // Demo users (guest or logged-in with no credits) skip the credit-balance
+  // gate; the DEMO_LIMIT check ran earlier and the fingerprint counter is
+  // incremented per image when each variant persists.
 
   // Create DB records and deduct credits atomically
   const images = await prisma.$transaction(async (tx) => {
@@ -2066,15 +2075,15 @@ export async function generateMultipleImages(
 
         return tx.image.create({
           data: {
-            user_id: userId,
+            user_id: userId, // nullable in schema — guest rows have null
             project_id: projectId,
             original_image_url: originalUrl,
             status: image_status.PROCESSING,
             room_type: roomTypesList[index] || roomType,
             staging_style: stagingStylesList[index] || stagingStyle,
             prompt: imagePrompt,
-            source: "user",
-            is_demo: false,
+            source: isDemo ? "demo" : "user",
+            is_demo: isDemo,
           },
         });
       })
@@ -2103,12 +2112,13 @@ export async function generateMultipleImages(
           });
         }
       }
-    } else {
+    } else if (userId && !isDemo) {
       await tx.user_credit_balance.update({
         where: { user_id: userId },
         data: { balance: { decrement: creditsRequired } },
       });
     }
+    // Demo + guest path: no team / personal-credit decrement.
 
     return createdImages;
   });
@@ -2162,13 +2172,13 @@ export async function generateMultipleImages(
   const waves = Math.ceil(creditsRequired / MULTI_STAGE_BATCH_SIZE);
   const estimatedSeconds = Math.max(40, waves * 40);
   const runStartedAt = Date.now();
-  const runId = `ms-${runStartedAt}-${userId.slice(0, 8)}`;
+  const runId = `ms-${runStartedAt}-${userId ? userId.slice(0, 8) : 'guest'}`;
   const MAX_RETRY_PASSES = Number(process.env.MULTI_STAGE_RETRY_PASSES || "1");
   let retryPassCount = 0;
   let streamClosed = false;
 
   logger(
-    `[MULTI-STAGE][${runId}] START user=${userId} images=${images.length} expectedVariants=${expectedTotalVariants} queueConcurrency=${QUEUE_CONCURRENCY} est=${estimatedSeconds}s`
+    `[MULTI-STAGE][${runId}] START user=${userId || 'guest'} images=${images.length} expectedVariants=${expectedTotalVariants} queueConcurrency=${QUEUE_CONCURRENCY} est=${estimatedSeconds}s`
   );
 
   res.write(
@@ -2381,7 +2391,7 @@ export async function generateMultipleImages(
 
         loggingService.logMultiImageRun({
           runId,
-          userId,
+          userId: userId ?? undefined,
           userEmail: req.user?.email,
           teamId: teamId || undefined,
           totalImages: images.length,
@@ -2408,7 +2418,7 @@ export async function generateMultipleImages(
 
         appendMultiImageRunReport({
           runId,
-          userId,
+          userId: userId ?? 'guest',
           totalImages: images.length,
           expectedTotalVariants,
           streamedTotal: sentImageIds.size,

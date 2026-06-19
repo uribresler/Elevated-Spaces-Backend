@@ -11,6 +11,10 @@ import {
   getCurrentUser,
   updateProfileImage,
   deleteProfileImage,
+  verifyEmail,
+  resendVerificationEmail,
+  updateSecondaryEmail,
+  deleteSecondaryEmail,
 } from "../controllers/auth.controller";
 import { logger } from "../utils/logger";
 
@@ -100,6 +104,14 @@ router.post("/reset", async (req, res) => {
 router.get("/me", requireAuth, getCurrentUser);
 router.patch("/profile-image", requireAuth, uploadImage, updateProfileImage);
 router.delete("/profile-image", requireAuth, deleteProfileImage);
+
+// Email verification (manual signup)
+router.post("/verify-email", verifyEmail);
+router.post("/resend-verification", resendVerificationEmail);
+
+// Secondary email management
+router.patch("/secondary-email", requireAuth, updateSecondaryEmail);
+router.delete("/secondary-email", requireAuth, deleteSecondaryEmail);
 
 // Get available OAuth providers
 router.get("/providers", getAvailableProviders);

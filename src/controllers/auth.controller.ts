@@ -1,7 +1,16 @@
 import { Request, Response } from "express";
 import { ZodError } from "zod";
 import { loginSchema, signupSchema } from "../utils/authSchemas";
-import { loginService, signupService, updateProfileImageService, deleteProfileImageService } from "../services/auth.service";
+import {
+  loginService,
+  signupService,
+  updateProfileImageService,
+  deleteProfileImageService,
+  verifyEmailService,
+  resendVerificationEmailService,
+  addOrUpdateSecondaryEmailService,
+  removeSecondaryEmailService,
+} from "../services/auth.service";
 import bcrypt from 'bcrypt';
 import { sendEmail } from '../config/mail.config';
 import { oauthService } from "../services/oauth.service";
@@ -102,8 +111,69 @@ export async function login(req: Request, res: Response) {
           provider: (err as any).provider,
         });
       }
+      if (errorCode === "EMAIL_NOT_VERIFIED") {
+        return res.status(403).json({
+          error: (err as any).message,
+          code: "EMAIL_NOT_VERIFIED",
+          email: (err as any).email,
+        });
+      }
     }
     return res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+export async function verifyEmail(req: Request, res: Response) {
+  try {
+    const token = typeof req.body?.token === "string" ? req.body.token : typeof req.query?.token === "string" ? req.query.token : "";
+    const result = await verifyEmailService({ token });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    const code = err?.code;
+    const status = code === "VERIFICATION_TOKEN_MISSING" ? 400
+      : code === "VERIFICATION_TOKEN_EXPIRED" ? 410
+      : code === "VERIFICATION_TOKEN_INVALID" ? 400
+      : 500;
+    return res.status(status).json({ success: false, error: err?.message || "Failed to verify email", code });
+  }
+}
+
+export async function resendVerificationEmail(req: Request, res: Response) {
+  try {
+    const email = typeof req.body?.email === "string" ? req.body.email : "";
+    if (!email) return res.status(400).json({ success: false, error: "Email is required" });
+    const result = await resendVerificationEmailService({ email });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || "Failed to resend confirmation" });
+  }
+}
+
+export async function updateSecondaryEmail(req: Request, res: Response) {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ success: false, error: "Unauthorized" });
+    const secondaryEmail = typeof req.body?.secondaryEmail === "string" ? req.body.secondaryEmail : "";
+    const result = await addOrUpdateSecondaryEmailService({ userId, secondaryEmail });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    const code = err?.code;
+    const status = code === "INVALID_EMAIL" || code === "SECONDARY_EQUALS_PRIMARY" ? 400
+      : code === "SECONDARY_EMAIL_TAKEN" ? 409
+      : code === "USER_NOT_FOUND" ? 404
+      : 500;
+    return res.status(status).json({ success: false, error: err?.message || "Failed to update secondary email", code });
+  }
+}
+
+export async function deleteSecondaryEmail(req: Request, res: Response) {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ success: false, error: "Unauthorized" });
+    const result = await removeSecondaryEmailService({ userId });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || "Failed to remove secondary email" });
   }
 }
 
@@ -279,6 +349,8 @@ export async function getCurrentUser(req: Request, res: Response) {
       user: {
         id: user.id,
         email: user.email,
+        secondary_email: user.secondary_email,
+        email_verified_at: user.email_verified_at,
         name: user.name,
         role: userRole.role.name,
         avatar_url: user.manual_avatar_url ?? user.avatar_url,

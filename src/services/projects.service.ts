@@ -342,10 +342,21 @@ export async function createProjectService({
             throw error;
         }
     } else {
-        // For personal projects, user must have an active subscription
+        // For personal projects, user must have their OWN active personal plan.
+        // Being inside a team that has a plan does NOT entitle them to private
+        // personal projects — those need a personal subscription.
         const hasActivePurchase = await hasActiveOrNotExpiredPersonalPurchase(userId);
         if (!hasActivePurchase) {
-            throw new Error("Creating projects requires an active paid subscription. Please subscribe to a plan.");
+            const teamMembershipCount = await prisma.team_membership.count({
+                where: { user_id: userId, deleted_at: null },
+            });
+            const error: any = new Error(
+                teamMembershipCount > 0
+                    ? "Personal projects require your own plan. You're currently part of a team subscription, which only covers team projects (visible to the team owner and admins). To create private projects that only you can access, please purchase a personal plan."
+                    : "Personal projects require an active personal plan. Please subscribe to a plan to create private projects."
+            );
+            error.code = "PERSONAL_PLAN_REQUIRED";
+            throw error;
         }
         // Ensure personal project name uniqueness per user
         const existingPersonalProject = await prisma.team_project.findFirst({
