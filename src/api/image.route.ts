@@ -21,6 +21,6 @@ router.post("/restage", optionalAuth, uploadImage, restageImage);
 // Analyze an image to get room type and suggestions
 router.post("/analyze", uploadImage, analyzeImage);
 
-router.post("/multiple-generate", requireAuth ,uploadImages(15), generateMultipleImages);
+router.post("/multiple-generate", optionalAuth, uploadImages(15), generateMultipleImages);
 
 export default router;
