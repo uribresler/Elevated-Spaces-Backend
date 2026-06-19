@@ -186,6 +186,7 @@ class OAuthService {
       email,
       name: name || null,
       avatar_url: avatarUrl,
+      manual_avatar_url: avatarUrl,
       auth_provider: providerEnumValues[provider] as any,
     };
 
