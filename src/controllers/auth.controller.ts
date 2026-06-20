@@ -10,6 +10,8 @@ import {
   resendVerificationEmailService,
   addOrUpdateSecondaryEmailService,
   removeSecondaryEmailService,
+  verifySecondaryEmailService,
+  resendSecondaryEmailVerificationService,
 } from "../services/auth.service";
 import bcrypt from 'bcrypt';
 import { sendEmail } from '../config/mail.config';
@@ -166,6 +168,35 @@ export async function updateSecondaryEmail(req: Request, res: Response) {
   }
 }
 
+export async function verifySecondaryEmail(req: Request, res: Response) {
+  try {
+    const token = typeof req.body?.token === "string" ? req.body.token : typeof req.query?.token === "string" ? req.query.token : "";
+    const result = await verifySecondaryEmailService({ token });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    const code = err?.code;
+    const status = code === "VERIFICATION_TOKEN_MISSING" ? 400
+      : code === "VERIFICATION_TOKEN_EXPIRED" ? 410
+      : code === "VERIFICATION_TOKEN_INVALID" ? 400
+      : code === "SECONDARY_EMAIL_TAKEN" ? 409
+      : 500;
+    return res.status(status).json({ success: false, error: err?.message || "Failed to confirm secondary email", code });
+  }
+}
+
+export async function resendSecondaryEmailVerification(req: Request, res: Response) {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ success: false, error: "Unauthorized" });
+    const result = await resendSecondaryEmailVerificationService({ userId });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    const code = err?.code;
+    const status = code === "NO_PENDING_SECONDARY" ? 400 : code === "USER_NOT_FOUND" ? 404 : 500;
+    return res.status(status).json({ success: false, error: err?.message || "Failed to resend confirmation", code });
+  }
+}
+
 export async function deleteSecondaryEmail(req: Request, res: Response) {
   try {
     const userId = req.user?.id;
@@ -179,11 +210,13 @@ export async function deleteSecondaryEmail(req: Request, res: Response) {
 
 export async function oauthCallback(req: Request, res: Response) {
   try {
-    // Read fromDemoBonus BEFORE clearing the cookie.
+    // Read fromDemoBonus + inviteToken BEFORE clearing the cookies.
     const fromDemoBonus = req.cookies?.oauth_from_demo_bonus === "true";
+    const inviteToken = typeof req.cookies?.oauth_invite_token === "string" ? req.cookies.oauth_invite_token : "";
     res.clearCookie("oauth_intent");
     res.clearCookie("oauth_agreements_accepted");
     res.clearCookie("oauth_from_demo_bonus");
+    res.clearCookie("oauth_invite_token");
     res.clearCookie("oauth_error");
 
     if (!req.user) {
@@ -265,6 +298,9 @@ export async function oauthCallback(req: Request, res: Response) {
     if (demoBonusGranted) {
       params.append("demoBonusGranted", "true");
     }
+    if (inviteToken) {
+      params.append("inviteToken", inviteToken);
+    }
 
     // Redirect to frontend callback page with token and user data
     return res.redirect(`${FRONTEND_URL}/auth/google/callback?${params.toString()}`);
@@ -335,14 +371,25 @@ export async function getCurrentUser(req: Request, res: Response) {
       return res.status(404).json({ success: false, message: "User not found" });
     }
 
-    const userRole = await prisma.user_roles.findFirst({
+    const userRoles = await prisma.user_roles.findMany({
       where: { user_id: user.id },
       include: { role: true },
     });
 
-    if (!userRole) {
+    if (userRoles.length === 0) {
       return res.status(404).json({ success: false, message: "Invalid Role" });
     }
+
+    // A user can hold several roles at once (e.g., platform ADMIN who also
+    // formed a team and so picked up TEAM_OWNER + USER). The navbar/admin
+    // gate keys off a single role string, so we have to surface the
+    // highest-privilege one or the Dashboard link silently disappears.
+    const roleNames = userRoles.map((r) => r.role.name.toUpperCase());
+    const primaryRole = roleNames.includes("ADMIN")
+      ? "ADMIN"
+      : roleNames.includes("PHOTOGRAPHER")
+        ? "PHOTOGRAPHER"
+        : "USER";
 
     return res.status(200).json({
       success: true,
@@ -350,9 +397,10 @@ export async function getCurrentUser(req: Request, res: Response) {
         id: user.id,
         email: user.email,
         secondary_email: user.secondary_email,
+        secondary_email_pending: user.secondary_email_pending,
         email_verified_at: user.email_verified_at,
         name: user.name,
-        role: userRole.role.name,
+        role: primaryRole,
         avatar_url: user.manual_avatar_url ?? user.avatar_url,
         manual_avatar_url: user.manual_avatar_url,
         google_avatar_url: user.avatar_url,

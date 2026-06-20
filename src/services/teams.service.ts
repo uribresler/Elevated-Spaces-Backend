@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken'
 import crypto from "crypto";
 import { invite_status } from "@prisma/client";
 import bcrypt from "bcrypt";
+import { registrationAgreementsSchema } from "../utils/authSchemas";
 import dotenv from "dotenv";
 import Stripe from "stripe";
 dotenv.config();
@@ -1287,10 +1288,12 @@ export async function acceptInvitationService({
     token,
     name,
     password,
+    registrationAgreements,
 }: {
     token: string;
     name?: string;
     password?: string;
+    registrationAgreements?: unknown;
 }) {
     if (!token) {
         throw new Error("Invite token is required");
@@ -1339,7 +1342,14 @@ export async function acceptInvitationService({
     await assertTeamSeatCapacityForAcceptance(invite.team_id, invite.role?.name || "TEAM_MEMBER");
 
     const inviteEmail = payload.email.trim().toLowerCase();
-    let user = await prisma.user.findUnique({ where: { email: inviteEmail } });
+    // Match the invite email against either the user's primary OR confirmed
+    // secondary email — same rule as password and OAuth login. Without this,
+    // a user whose Google address is their secondary would be asked to sign up
+    // even though their account exists.
+    let user = await prisma.user.findFirst({
+        where: { OR: [{ email: inviteEmail }, { secondary_email: inviteEmail }] },
+    });
+    let createdNewUser = false;
 
     await assertEmailNotAlreadyPartOfTeam(invite.team_id, inviteEmail);
 
@@ -1362,6 +1372,15 @@ export async function acceptInvitationService({
             };
         }
 
+        // Mirror the normal signup gate: a new account created through the
+        // accept-invite path must accept the same registration agreements.
+        const agreementResult = registrationAgreementsSchema.safeParse(registrationAgreements);
+        if (!agreementResult.success) {
+            const err: any = new Error("You must accept all required registration agreements to continue.");
+            err.code = "AGREEMENTS_REQUIRED";
+            throw err;
+        }
+
         const hash = await bcrypt.hash(password, 10);
         user = await prisma.user.create({
             data: {
@@ -1369,8 +1388,13 @@ export async function acceptInvitationService({
                 password_hash: hash,
                 name,
                 auth_provider: "LOCAL",
+                // The invite email was sent to this address, so the user has
+                // already proven ownership by clicking the link — skip the
+                // normal email-confirmation gate.
+                email_verified_at: new Date(),
             },
         });
+        createdNewUser = true;
 
     }
 
@@ -1464,12 +1488,54 @@ export async function acceptInvitationService({
 
     await enforceTeamSeatCapacityForExistingMembers(invite.team_id);
 
+    // When the accept-invite flow created the account itself (manual signup
+    // path), mint a session JWT so the frontend can drop the user straight
+    // into the app instead of asking them to sign in again.
+    let issuedToken: string | undefined;
+    let issuedUser:
+        | {
+              id: string;
+              email: string;
+              name: string | null;
+              role: string;
+              avatarUrl: string | null;
+              manualAvatarUrl: string | null;
+              googleAvatarUrl: string | null;
+              created_at: Date;
+          }
+        | undefined;
+
+    if (createdNewUser) {
+        const userPrimaryRole = await prisma.user_roles.findFirst({
+            where: { user_id: user.id },
+            include: { role: true },
+        });
+        const roleName = userPrimaryRole?.role?.name || "USER";
+        issuedToken = jwt.sign(
+            { userId: user.id, role: roleName },
+            process.env.JWT_SECRET!,
+            { expiresIn: "7d" }
+        );
+        issuedUser = {
+            id: user.id,
+            email: user.email,
+            name: user.name,
+            role: roleName,
+            avatarUrl: (user as any).manual_avatar_url ?? user.avatar_url,
+            manualAvatarUrl: (user as any).manual_avatar_url ?? null,
+            googleAvatarUrl: user.avatar_url,
+            created_at: user.created_at,
+        };
+    }
+
     return {
         success: true,
         message: "Invitation accepted",
         accepted: true,
         teamId: invite.team_id,
         userId: user.id,
+        token: issuedToken,
+        user: issuedUser,
     };
 }
 

@@ -41,11 +41,19 @@ console.log('cwd:', process.cwd(), '__dirname:', __dirname);
 console.log('Resolved .env path:', path.resolve(__dirname, '..', '.env'));
 console.log('DB URL (masked):', masked || 'undefined');
 
-// Pool sizing is env-driven. Default of 10 stays under Supabase's session-mode
-// pooler limit (15) with headroom for cron / health-check connections. Raise
-// PG_POOL_MAX only if the Postgres you point at allows more connections —
-// going above the server's hard limit causes EMAXCONNSESSION rejects under load.
-const PG_POOL_MAX = Number(process.env.PG_POOL_MAX) || 10;
+// Pool sizing is env-driven. Default of 8 stays under Supabase's session-mode
+// pooler limit (15) with headroom for cron / health-check connections.
+//
+// TO SCALE FURTHER: switch DATABASE_URL to Supabase's TRANSACTION-mode pooler
+// (port 6543 instead of 5432). Transaction mode multiplexes hundreds of
+// clients onto a smaller backend pool, raising the practical ceiling from
+// ~15 concurrent DB-touching requests to several hundred. On 6543 you can
+// safely set PG_POOL_MAX=25-40. Caveat: transaction mode disables session-
+// scoped features like LISTEN/NOTIFY and `SET LOCAL`; this codebase doesn't
+// use either, so the switch is safe.
+//
+// Going above the server's hard limit causes EMAXCONNSESSION rejects under load.
+const PG_POOL_MAX = Number(process.env.PG_POOL_MAX) || 8;
 const PG_POOL_MIN = Number(process.env.PG_POOL_MIN) || 0;
 const PG_IDLE_TIMEOUT_MS = Number(process.env.PG_IDLE_TIMEOUT_MS) || 30_000;
 const PG_CONN_TIMEOUT_MS = Number(process.env.PG_CONN_TIMEOUT_MS) || 10_000;

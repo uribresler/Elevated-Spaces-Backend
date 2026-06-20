@@ -304,7 +304,7 @@ export async function createProjectService({
         roleName = teamData.roleName;
 
         if (!["TEAM_OWNER", "TEAM_ADMIN", "TEAM_MEMBER"].includes(roleName)) {
-            throw new Error("You are not allowed to create projects for this team, Please contact Mmeber / Admin, so they can create and add you");
+            throw new Error("You are not allowed to create projects for this team, Please contact Member / Admin, so they can create and add you");
         }
 
         // Check if TEAM has an active subscription OR user has an active personal subscription

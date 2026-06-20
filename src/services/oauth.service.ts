@@ -78,13 +78,19 @@ class OAuthService {
     let isNewUser = false;
 
     if (!user) {
-      // Step 2: Check if user exists with this email
-      user = await prisma.user.findUnique({ where: { email } });
+      // Step 2: Check if a user owns this email as either their primary or
+      // their confirmed secondary. Password login already supports either, so
+      // OAuth must too — otherwise a user whose Google address is their
+      // secondary would be told to "sign up first" even though their account
+      // exists.
+      user = await prisma.user.findFirst({
+        where: { OR: [{ email }, { secondary_email: email }] },
+      });
 
       if (user) {
         // Link OAuth account to existing user
         user = await this.linkProviderToUser(user.id, provider, providerId);
-        logger(`Linked ${provider} account to existing user: ${user.id}`);
+        logger(`Linked ${provider} account to existing user ${user.id} (matched ${user.email === email ? "primary" : "secondary"} email)`);
       } else {
         if (!options.allowCreate) {
           const error: any = new Error(

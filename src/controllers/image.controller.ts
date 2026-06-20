@@ -708,17 +708,6 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     // If they don't have credits, we'll check demo eligibility below
     const hasPersonalCredits = personalCredits && personalCredits.balance > 0;
 
-    if (requestedCreditSource === "personal" && !hasPersonalCredits) {
-      res.status(403).json({
-        success: false,
-        error: {
-          code: 'INSUFFICIENT_CREDITS',
-          message: 'You have no personal credits available. Please purchase credits or select team credits to continue.',
-        },
-      });
-      return;
-    }
-
     if (!hasPersonalCredits) {
       // No personal credits - check if they have purchased credits before
       const purchaseCount = await prisma.user_credit_purchase.count({
@@ -729,9 +718,11 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
       });
       const hasPurchasedCredits = purchaseCount > 0;
 
-      // If they've purchased credits before but ran out, show error
-      // If they've never purchased credits, they can use demo credits
-      if (hasPurchasedCredits) {
+      // Block "personal" selection only when the user has actually paid for
+      // personal credits in the past and has now run out. A user who has
+      // never purchased still has demo credits available — picking personal
+      // should fall through to the demo path, not error.
+      if (requestedCreditSource === "personal" && hasPurchasedCredits) {
         res.status(403).json({
           success: false,
           error: {
@@ -741,7 +732,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
         });
         return;
       }
-      // If they've never purchased, they fall through to demo credit logic below
+      // Otherwise fall through to demo credit logic below.
     }
   }
 
@@ -772,12 +763,16 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     if (usingTeamCredits) {
       // Team wallet/member allocations are paid credits and should never be treated as demo.
       isDemo = false;
-    } else if (requestedCreditSource === "personal" && !hasPersonalCredits) {
+    } else if (requestedCreditSource === "personal" && !hasPersonalCredits && hasPurchasedCredits) {
+      // User has paid for personal credits before and run out — refuse here so
+      // the demo path can't accidentally bail them out. Users who have never
+      // purchased fall through to the demo branch below and can spend their
+      // remaining demo credits.
       res.status(403).json({
         success: false,
         error: {
           code: 'INSUFFICIENT_CREDITS',
-          message: 'You have no personal credits available. Please purchase credits or select team credits to continue.',
+          message: 'You have no remaining credits. Please purchase more credits to continue.',
         },
       });
       return;
@@ -1246,12 +1241,15 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
     if (usingTeamCredits) {
       // Team wallet/member allocations are paid credits and should never be treated as demo.
       isDemo = false;
-    } else if (requestedCreditSource === "personal" && !hasPersonalCredits) {
+    } else if (requestedCreditSource === "personal" && !hasPersonalCredits && hasPurchasedCredits) {
+      // Same rule as the upload path: only refuse personal when the user has
+      // actually paid for credits before. Never-purchased users fall through
+      // to the demo branch so they can spend their remaining demo credits.
       res.status(403).json({
         success: false,
         error: {
           code: 'INSUFFICIENT_CREDITS',
-          message: 'You have no personal credits available. Please purchase credits or select team credits to continue.',
+          message: 'You have no remaining credits. Please purchase more credits to continue.',
         },
       });
       return;

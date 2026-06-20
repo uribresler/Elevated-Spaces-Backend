@@ -131,14 +131,15 @@ export async function sendInvitation(req: Request, res: Response) {
 
 export async function acceptInvitation(req: Request, res: Response) {
     try {
-        const { token, name, password } = req.body;
+        const { token, name, password, registrationAgreements } = req.body;
 
-        const result = await acceptInvitationService({ token, name, password });
+        const result = await acceptInvitationService({ token, name, password, registrationAgreements });
 
         return res.status(200).json(result);
     } catch (error: any) {
         console.error(error);
-        return res.status(400).json({ message: error.message || "Invalid invitation" });
+        const status = error?.code === "AGREEMENTS_REQUIRED" ? 422 : 400;
+        return res.status(status).json({ message: error.message || "Invalid invitation", code: error?.code });
     }
 }
 

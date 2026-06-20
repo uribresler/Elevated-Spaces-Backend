@@ -32,8 +32,21 @@ async function sendSecondaryEmailAddedNotice(primary: string, secondary: string,
     senderName: "Elevated Spaces",
     to: primary,
     subject: "A secondary email was added to your Elevated Spaces account",
-    text: `Hi ${displayName},\n\nA secondary email (${secondary}) was just added to your account. You can now sign in with either email.\n\nIf this wasn't you, please contact support immediately and change your password.\n\n— Elevated Spaces`,
-    html: `<p>Hi ${displayName},</p><p>A secondary email <strong>${secondary}</strong> was just added to your account. You can now sign in with either email.</p><p>If this wasn't you, please contact support immediately and change your password.</p><p>— Elevated Spaces</p>`,
+    text: `Hi ${displayName},\n\nA secondary email (${secondary}) was just confirmed and added to your account. You can now sign in with either email.\n\nIf this wasn't you, please contact support immediately and change your password.\n\n— Elevated Spaces`,
+    html: `<p>Hi ${displayName},</p><p>A secondary email <strong>${secondary}</strong> was just confirmed and added to your account. You can now sign in with either email.</p><p>If this wasn't you, please contact support immediately and change your password.</p><p>— Elevated Spaces</p>`,
+  });
+}
+
+async function sendSecondaryEmailVerification(toEmail: string, name: string | null, token: string) {
+  const verifyUrl = `${FRONTEND_URL}/auth/verify-secondary-email?token=${encodeURIComponent(token)}`;
+  const displayName = name?.trim() || "there";
+  await sendEmail({
+    from: process.env.SENDGRID_VERIFIED_SENDER || "noreply@elevatespacesai.com",
+    senderName: "Elevated Spaces",
+    to: toEmail,
+    subject: "Confirm your secondary email for Elevated Spaces",
+    text: `Hi ${displayName},\n\nPlease confirm this address as a secondary email on your Elevated Spaces account by opening this link:\n${verifyUrl}\n\nThis link expires in ${EMAIL_VERIFICATION_TTL_HOURS} hours. Until you confirm, this address can't be used to sign in. If you didn't request this, you can ignore the email.\n\n— Elevated Spaces`,
+    html: `<p>Hi ${displayName},</p><p>Please confirm this address as a secondary email on your Elevated Spaces account.</p><p><a href="${verifyUrl}" style="display:inline-block;background:#4f46e5;color:#fff;padding:12px 20px;border-radius:6px;text-decoration:none">Confirm secondary email</a></p><p>Or paste this link in your browser: <a href="${verifyUrl}">${verifyUrl}</a></p><p>This link expires in ${EMAIL_VERIFICATION_TTL_HOURS} hours. Until you confirm, this address can't be used to sign in. If you didn't request this, you can ignore the email.</p><p>— Elevated Spaces</p>`,
   });
 }
 
@@ -67,7 +80,13 @@ export async function signupService({
   const normalizedEmail = email.trim().toLowerCase();
   // Email may be in use as someone's primary OR secondary.
   const existing = await prisma.user.findFirst({
-    where: { OR: [{ email: normalizedEmail }, { secondary_email: normalizedEmail }] },
+    where: {
+      OR: [
+        { email: normalizedEmail },
+        { secondary_email: normalizedEmail },
+        { secondary_email_pending: normalizedEmail },
+      ],
+    },
   });
   if (existing) {
     const err: any = new Error("User already exists");
@@ -253,12 +272,28 @@ export async function addOrUpdateSecondaryEmailService({ userId, secondaryEmail 
     err.code = "SECONDARY_EQUALS_PRIMARY";
     throw err;
   }
-  // Must not be in use as anyone's primary or secondary (including this user's existing secondary if unchanged is fine).
+  if (me.secondary_email && normalized === me.secondary_email.toLowerCase()) {
+    // No change — it's already this user's confirmed secondary.
+    return {
+      success: true,
+      message: "Secondary email is already confirmed",
+      secondaryEmail: me.secondary_email,
+      pendingSecondaryEmail: null,
+      requiresVerification: false,
+    };
+  }
+  // Must not be in use as anyone else's primary, confirmed secondary, or pending secondary.
   const conflict = await prisma.user.findFirst({
     where: {
       AND: [
         { id: { not: userId } },
-        { OR: [{ email: normalized }, { secondary_email: normalized }] },
+        {
+          OR: [
+            { email: normalized },
+            { secondary_email: normalized },
+            { secondary_email_pending: normalized },
+          ],
+        },
       ],
     },
     select: { id: true },
@@ -269,24 +304,146 @@ export async function addOrUpdateSecondaryEmailService({ userId, secondaryEmail 
     throw err;
   }
 
+  const verificationToken = generateEmailVerificationToken();
+  const verificationExpiry = new Date(Date.now() + EMAIL_VERIFICATION_TTL_HOURS * 60 * 60 * 1000);
+
   const updated = await prisma.user.update({
     where: { id: userId },
-    data: { secondary_email: normalized },
+    data: {
+      secondary_email_pending: normalized,
+      secondary_email_verification_token: verificationToken,
+      secondary_email_verification_expires_at: verificationExpiry,
+    },
   });
 
-  // Notify the primary email about the addition/replacement.
+  // Send the confirmation link to the new address. The previously-confirmed
+  // secondary (if any) stays active until the new one is verified — that way
+  // the user doesn't lose login access if they mistype the new address.
   try {
-    await sendSecondaryEmailAddedNotice(me.email, normalized, me.name);
+    await sendSecondaryEmailVerification(normalized, me.name, verificationToken);
   } catch (mailErr) {
-    console.error("Failed to send secondary-email notice:", mailErr);
+    console.error("Failed to send secondary-email verification:", mailErr);
   }
 
-  return { success: true, message: "Secondary email saved", secondaryEmail: updated.secondary_email };
+  return {
+    success: true,
+    message: "Confirmation email sent. Click the link in that email to activate the secondary address.",
+    secondaryEmail: updated.secondary_email,
+    pendingSecondaryEmail: updated.secondary_email_pending,
+    requiresVerification: true,
+  };
+}
+
+export async function verifySecondaryEmailService({ token }: { token: string }) {
+  if (!token) {
+    const err: any = new Error("Verification token is required");
+    err.code = "VERIFICATION_TOKEN_MISSING";
+    throw err;
+  }
+  const user = await prisma.user.findUnique({ where: { secondary_email_verification_token: token } });
+  if (!user || !user.secondary_email_pending) {
+    const err: any = new Error("This confirmation link is invalid or has already been used.");
+    err.code = "VERIFICATION_TOKEN_INVALID";
+    throw err;
+  }
+  if (user.secondary_email_verification_expires_at && user.secondary_email_verification_expires_at.getTime() < Date.now()) {
+    const err: any = new Error("This confirmation link has expired. Open Settings and resend it.");
+    err.code = "VERIFICATION_TOKEN_EXPIRED";
+    throw err;
+  }
+
+  const pending = user.secondary_email_pending;
+
+  // Race protection: someone else may have claimed this email since the link
+  // was issued (as their primary or confirmed secondary).
+  const conflict = await prisma.user.findFirst({
+    where: {
+      AND: [
+        { id: { not: user.id } },
+        { OR: [{ email: pending }, { secondary_email: pending }] },
+      ],
+    },
+    select: { id: true },
+  });
+  if (conflict) {
+    // Clear the now-unusable pending state so the slot frees up.
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        secondary_email_pending: null,
+        secondary_email_verification_token: null,
+        secondary_email_verification_expires_at: null,
+      },
+    });
+    const err: any = new Error("This email is now linked to another account. Please choose a different address.");
+    err.code = "SECONDARY_EMAIL_TAKEN";
+    throw err;
+  }
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      secondary_email: pending,
+      secondary_email_pending: null,
+      secondary_email_verification_token: null,
+      secondary_email_verification_expires_at: null,
+    },
+  });
+
+  // Notify the primary email now that the address is actually active.
+  try {
+    await sendSecondaryEmailAddedNotice(user.email, pending, user.name);
+  } catch (mailErr) {
+    console.error("Failed to send secondary-email confirmation notice:", mailErr);
+  }
+
+  return {
+    success: true,
+    message: "Your secondary email has been confirmed. You can now sign in with either email.",
+    secondaryEmail: pending,
+  };
+}
+
+export async function resendSecondaryEmailVerificationService({ userId }: { userId: string }) {
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) {
+    const err: any = new Error("User not found");
+    err.code = "USER_NOT_FOUND";
+    throw err;
+  }
+  if (!user.secondary_email_pending) {
+    const err: any = new Error("No secondary email is pending confirmation.");
+    err.code = "NO_PENDING_SECONDARY";
+    throw err;
+  }
+  const verificationToken = generateEmailVerificationToken();
+  const verificationExpiry = new Date(Date.now() + EMAIL_VERIFICATION_TTL_HOURS * 60 * 60 * 1000);
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      secondary_email_verification_token: verificationToken,
+      secondary_email_verification_expires_at: verificationExpiry,
+    },
+  });
+  try {
+    await sendSecondaryEmailVerification(user.secondary_email_pending, user.name, verificationToken);
+  } catch (mailErr) {
+    console.error("Failed to resend secondary-email verification:", mailErr);
+  }
+  return { success: true, message: "Confirmation email resent." };
 }
 
 export async function removeSecondaryEmailService({ userId }: { userId: string }) {
-  await prisma.user.update({ where: { id: userId }, data: { secondary_email: null } });
-  return { success: true, message: "Secondary email removed", secondaryEmail: null };
+  await prisma.user.update({
+    where: { id: userId },
+    data: {
+      secondary_email: null,
+      secondary_email_pending: null,
+      secondary_email_verification_token: null,
+      secondary_email_verification_expires_at: null,
+    },
+  });
+  return { success: true, message: "Secondary email removed", secondaryEmail: null, pendingSecondaryEmail: null };
 }
 
 export async function loginService({ email, password }: { email: string; password: string }) {
@@ -330,19 +487,36 @@ export async function loginService({ email, password }: { email: string; passwor
     throw err;
   }
 
-  const userRole = await prisma.user_roles.findFirst({
+  const userRoles = await prisma.user_roles.findMany({
     where: { user_id: user.id },
-    include: { role: true }
-  })
+    include: { role: true },
+  });
 
-  if (!userRole) {
+  if (userRoles.length === 0) {
     const err: any = new Error("Invalid Role");
     err.code = "INVALID_USER_ROLE";
     throw err;
   }
+
+  // Pick the highest-privilege role for the single-role contract the
+  // frontend uses. Without this, a multi-role user (e.g. ADMIN who also
+  // formed a team) would sometimes login as TEAM_OWNER or USER and lose
+  // access to the admin nav until the next /auth/me refresh corrected it.
+  const roleNames = userRoles.map((r) => r.role.name.toUpperCase());
+  const primaryRoleName = roleNames.includes("ADMIN")
+    ? "ADMIN"
+    : roleNames.includes("PHOTOGRAPHER")
+      ? "PHOTOGRAPHER"
+      : "USER";
+  const userRole = userRoles.find((r) => r.role.name.toUpperCase() === primaryRoleName) || userRoles[0];
+  // Always return the user's PRIMARY email here, even when they logged in via
+  // their secondary address. The frontend uses this value to display the
+  // account identity; surfacing the secondary as the primary would be confusing
+  // and could leak the wrong identity into stored auth state.
   const userWithRole = {
     id: user.id,
     email: user.email,
+    secondary_email: user.secondary_email,
     name: user.name,
     role: userRole.role.name,
     avatarUrl: (user as any).manual_avatar_url ?? user.avatar_url,
