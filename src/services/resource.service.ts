@@ -1,4 +1,5 @@
 import prisma from "../dbConnection";
+import fs from "fs/promises";
 
 function isYoutubeFieldValidationError(error: unknown): boolean {
   return error instanceof Error && /Unknown argument `youtube_url`|Unknown argument `youtubeUrl`/i.test(error.message);
@@ -61,8 +62,16 @@ export async function updateResource(
 
   // Only touch BLOB columns when they actually change. Writing `pdf: existing.pdf`
   // on every save re-streams the entire file back into Postgres.
+  //
+  // Upload middleware uses disk storage to keep RAM flat — multer hands us a
+  // `path` instead of a `buffer`. We slurp the file once here (so the byte
+  // array lives in memory only during the write) and delete the temp file
+  // afterwards so the container's tmp dir doesn't fill up across requests.
+  const tempUploadPath: string | null = pdfUpload?.path || null;
   if (pdfUpload) {
-    data.pdf = pdfUpload.buffer;
+    data.pdf = pdfUpload.buffer
+      ? pdfUpload.buffer
+      : await fs.readFile(pdfUpload.path);
     data.pdf_filename = pdfUpload.originalname;
     data.pdf_mime = pdfUpload.mimetype;
   } else if (shouldRemovePdf) {
@@ -88,6 +97,7 @@ export async function updateResource(
     updated_at: true,
   } as const;
 
+  try {
   if (existing) {
     try {
       return await prisma.resource.update({ where: { slug }, data, select: metadataSelect });
@@ -128,4 +138,11 @@ export async function updateResource(
   }
 
   return prisma.resource.create({ data: { ...data, slug }, select: metadataSelect });
+  } finally {
+    if (tempUploadPath) {
+      // Best-effort cleanup; if the file is already gone or the process
+      // doesn't have permission, don't fail the request over it.
+      fs.unlink(tempUploadPath).catch(() => {});
+    }
+  }
 }

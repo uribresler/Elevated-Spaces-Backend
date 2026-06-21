@@ -9,6 +9,7 @@ interface BatchStageJob {
   stagingStyle: string;
   areaType?: string;
   customPrompt?: string;
+  removeFurniture?: boolean;
 }
 
 export const imageQueue = new SimpleQueue<BatchStageJob>(

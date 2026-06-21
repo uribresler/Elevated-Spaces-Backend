@@ -11,6 +11,7 @@ interface BatchStageJob {
     stagingStyle: string;
     areaType?: string;
     customPrompt?: string;
+    removeFurniture?: boolean;
 }
 
 const VARIATIONS_PER_IMAGE = Number(process.env.MULTI_STAGE_VARIATIONS || "3");
@@ -34,7 +35,7 @@ const isQuotaExhaustedError = (error: unknown): boolean => {
 };
 
 export async function processBatchImage(job: BatchStageJob): Promise<void> {
-    const { imageId, originalPath, roomType, stagingStyle, areaType, customPrompt } = job;
+    const { imageId, originalPath, roomType, stagingStyle, areaType, customPrompt, removeFurniture } = job;
     const normalizedAreaType: "interior" | "exterior" = areaType === "exterior" ? "exterior" : "interior";
     const jobStartTime = Date.now();
     const fileName = originalPath.split('/').pop() || originalPath.split('\\').pop() || 'unknown';
@@ -75,7 +76,7 @@ export async function processBatchImage(job: BatchStageJob): Promise<void> {
                 stagingStyle,
                 VARIATIONS_PER_IMAGE,
                 customPrompt,
-                false,
+                removeFurniture === true,
                 normalizedAreaType
             );
             generatedVariations.push(...fullSet.slice(0, VARIATIONS_PER_IMAGE));
@@ -100,7 +101,7 @@ export async function processBatchImage(job: BatchStageJob): Promise<void> {
                             roomType,
                             stagingStyle,
                             customPrompt,
-                            false,
+                            removeFurniture === true,
                             variationModel,
                             normalizedAreaType
                         );

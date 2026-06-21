@@ -53,7 +53,8 @@ const { fallbackImageService } = require("../services/fallbackImage.service") as
       }) => Promise<void> | void,
       options?: {
         maxDurationMs?: number;
-      }
+      },
+      removeFurniture?: boolean
     ) => Promise<Buffer[]>;
   };
 };
@@ -924,6 +925,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
       keepLocalFiles = false
     } = req.body;
     const areaType = typeof req.body.areaType === "string" ? req.body.areaType.toLowerCase() : "interior";
+    const removeFurniture = req.body.removeFurniture === true || req.body.removeFurniture === "true";
 
     // Validate room type
     if (!VALID_ROOM_TYPES.includes(roomType.toLowerCase())) {
@@ -992,7 +994,7 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
         stagingStyle.toLowerCase(),
         NUM_VARIATIONS,
         prompt,
-        false,
+        removeFurniture,
         areaType
       );
 
@@ -1335,6 +1337,7 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
 
     const { prompt, roomType = "living-room", stagingStyle = "modern" } = req.body;
     const areaType = typeof req.body.areaType === "string" ? req.body.areaType.toLowerCase() : "interior";
+    const removeFurniture = req.body.removeFurniture === true || req.body.removeFurniture === "true";
     await stagingTrace.append("request.parsed", {
       roomType,
       stagingStyle,
@@ -1431,7 +1434,7 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
         roomType.toLowerCase(),
         stagingStyle.toLowerCase(),
         prompt,
-        false,
+        removeFurniture,
         areaType
       );
       const primaryDuration = Date.now() - primaryStartTime;
@@ -1453,7 +1456,10 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
           prompt,
           async (step: string, details?: Record<string, unknown>) => {
             await stagingTrace?.append(step, details || {});
-          }
+          },
+          undefined,
+          undefined,
+          removeFurniture
         );
       }
 
@@ -1849,6 +1855,7 @@ export async function generateMultipleImages(
   
   // Support both single style (for all images) and per-image styles
   const { roomType = "living-room", stagingStyle = "modern", prompt } = req.body;
+  const removeFurniture = req.body.removeFurniture === true || req.body.removeFurniture === "true";
   
   // Parse per-image styles if provided as JSON strings
   let roomTypesList: string[] = [];
@@ -2140,6 +2147,7 @@ export async function generateMultipleImages(
       stagingStyle: stagingStylesList[index] || stagingStyle,
       areaType: areaTypesList[index] || "interior",
       customPrompt: imagePrompt,
+      removeFurniture,
     });
   });
   const queueStatus = imageQueue.getStatus();
@@ -2323,6 +2331,7 @@ export async function generateMultipleImages(
               stagingStyle: stagingStylesList[originalIndex] || stagingStyle,
               areaType: areaTypesList[originalIndex] || "interior",
               customPrompt: prompt,
+              removeFurniture,
             });
           });
 
