@@ -112,7 +112,7 @@ async function sendPersonalProjectInvitationEmail({
         setImmediate(() => {
             sendEmail({
                 from: process.env.SENDGRID_VERIFIED_SENDER || "noreply@elevatespacesai.com",
-                senderName: "Elevated Spaces",
+                senderName: "Elevate Spaces AI",
                 to: email,
                 subject,
                 text,
@@ -160,7 +160,7 @@ async function sendProjectCollaborationEmail({
         setImmediate(() => {
             sendEmail({
                 from: process.env.SENDGRID_VERIFIED_SENDER || "noreply@elevatespacesai.com",
-                senderName: "Elevated Spaces",
+                senderName: "Elevate Spaces AI",
                 to: photographer.email!,
                 subject,
                 text,

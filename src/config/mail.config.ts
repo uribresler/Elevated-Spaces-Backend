@@ -57,7 +57,7 @@ export const sendEmail = async ({
         to,
         from: {
             email: verifiedSender,
-            name: senderName || "Elevated Spaces",
+            name: senderName || "Elevate Spaces AI",
         },
         replyTo: replyTo || from || verifiedSender,
         subject,

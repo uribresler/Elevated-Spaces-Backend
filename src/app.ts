@@ -40,16 +40,30 @@ const URLENCODED_BODY_LIMIT = process.env.URLENCODED_BODY_LIMIT || "2mb";
 ======================= */
 
 // CORS allowed origins - prioritize env var, include localhost for development
-// CORS_ORIGINS should be a comma-separated list: "http://localhost:3000,https://your-frontend.com"
+// CORS_ORIGINS should be a comma-separated list of FULL origins, e.g.:
+//   "http://localhost:3000,https://elevatespacesai.com,https://www.elevatespacesai.com"
+// Common mistake: putting just "elevatespacesai.com" — browsers always send
+// the `Origin` header as a full URL with scheme, so the bare hostname will
+// never match. We normalize trailing slashes / whitespace / case here so a
+// minor typo in the env doesn't break the deploy.
+function normalizeOrigin(value: string): string {
+    return value
+        .trim()
+        .replace(/\/+$/, "") // strip trailing slashes
+        .toLowerCase();
+}
+
 const corsOriginsEnv = process.env.CORS_ORIGINS;
-const allowedOrigins = corsOriginsEnv
-    ? corsOriginsEnv.split(',').map(origin => origin.trim())
-    : ["http://localhost:3000"]; // Default to localhost only if not set
+const allowedOrigins = (corsOriginsEnv ? corsOriginsEnv.split(",") : [])
+    .map(normalizeOrigin)
+    .filter(Boolean);
 
 // Always include localhost for development
 if (!allowedOrigins.includes("http://localhost:3000")) {
     allowedOrigins.push("http://localhost:3000");
 }
+
+console.log("[CORS] Allowed origins:", allowedOrigins);
 
 // Security headers. crossOriginResourcePolicy relaxed so that /uploads static
 // files remain loadable cross-origin (existing behavior preserved).
@@ -64,14 +78,18 @@ app.use(globalRateLimiter);
 app.use(
     cors({
         origin: (origin, callback) => {
-            // allow server-to-server & Postman
+            // allow server-to-server & Postman (no Origin header)
             if (!origin) return callback(null, true);
 
-            if (allowedOrigins.includes(origin)) {
+            if (allowedOrigins.includes(normalizeOrigin(origin))) {
                 return callback(null, true);
             }
 
-            return callback(new Error("Not allowed by CORS"));
+            // Log the rejected origin so misconfigured CORS_ORIGINS shows up
+            // in Render logs as the actual value the browser sent, not a
+            // generic "Not allowed by CORS" with no context.
+            console.warn(`[CORS] Rejected origin "${origin}". Allowed: ${allowedOrigins.join(", ")}`);
+            return callback(new Error(`Origin ${origin} not allowed by CORS`));
         },
         credentials: true,
         methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],

@@ -1247,7 +1247,7 @@ export async function invitationService({ email, userId, subject, text, teamId, 
     try {
         await sendEmail({
             from: existing.email,
-            senderName: existing.name ?? "Elevated Spaces Team",
+            senderName: existing.name ?? "Elevate Spaces AI Team",
             replyTo: existing.email,
             to: normalizedEmail,
             subject: subject ?? `Join ${team_exists.name} - Team Invitation`,
@@ -1840,7 +1840,7 @@ export async function reinviteService({
         try {
             await sendEmail({
                 from: existing.email,
-                senderName: existing.name ?? "Elevated Spaces Team",
+                senderName: existing.name ?? "Elevate Spaces AI Team",
                 replyTo: existing.email,
                 to: normalizedEmail,
                 subject: subject ?? `Reminder: Join ${team_exists.name} - Team Invitation`,

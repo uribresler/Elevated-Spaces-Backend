@@ -268,7 +268,7 @@ export async function sendCustomSubscriptionInvoiceEmail(params: {
 
     await sendEmail({
         from: "noreply@elevatedspaces.com",
-        senderName: "Elevated Spaces",
+        senderName: "Elevate Spaces AI",
         to,
         subject: subject || `Invoice #${invoiceId} - ${packageName} Subscription Renewal`,
         text: [
@@ -626,7 +626,7 @@ export async function sendSubscriptionStatusEmail(params: {
 
     await sendEmail({
         from: "noreply@elevatedspaces.com",
-        senderName: "Elevated Spaces",
+        senderName: "Elevate Spaces AI",
         to,
         subject: subject || `Your Subscription Has Been Updated - ${packageName}`,
         text: [
@@ -1942,7 +1942,7 @@ export async function sendContactSalesInquiry({
         throw new Error("Email is required");
     }
 
-    const SALES_CONTACT_EMAIL = process.env.SALES_CONTACT_EMAIL || "elevatespacesai@gmail.com";
+    const SALES_CONTACT_EMAIL = process.env.SALES_CONTACT_EMAIL || "hello@elevatespacesai.com";
     const safeMessage = (message || "").trim();
     const safeCompanyName = (companyName || "").trim();
     const safeTeamSize = (teamSize || "").trim();
@@ -2048,7 +2048,7 @@ export async function sendSupportInquiry({
         throw new Error("Brief description is required");
     }
 
-    const SUPPORT_CONTACT_EMAIL = process.env.SUPPORT_CONTACT_EMAIL || process.env.SALES_CONTACT_EMAIL || "elevatespacesai@gmail.com";
+    const SUPPORT_CONTACT_EMAIL = process.env.SUPPORT_CONTACT_EMAIL || process.env.SALES_CONTACT_EMAIL || "hello@elevatespacesai.com";
     const submittedAt = new Date().toISOString();
     const safeAttachments = (screenshots || []).slice(0, 3);
 
@@ -2678,7 +2678,7 @@ export async function handleCheckoutCompleted(session: Stripe.Checkout.Session) 
                 // Send standard receipt email for non-subscription purchases
                 await sendEmail({
                     from: "hello@elevatespacesai.com",
-                    senderName: "Elevated Spaces",
+                    senderName: "Elevate Spaces AI",
                     to: userEmail,
                     subject: stripeInvoicePdfUrl || stripeInvoiceHostedUrl
                         ? "Your Stripe Invoice and Payment Confirmation"

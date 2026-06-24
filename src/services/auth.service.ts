@@ -17,7 +17,7 @@ async function sendVerificationEmail(toEmail: string, name: string | null, token
   const displayName = name?.trim() || "there";
   await sendEmail({
     from: process.env.SENDGRID_VERIFIED_SENDER || "noreply@elevatespacesai.com",
-    senderName: "Elevated Spaces",
+    senderName: "Elevate Spaces AI",
     to: toEmail,
     subject: "Confirm your Elevated Spaces account",
     text: `Hi ${displayName},\n\nPlease confirm your account by opening this link:\n${verifyUrl}\n\nThis link expires in ${EMAIL_VERIFICATION_TTL_HOURS} hours. If you didn't sign up, you can ignore this email.\n\n— Elevated Spaces`,
@@ -29,7 +29,7 @@ async function sendSecondaryEmailAddedNotice(primary: string, secondary: string,
   const displayName = name?.trim() || "there";
   await sendEmail({
     from: process.env.SENDGRID_VERIFIED_SENDER || "noreply@elevatespacesai.com",
-    senderName: "Elevated Spaces",
+    senderName: "Elevate Spaces AI",
     to: primary,
     subject: "A secondary email was added to your Elevated Spaces account",
     text: `Hi ${displayName},\n\nA secondary email (${secondary}) was just confirmed and added to your account. You can now sign in with either email.\n\nIf this wasn't you, please contact support immediately and change your password.\n\n— Elevated Spaces`,
@@ -42,7 +42,7 @@ async function sendSecondaryEmailVerification(toEmail: string, name: string | nu
   const displayName = name?.trim() || "there";
   await sendEmail({
     from: process.env.SENDGRID_VERIFIED_SENDER || "noreply@elevatespacesai.com",
-    senderName: "Elevated Spaces",
+    senderName: "Elevate Spaces AI",
     to: toEmail,
     subject: "Confirm your secondary email for Elevated Spaces",
     text: `Hi ${displayName},\n\nPlease confirm this address as a secondary email on your Elevated Spaces account by opening this link:\n${verifyUrl}\n\nThis link expires in ${EMAIL_VERIFICATION_TTL_HOURS} hours. Until you confirm, this address can't be used to sign in. If you didn't request this, you can ignore the email.\n\n— Elevated Spaces`,

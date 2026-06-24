@@ -481,7 +481,7 @@ export async function forgotPassword(req: Request, res: Response) {
     try {
       await sendEmail({
         from: process.env.EMAIL_FROM || 'no-reply@elevatespacesai.com',
-        senderName: 'Elevated Spaces',
+        senderName: 'Elevate Spaces AI',
         to: user.email,
         subject: 'Reset your Elevated Spaces password',
         text: `We received a password reset request. Use this link to reset your password: ${resetUrl}. This link expires in 1 hour.`,

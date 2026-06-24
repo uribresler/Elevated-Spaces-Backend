@@ -260,7 +260,7 @@ const DEFAULT_LEGAL_DOCUMENTS: Array<Omit<LegalDocumentRecord, "updatedAt" | "up
       <p>We implement commercially reasonable administrative, technical, and physical safeguards. However, no system can guarantee absolute security.</p>
       <h3>7. User Rights</h3>
       <p>Subject to applicable law, you may request access, correction, or deletion of personal information by contacting:</p>
-      <p><strong>elevatespacesai@gmail.com</strong></p>
+      <p><strong>hello@elevatespacesai.com</strong></p>
       <p>We may require identity verification prior to fulfilling requests.</p>
       <h3>8. International Data Transfers</h3>
       <p>By using the Services, you consent to processing and storage of data in the United States.</p>
@@ -352,7 +352,7 @@ const DEFAULT_LEGAL_DOCUMENTS: Array<Omit<LegalDocumentRecord, "updatedAt" | "up
         <li>Physical or electronic signature</li>
       </ul>
       <p>Send notices to:</p>
-      <p><strong>elevatespacesai@gmail.com</strong></p>
+      <p><strong>hello@elevatespacesai.com</strong></p>
       <h3>3. Repeat Infringers</h3>
       <p>We may suspend or terminate accounts of repeat infringers at our sole discretion.</p>
     `,
@@ -385,7 +385,7 @@ const DEFAULT_LEGAL_DOCUMENTS: Array<Omit<LegalDocumentRecord, "updatedAt" | "up
       <h2>ELEVATE SPACES AI, LLC</h2>
       <h2>SUPPORT</h2>
       <p>For assistance or legal inquiries, contact:</p>
-      <p><strong>elevatespacesai@gmail.com</strong></p>
+      <p><strong>hello@elevatespacesai.com</strong></p>
       <p>Response times may vary.</p>
     `,
   },
