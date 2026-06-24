@@ -41,7 +41,12 @@ export function noSqlInjectionGuard(req: Request, _res: Response, next: NextFunc
  */
 export const globalRateLimiter = rateLimit({
     windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 60_000,
-    limit: Number(process.env.RATE_LIMIT_MAX) || 300,
+    // Per-IP cap. Bumped from 300 → 1200/min so an admin loading the
+    // analytics dashboard (10+ parallel queries) or a multi-image staging
+    // session can't trip the limit. Authenticated users behind shared NAT
+    // (offices, mobile carriers) still need headroom. Override via
+    // RATE_LIMIT_MAX if a specific deployment is more constrained.
+    limit: Number(process.env.RATE_LIMIT_MAX) || 1200,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     skip: (req) => {
@@ -61,7 +66,11 @@ export const globalRateLimiter = rateLimit({
  */
 export const authRateLimiter = rateLimit({
     windowMs: Number(process.env.AUTH_RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-    limit: Number(process.env.AUTH_RATE_LIMIT_MAX) || 20,
+    // 20 was too aggressive for genuine users (e.g. typing the password wrong
+    // twice on mobile then refreshing the page eats most of the budget). 60
+    // attempts per 15 min still throttles credential stuffing while letting
+    // a real person recover from a few typos.
+    limit: Number(process.env.AUTH_RATE_LIMIT_MAX) || 60,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     message: { error: 'Too many authentication attempts, please try again later' },

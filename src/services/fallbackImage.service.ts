@@ -9,7 +9,9 @@ import {
   FALLBACK_VARIANT_COUNT,
 } from "../config/fallback.config";
 
-const FALLBACK_OPERATION_TIMEOUT_MS = Number(process.env.FALLBACK_OPERATION_TIMEOUT_MS || "15000");
+// Per-variant timeout. gemini-2.5-flash-image regularly takes 15-40s for a single image
+// generation (see PHASE1 logs); 15s guaranteed variant timeouts. Default raised to 60s.
+const FALLBACK_OPERATION_TIMEOUT_MS = Number(process.env.FALLBACK_OPERATION_TIMEOUT_MS || "60000");
 
 type VariantReadyPayload = {
   index: number;
@@ -81,19 +83,25 @@ class FallbackImageService {
     baseStyle: string,
     variantNumber: number,
     totalVariants: number,
-    userPrompt?: string
+    userPrompt?: string,
+    removeFurniture?: boolean
   ): string {
     const grounding =
       "Use the PROVIDED IMAGE as the only source scene. Preserve architecture, camera angle, walls, windows, doors, floor and lighting direction. Return one full-frame staged image only.";
 
-    const variationInstruction =
-      `Create variation ${variantNumber} of ${totalVariants}. Keep ${baseStyle} style direction but change furniture arrangement, decor accents, and color balance so each variant looks distinct.`;
+    const variationInstruction = removeFurniture
+      ? `Create variation ${variantNumber} of ${totalVariants}. The room must remain COMPLETELY EMPTY of furniture, rugs, decor, plants, and personal items. Vary only the wall color, floor tone, and lighting accents in keeping with ${baseStyle} style. Do NOT add furniture of any kind.`
+      : `Create variation ${variantNumber} of ${totalVariants}. Keep ${baseStyle} style direction but change furniture arrangement, decor accents, and color balance so each variant looks distinct.`;
+
+    const removeFurnitureClause = removeFurniture
+      ? "\n\nCRITICAL: First, completely REMOVE ALL existing furniture, rugs, decor, plants, and personal items so the room is fully empty. Do not add any furniture back."
+      : "";
 
     if (userPrompt && userPrompt.trim()) {
-      return `${grounding}\n\n${userPrompt.trim()}\n\n${variationInstruction}`;
+      return `${grounding}\n\n${userPrompt.trim()}\n\n${variationInstruction}${removeFurnitureClause}`;
     }
 
-    return `${grounding}\n\nStage this ${roomType} in ${baseStyle} style. ${variationInstruction}`;
+    return `${grounding}\n\nStage this ${roomType} in ${baseStyle} style. ${variationInstruction}${removeFurnitureClause}`;
   }
 
   private async generateSingleVariant(
@@ -156,7 +164,8 @@ class FallbackImageService {
     onVariantReady?: VariantReadyHook,
     options?: {
       maxDurationMs?: number;
-    }
+    },
+    removeFurniture?: boolean
   ): Promise<Buffer[]> {
     const variantCount = Math.max(1, FALLBACK_VARIANT_COUNT);
     const mimeType = this.getMimeType(inputImagePath);
@@ -182,7 +191,7 @@ class FallbackImageService {
 
       const variantNumber = index + 1;
       const variantId = `variant-${variantNumber}-${Date.now()}`;
-      const prompt = this.buildVariantPrompt(roomType, baseStyle, variantNumber, variantCount, userPrompt);
+      const prompt = this.buildVariantPrompt(roomType, baseStyle, variantNumber, variantCount, userPrompt, removeFurniture);
 
       try {
         const buffer =

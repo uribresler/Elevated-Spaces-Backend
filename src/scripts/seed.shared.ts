@@ -19,9 +19,10 @@ const packages = [
   { name: "plan_team", credits: 360, price: 139 },
   { name: "plan_team_annual", credits: 4320, price: 1500 },
   { name: "subscription_topup", credits: 1, price: 0 },
-  { name: "pay_per_image", credits: 1, price: 0.5 },
+  { name: "Pay Per Image", credits: 1, price: 0.5 },
   { name: "extra_credits_50", credits: 50, price: 22 },
   { name: "extra_credits_100", credits: 100, price: 40 },
+  { name: "Enterprise", credits: 999999, price: 0 },
 ];
 
 const teamOwnerPermissions = {

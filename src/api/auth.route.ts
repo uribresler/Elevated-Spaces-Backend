@@ -11,6 +11,12 @@ import {
   getCurrentUser,
   updateProfileImage,
   deleteProfileImage,
+  verifyEmail,
+  resendVerificationEmail,
+  updateSecondaryEmail,
+  deleteSecondaryEmail,
+  verifySecondaryEmail,
+  resendSecondaryEmailVerification,
 } from "../controllers/auth.controller";
 import { logger } from "../utils/logger";
 
@@ -101,6 +107,16 @@ router.get("/me", requireAuth, getCurrentUser);
 router.patch("/profile-image", requireAuth, uploadImage, updateProfileImage);
 router.delete("/profile-image", requireAuth, deleteProfileImage);
 
+// Email verification (manual signup)
+router.post("/verify-email", verifyEmail);
+router.post("/resend-verification", resendVerificationEmail);
+
+// Secondary email management
+router.patch("/secondary-email", requireAuth, updateSecondaryEmail);
+router.delete("/secondary-email", requireAuth, deleteSecondaryEmail);
+router.post("/verify-secondary-email", verifySecondaryEmail);
+router.post("/resend-secondary-verification", requireAuth, resendSecondaryEmailVerification);
+
 // Get available OAuth providers
 router.get("/providers", getAvailableProviders);
 
@@ -124,6 +140,27 @@ router.get("/google", (req, res, next) => {
     sameSite: "lax",
     maxAge: 10 * 60 * 1000,
   });
+
+  // Demo bonus claim from /sign-up?bonus=true — survives the OAuth round-trip
+  // so the callback can grant +5 credits when this Google signup is brand new.
+  const fromDemoBonus = req.query.fromDemoBonus === "true" || req.query.fromDemoBonus === "1";
+  res.cookie("oauth_from_demo_bonus", fromDemoBonus ? "true" : "false", {
+    httpOnly: true,
+    sameSite: "lax",
+    maxAge: 10 * 60 * 1000,
+  });
+
+  // Team-invite token from /accept-invite — carried across the OAuth round-trip
+  // so the callback can redirect the user back to accept-invite, where their
+  // freshly-created (or linked) account gets added to the team.
+  const inviteToken = typeof req.query.inviteToken === "string" ? req.query.inviteToken : "";
+  if (inviteToken) {
+    res.cookie("oauth_invite_token", inviteToken, {
+      httpOnly: true,
+      sameSite: "lax",
+      maxAge: 10 * 60 * 1000,
+    });
+  }
 
   const googleAuthOptions: any = {
     scope: ["profile", "email"],

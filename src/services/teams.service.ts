@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken'
 import crypto from "crypto";
 import { invite_status } from "@prisma/client";
 import bcrypt from "bcrypt";
+import { registrationAgreementsSchema } from "../utils/authSchemas";
 import dotenv from "dotenv";
 import Stripe from "stripe";
 dotenv.config();
@@ -870,7 +871,8 @@ function buildInviteEmail({
         `Invited by: ${safeInviterName} (${inviterEmail})\n` +
         `Team: ${teamName}\n` +
         `Valid until: ${expiryText}\n\n` +
-        `Accept invite: ${acceptUrl}`;
+        `Accept invite: ${acceptUrl}\n\n` +
+        `Note: If you continue by creating an account with Google, please come back to this email and click "Accept Invitation" again to finish joining the team.`;
 
     const html = `
         <!DOCTYPE html>
@@ -912,6 +914,14 @@ function buildInviteEmail({
                                         </tr>
                                     </table>
                                     
+                                    <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; margin: 16px 0 0 0;">
+                                        <tr>
+                                            <td style="padding: 14px 18px;">
+                                                <p style="margin: 0; font-size: 13px; line-height: 1.6; color: #92400e;"><strong>Note:</strong> If you continue by creating an account with Google, please come back to this email and click <strong>Accept Invitation</strong> again to finish joining the team.</p>
+                                            </td>
+                                        </tr>
+                                    </table>
+
                                     <p style="margin: 24px 0 0 0; font-size: 13px; line-height: 1.6; color: #64748b; text-align: center;">If the button doesn't work, copy and paste this URL into your browser:<br><a href="${acceptUrl}" style="color: #667eea; word-break: break-all;">${acceptUrl}</a></p>
                                 </td>
                             </tr>
@@ -1237,7 +1247,7 @@ export async function invitationService({ email, userId, subject, text, teamId, 
     try {
         await sendEmail({
             from: existing.email,
-            senderName: existing.name ?? "Elevated Spaces Team",
+            senderName: existing.name ?? "Elevate Spaces AI Team",
             replyTo: existing.email,
             to: normalizedEmail,
             subject: subject ?? `Join ${team_exists.name} - Team Invitation`,
@@ -1278,10 +1288,12 @@ export async function acceptInvitationService({
     token,
     name,
     password,
+    registrationAgreements,
 }: {
     token: string;
     name?: string;
     password?: string;
+    registrationAgreements?: unknown;
 }) {
     if (!token) {
         throw new Error("Invite token is required");
@@ -1330,7 +1342,14 @@ export async function acceptInvitationService({
     await assertTeamSeatCapacityForAcceptance(invite.team_id, invite.role?.name || "TEAM_MEMBER");
 
     const inviteEmail = payload.email.trim().toLowerCase();
-    let user = await prisma.user.findUnique({ where: { email: inviteEmail } });
+    // Match the invite email against either the user's primary OR confirmed
+    // secondary email — same rule as password and OAuth login. Without this,
+    // a user whose Google address is their secondary would be asked to sign up
+    // even though their account exists.
+    let user = await prisma.user.findFirst({
+        where: { OR: [{ email: inviteEmail }, { secondary_email: inviteEmail }] },
+    });
+    let createdNewUser = false;
 
     await assertEmailNotAlreadyPartOfTeam(invite.team_id, inviteEmail);
 
@@ -1353,6 +1372,15 @@ export async function acceptInvitationService({
             };
         }
 
+        // Mirror the normal signup gate: a new account created through the
+        // accept-invite path must accept the same registration agreements.
+        const agreementResult = registrationAgreementsSchema.safeParse(registrationAgreements);
+        if (!agreementResult.success) {
+            const err: any = new Error("You must accept all required registration agreements to continue.");
+            err.code = "AGREEMENTS_REQUIRED";
+            throw err;
+        }
+
         const hash = await bcrypt.hash(password, 10);
         user = await prisma.user.create({
             data: {
@@ -1360,8 +1388,13 @@ export async function acceptInvitationService({
                 password_hash: hash,
                 name,
                 auth_provider: "LOCAL",
+                // The invite email was sent to this address, so the user has
+                // already proven ownership by clicking the link — skip the
+                // normal email-confirmation gate.
+                email_verified_at: new Date(),
             },
         });
+        createdNewUser = true;
 
     }
 
@@ -1395,6 +1428,8 @@ export async function acceptInvitationService({
             team_role_id: invite.team_role_id,
             deleted_at: null, // Ensure any previously deleted membership is reactivated
             joined_at: new Date(), // Reset joined_at to current time for reactivated members
+            allocated: 0, // Re-added members start with zero credits — must be re-allocated
+            used: 0,
         },
     });
 
@@ -1453,12 +1488,54 @@ export async function acceptInvitationService({
 
     await enforceTeamSeatCapacityForExistingMembers(invite.team_id);
 
+    // When the accept-invite flow created the account itself (manual signup
+    // path), mint a session JWT so the frontend can drop the user straight
+    // into the app instead of asking them to sign in again.
+    let issuedToken: string | undefined;
+    let issuedUser:
+        | {
+              id: string;
+              email: string;
+              name: string | null;
+              role: string;
+              avatarUrl: string | null;
+              manualAvatarUrl: string | null;
+              googleAvatarUrl: string | null;
+              created_at: Date;
+          }
+        | undefined;
+
+    if (createdNewUser) {
+        const userPrimaryRole = await prisma.user_roles.findFirst({
+            where: { user_id: user.id },
+            include: { role: true },
+        });
+        const roleName = userPrimaryRole?.role?.name || "USER";
+        issuedToken = jwt.sign(
+            { userId: user.id, role: roleName },
+            process.env.JWT_SECRET!,
+            { expiresIn: "7d" }
+        );
+        issuedUser = {
+            id: user.id,
+            email: user.email,
+            name: user.name,
+            role: roleName,
+            avatarUrl: (user as any).manual_avatar_url ?? user.avatar_url,
+            manualAvatarUrl: (user as any).manual_avatar_url ?? null,
+            googleAvatarUrl: user.avatar_url,
+            created_at: user.created_at,
+        };
+    }
+
     return {
         success: true,
         message: "Invitation accepted",
         accepted: true,
         teamId: invite.team_id,
         userId: user.id,
+        token: issuedToken,
+        user: issuedUser,
     };
 }
 
@@ -1551,7 +1628,7 @@ export async function removeTeamMemberService({
             });
         }
 
-        // Soft delete - set deleted_at instead of hard delete
+        // Soft delete + zero out allocated/used so a future re-add starts fresh
         const removedMembership = await prisma.team_membership.updateMany({
             where: {
                 team_id,
@@ -1560,6 +1637,8 @@ export async function removeTeamMemberService({
             },
             data: {
                 deleted_at: new Date(),
+                allocated: 0,
+                used: 0,
             }
         });
 
@@ -1616,7 +1695,7 @@ export async function removeTeamMemberService({
         });
     }
 
-    // Soft delete - set deleted_at instead of hard delete
+    // Soft delete + zero out allocated/used so a future re-add starts fresh
     const removedMembership = await prisma.team_membership.updateMany({
         where: {
             team_id,
@@ -1625,6 +1704,8 @@ export async function removeTeamMemberService({
         },
         data: {
             deleted_at: new Date(),
+            allocated: 0,
+            used: 0,
         }
     });
 
@@ -1759,7 +1840,7 @@ export async function reinviteService({
         try {
             await sendEmail({
                 from: existing.email,
-                senderName: existing.name ?? "Elevated Spaces Team",
+                senderName: existing.name ?? "Elevate Spaces AI Team",
                 replyTo: existing.email,
                 to: normalizedEmail,
                 subject: subject ?? `Reminder: Join ${team_exists.name} - Team Invitation`,
@@ -1934,10 +2015,10 @@ export async function leaveTeamService({ teamId, userId }: { teamId: string, use
         };
     }
 
-    // Soft delete the membership
+    // Soft delete + zero counters so a future re-add starts fresh
     await prisma.team_membership.update({
         where: { id: userMembership.id },
-        data: { deleted_at: new Date() },
+        data: { deleted_at: new Date(), allocated: 0, used: 0 },
     });
 
     console.log("TEAM_MEMBER_LEFT", {

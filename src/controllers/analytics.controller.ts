@@ -79,18 +79,14 @@ export async function getAdminOverview(req: Request, res: Response): Promise<voi
     const since = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
     const previousSince = new Date(since.getTime() - days * 24 * 60 * 60 * 1000);
 
+    // Run in small batches so we don't grab more than ~4 pool connections at once.
+    // The upstream Supabase session-mode pooler caps clients at 15; firing all 12
+    // queries in parallel was tripping EMAXCONNSESSION under concurrent admin loads.
     const [
       pageViewEvents,
       previousPageViewEvents,
       signupsInRange,
       previousSignups,
-      activeUserRows,
-      totalUsers,
-      photographerStatusCounts,
-      bookingStatusCounts,
-      revenueRows,
-      previousRevenueRows,
-      topReferrerRows,
     ] = await Promise.all([
       prisma.analytics_event.findMany({
         where: { event_type: "page_view", timestamp: { gte: since } },
@@ -101,6 +97,14 @@ export async function getAdminOverview(req: Request, res: Response): Promise<voi
       }),
       prisma.user.count({ where: { created_at: { gte: since } } }),
       prisma.user.count({ where: { created_at: { gte: previousSince, lt: since } } }),
+    ]);
+
+    const [
+      activeUserRows,
+      totalUsers,
+      photographerStatusCounts,
+      bookingStatusCounts,
+    ] = await Promise.all([
       prisma.analytics_event.findMany({
         where: { timestamp: { gte: since }, user_id: { not: null } },
         select: { user_id: true },
@@ -109,6 +113,13 @@ export async function getAdminOverview(req: Request, res: Response): Promise<voi
       prisma.user.count(),
       prisma.photographer_profile.groupBy({ by: ["application_status" as any], _count: { _all: true } } as any),
       prisma.booking.groupBy({ by: ["status"], _count: { _all: true } }),
+    ]);
+
+    const [
+      revenueRows,
+      previousRevenueRows,
+      topReferrerRows,
+    ] = await Promise.all([
       prisma.payment.findMany({
         where: { status: "PAID", created_at: { gte: since } },
         select: { amount: true, created_at: true },

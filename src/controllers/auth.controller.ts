@@ -1,7 +1,18 @@
 import { Request, Response } from "express";
 import { ZodError } from "zod";
 import { loginSchema, signupSchema } from "../utils/authSchemas";
-import { loginService, signupService, updateProfileImageService, deleteProfileImageService } from "../services/auth.service";
+import {
+  loginService,
+  signupService,
+  updateProfileImageService,
+  deleteProfileImageService,
+  verifyEmailService,
+  resendVerificationEmailService,
+  addOrUpdateSecondaryEmailService,
+  removeSecondaryEmailService,
+  verifySecondaryEmailService,
+  resendSecondaryEmailVerificationService,
+} from "../services/auth.service";
 import bcrypt from 'bcrypt';
 import { sendEmail } from '../config/mail.config';
 import { oauthService } from "../services/oauth.service";
@@ -105,15 +116,110 @@ export async function login(req: Request, res: Response) {
           provider: (err as any).provider,
         });
       }
+      if (errorCode === "EMAIL_NOT_VERIFIED") {
+        return res.status(403).json({
+          error: (err as any).message,
+          code: "EMAIL_NOT_VERIFIED",
+          email: (err as any).email,
+        });
+      }
     }
     return res.status(500).json({ error: "Internal server error" });
   }
 }
 
+export async function verifyEmail(req: Request, res: Response) {
+  try {
+    const token = typeof req.body?.token === "string" ? req.body.token : typeof req.query?.token === "string" ? req.query.token : "";
+    const result = await verifyEmailService({ token });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    const code = err?.code;
+    const status = code === "VERIFICATION_TOKEN_MISSING" ? 400
+      : code === "VERIFICATION_TOKEN_EXPIRED" ? 410
+      : code === "VERIFICATION_TOKEN_INVALID" ? 400
+      : 500;
+    return res.status(status).json({ success: false, error: err?.message || "Failed to verify email", code });
+  }
+}
+
+export async function resendVerificationEmail(req: Request, res: Response) {
+  try {
+    const email = typeof req.body?.email === "string" ? req.body.email : "";
+    if (!email) return res.status(400).json({ success: false, error: "Email is required" });
+    const result = await resendVerificationEmailService({ email });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || "Failed to resend confirmation" });
+  }
+}
+
+export async function updateSecondaryEmail(req: Request, res: Response) {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ success: false, error: "Unauthorized" });
+    const secondaryEmail = typeof req.body?.secondaryEmail === "string" ? req.body.secondaryEmail : "";
+    const result = await addOrUpdateSecondaryEmailService({ userId, secondaryEmail });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    const code = err?.code;
+    const status = code === "INVALID_EMAIL" || code === "SECONDARY_EQUALS_PRIMARY" ? 400
+      : code === "SECONDARY_EMAIL_TAKEN" ? 409
+      : code === "USER_NOT_FOUND" ? 404
+      : 500;
+    return res.status(status).json({ success: false, error: err?.message || "Failed to update secondary email", code });
+  }
+}
+
+export async function verifySecondaryEmail(req: Request, res: Response) {
+  try {
+    const token = typeof req.body?.token === "string" ? req.body.token : typeof req.query?.token === "string" ? req.query.token : "";
+    const result = await verifySecondaryEmailService({ token });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    const code = err?.code;
+    const status = code === "VERIFICATION_TOKEN_MISSING" ? 400
+      : code === "VERIFICATION_TOKEN_EXPIRED" ? 410
+      : code === "VERIFICATION_TOKEN_INVALID" ? 400
+      : code === "SECONDARY_EMAIL_TAKEN" ? 409
+      : 500;
+    return res.status(status).json({ success: false, error: err?.message || "Failed to confirm secondary email", code });
+  }
+}
+
+export async function resendSecondaryEmailVerification(req: Request, res: Response) {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ success: false, error: "Unauthorized" });
+    const result = await resendSecondaryEmailVerificationService({ userId });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    const code = err?.code;
+    const status = code === "NO_PENDING_SECONDARY" ? 400 : code === "USER_NOT_FOUND" ? 404 : 500;
+    return res.status(status).json({ success: false, error: err?.message || "Failed to resend confirmation", code });
+  }
+}
+
+export async function deleteSecondaryEmail(req: Request, res: Response) {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ success: false, error: "Unauthorized" });
+    const result = await removeSecondaryEmailService({ userId });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || "Failed to remove secondary email" });
+  }
+}
+
 export async function oauthCallback(req: Request, res: Response) {
   try {
+    // Read fromDemoBonus + inviteToken BEFORE clearing the cookies.
+    const fromDemoBonus = req.cookies?.oauth_from_demo_bonus === "true";
+    const inviteToken = typeof req.cookies?.oauth_invite_token === "string" ? req.cookies.oauth_invite_token : "";
     res.clearCookie("oauth_intent");
     res.clearCookie("oauth_agreements_accepted");
+    res.clearCookie("oauth_from_demo_bonus");
+    res.clearCookie("oauth_invite_token");
     res.clearCookie("oauth_error");
 
     if (!req.user) {
@@ -142,6 +248,31 @@ export async function oauthCallback(req: Request, res: Response) {
       await linkGuestToUser(deviceId, authResult.user.id);
     }
 
+    // Demo-bonus grant for Google signup. Mirrors the manual signup path in
+    // signupService: +5 credits + stamp demo_bonus_claimed_at. Idempotent —
+    // only fires when (a) this OAuth flow actually created the account
+    // (isNewUser) AND (b) the user has not already claimed before.
+    let demoBonusGranted = false;
+    if (fromDemoBonus && authResult.isNewUser && authResult.user?.id) {
+      const existing = await prisma.user.findUnique({
+        where: { id: authResult.user.id },
+        select: { demo_bonus_claimed_at: true },
+      });
+      if (existing && !existing.demo_bonus_claimed_at) {
+        await prisma.user_credit_balance.upsert({
+          where: { user_id: authResult.user.id },
+          create: { user_id: authResult.user.id, balance: 5 },
+          update: { balance: { increment: 5 } },
+        });
+        await prisma.user.update({
+          where: { id: authResult.user.id },
+          data: { demo_bonus_claimed_at: new Date() },
+        });
+        demoBonusGranted = true;
+        logger(`OAuth callback: demo bonus +5 credits granted to ${authResult.user.email}`);
+      }
+    }
+
     // Now you have everything: token, isNewUser, avatarUrl, etc.
     // Always fetch the latest user from DB to get the latest role
     const latestUser = await oauthService.getUserById(authResult.user.id);
@@ -166,6 +297,12 @@ export async function oauthCallback(req: Request, res: Response) {
 
     if (authResult.user.avatarUrl) {
       params.append("avatarUrl", authResult.user.avatarUrl);
+    }
+    if (demoBonusGranted) {
+      params.append("demoBonusGranted", "true");
+    }
+    if (inviteToken) {
+      params.append("inviteToken", inviteToken);
     }
 
     // Redirect to frontend callback page with token and user data
@@ -237,23 +374,39 @@ export async function getCurrentUser(req: Request, res: Response) {
       return res.status(404).json({ success: false, message: "User not found" });
     }
 
-    const userRole = await prisma.user_roles.findFirst({
+    const userRoles = await prisma.user_roles.findMany({
       where: { user_id: user.id },
       include: { role: true },
     });
 
-    if (!userRole) {
+    if (userRoles.length === 0) {
       return res.status(404).json({ success: false, message: "Invalid Role" });
     }
+
+    // A user can hold several roles at once (e.g., platform ADMIN who also
+    // formed a team and so picked up TEAM_OWNER + USER). The navbar/admin
+    // gate keys off a single role string, so we have to surface the
+    // highest-privilege one or the Dashboard link silently disappears.
+    const roleNames = userRoles.map((r) => r.role.name.toUpperCase());
+    const primaryRole = roleNames.includes("ADMIN")
+      ? "ADMIN"
+      : roleNames.includes("PHOTOGRAPHER")
+        ? "PHOTOGRAPHER"
+        : "USER";
 
     return res.status(200).json({
       success: true,
       user: {
         id: user.id,
         email: user.email,
+        secondary_email: user.secondary_email,
+        secondary_email_pending: user.secondary_email_pending,
+        email_verified_at: user.email_verified_at,
         name: user.name,
-        role: userRole.role.name,
-        avatar_url: user.avatar_url,
+        role: primaryRole,
+        avatar_url: user.manual_avatar_url ?? user.avatar_url,
+        manual_avatar_url: user.manual_avatar_url,
+        google_avatar_url: user.avatar_url,
         created_at: user.created_at,
       },
     });
@@ -331,11 +484,27 @@ export async function forgotPassword(req: Request, res: Response) {
     try {
       await sendEmail({
         from: process.env.EMAIL_FROM || 'no-reply@elevatespacesai.com',
-        senderName: 'Elevated Spaces',
+        senderName: 'Elevate Spaces AI',
         to: user.email,
         subject: 'Reset your Elevated Spaces password',
         text: `We received a password reset request. Use this link to reset your password: ${resetUrl}. This link expires in 1 hour.`,
-        html: `<p>We received a password reset request. Click the link below to reset your password. The link expires in 1 hour.</p><p><a href="${resetUrl}">${resetUrl}</a></p>`,
+        html: `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 24px; color: #0f172a;">
+            <h2 style="margin: 0 0 12px; font-size: 22px; color: #0f172a;">Reset your password</h2>
+            <p style="margin: 0 0 16px; font-size: 14px; line-height: 1.5; color: #334155;">
+              We received a password reset request for your Elevated Spaces account. Click the button below to set a new password. This link expires in 1 hour.
+            </p>
+            <p style="margin: 24px 0;">
+              <a href="${resetUrl}"
+                 style="display: inline-block; background: #4f46e5; color: #ffffff; text-decoration: none; padding: 14px 28px; border-radius: 8px; font-weight: 700; font-size: 15px;">
+                Reset password now
+              </a>
+            </p>
+            <p style="margin: 16px 0 0; font-size: 12px; color: #64748b; line-height: 1.5;">
+              If you didn't request this, you can safely ignore this email — your password will not change.
+            </p>
+          </div>
+        `,
       });
       logger(`Reset email sent via configured SendGrid to ${user.email}`);
     } catch (emailErr) {

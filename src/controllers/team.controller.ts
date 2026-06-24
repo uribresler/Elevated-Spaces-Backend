@@ -131,14 +131,15 @@ export async function sendInvitation(req: Request, res: Response) {
 
 export async function acceptInvitation(req: Request, res: Response) {
     try {
-        const { token, name, password } = req.body;
+        const { token, name, password, registrationAgreements } = req.body;
 
-        const result = await acceptInvitationService({ token, name, password });
+        const result = await acceptInvitationService({ token, name, password, registrationAgreements });
 
         return res.status(200).json(result);
     } catch (error: any) {
         console.error(error);
-        return res.status(400).json({ message: error.message || "Invalid invitation" });
+        const status = error?.code === "AGREEMENTS_REQUIRED" ? 422 : 400;
+        return res.status(status).json({ message: error.message || "Invalid invitation", code: error?.code });
     }
 }
 
@@ -173,38 +174,6 @@ export async function getMyTeams(req: Request, res: Response) {
                 deleted_at: null,
             },
             include: {
-                teamInvites: {
-                    where: {
-                        OR: [
-                            { status: "PENDING" },
-                            { status: "FAILED" },
-                            { status: "ACCEPTED" },
-                        ],
-                    },
-                    select: {
-                        id: true,
-                        email: true,
-                        team_id: true,
-                        team_role_id: true,
-                        status: true,
-                        invited_by_user_id: true,
-                        credit_limit: true,
-                        token: true,
-                        invited_at: true,
-                        expires_at: true,
-                        accepted_at: true,
-                        accepted_by_user_id: true,
-                        created_at: true,
-                        updated_at: true,
-                        role: {
-                            select: {
-                                id: true,
-                                name: true,
-                                description: true,
-                            },
-                        },
-                    },
-                },
                 owner: {
                     select: {
                         id: true,
@@ -214,46 +183,104 @@ export async function getMyTeams(req: Request, res: Response) {
                         created_at: true,
                     },
                 },
-                members: {
-                    where: { deleted_at: null },
-                    include: {
-                        role: { select: { id: true, name: true, description: true } },
-                        user: { select: { id: true, name: true, email: true, avatar_url: true, created_at: true } },
-                    }
-                },
-                purchases: {
-                    where: { status: "completed" },
-                    select: {
-                        id: true,
-                        team_id: true,
-                        amount: true,
-                        price_usd: true,
-                        status: true,
-                        completed_at: true,
-                    },
-                },
-            }
-        })
-        if (!teams) {
-            return res.status(301).json({
-                message: "No teams created yet!"
-            })
-        }
-        const filteredTeams = teams.map((team) => {
-            const activeMemberIds = new Set(team.members.map((m) => m.user_id));
-            const filteredInvites = team.teamInvites.filter((invite) => {
-                if (invite.status !== "ACCEPTED") {
-                    return true;
-                }
-                return invite.accepted_by_user_id
-                    ? activeMemberIds.has(invite.accepted_by_user_id)
-                    : false;
-            });
+            },
+        });
 
+        if (!teams.length) {
+            return res.status(200).json({
+                success: true,
+                message: "Teams fetched successfully",
+                teams: [],
+            });
+        }
+
+        const teamIds = teams.map((t) => t.id);
+
+        const inviteSelect = {
+            id: true,
+            email: true,
+            team_id: true,
+            team_role_id: true,
+            status: true,
+            invited_by_user_id: true,
+            credit_limit: true,
+            token: true,
+            invited_at: true,
+            expires_at: true,
+            accepted_at: true,
+            accepted_by_user_id: true,
+            created_at: true,
+            updated_at: true,
+            role: { select: { id: true, name: true, description: true } },
+        } as const;
+
+        const [members, purchases, openInvites] = await Promise.all([
+            prisma.team_membership.findMany({
+                where: { team_id: { in: teamIds }, deleted_at: null },
+                include: {
+                    role: { select: { id: true, name: true, description: true } },
+                    user: { select: { id: true, name: true, email: true, avatar_url: true, created_at: true } },
+                },
+            }),
+            prisma.team_purchase.findMany({
+                where: { team_id: { in: teamIds }, status: "completed" },
+                select: {
+                    id: true,
+                    team_id: true,
+                    amount: true,
+                    price_usd: true,
+                    status: true,
+                    completed_at: true,
+                },
+            }),
+            prisma.team_invites.findMany({
+                where: { team_id: { in: teamIds }, status: { in: ["PENDING", "FAILED"] } },
+                select: inviteSelect,
+            }),
+        ]);
+
+        // Only fetch ACCEPTED invites for users that are still active members —
+        // historical accepted invites for removed users are dropped at the SQL layer.
+        const memberUserIds = Array.from(new Set(members.map((m) => m.user_id)));
+        const acceptedInvites = memberUserIds.length
+            ? await prisma.team_invites.findMany({
+                  where: {
+                      team_id: { in: teamIds },
+                      status: "ACCEPTED",
+                      accepted_by_user_id: { in: memberUserIds },
+                  },
+                  select: inviteSelect,
+              })
+            : [];
+
+        const membersByTeam = new Map<string, typeof members>();
+        for (const m of members) {
+            const list = membersByTeam.get(m.team_id) ?? [];
+            list.push(m);
+            membersByTeam.set(m.team_id, list);
+        }
+
+        const purchasesByTeam = new Map<string, typeof purchases>();
+        for (const p of purchases) {
+            const list = purchasesByTeam.get(p.team_id) ?? [];
+            list.push(p);
+            purchasesByTeam.set(p.team_id, list);
+        }
+
+        const invitesByTeam = new Map<string, typeof openInvites>();
+        for (const inv of [...openInvites, ...acceptedInvites]) {
+            const list = invitesByTeam.get(inv.team_id) ?? [];
+            list.push(inv);
+            invitesByTeam.set(inv.team_id, list);
+        }
+
+        const filteredTeams = teams.map((team) => {
+            const teamMembers = membersByTeam.get(team.id) ?? [];
             return {
                 ...team,
-                teamInvites: filteredInvites,
-                members: team.members.map((member) => ({
+                teamInvites: invitesByTeam.get(team.id) ?? [],
+                purchases: purchasesByTeam.get(team.id) ?? [],
+                members: teamMembers.map((member) => ({
                     ...member,
                     is_paid_extra_seat: Boolean((member as any).is_paid_extra_seat),
                     seat_auto_renew: Boolean((member as any).seat_auto_renew),

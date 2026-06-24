@@ -450,7 +450,7 @@ export class SubscriptionRenewalService {
                             const html = InvoiceService.generateInvoiceHTML(invoiceData);
                             await sendEmail({
                                 from: "noreply@elevatedspaces.com",
-                                senderName: "Elevated Spaces",
+                                senderName: "Elevate Spaces AI",
                                 to: user.email,
                                 subject: `Action Required: Pending Subscription Payment - ${creditPackage.name}`,
                                 text: `We were unable to charge your saved payment method for your ${creditPackage.name} subscription. Please update your payment details within 24 hours to avoid cancellation.`,
@@ -602,7 +602,7 @@ export class SubscriptionRenewalService {
 
                 await sendEmail({
                     from: "noreply@elevatedspaces.com",
-                    senderName: "Elevated Spaces",
+                    senderName: "Elevate Spaces AI",
                     to: user.email,
                     subject: `Invoice #${invoiceId} - ${creditPackage.name} Subscription Renewal`,
                     text: `Your ${creditPackage.name} subscription renewal invoice for $${price_usd.toFixed(2)} is ready. Thank you for your business!`,

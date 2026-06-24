@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-const registrationAgreementsSchema = z.object({
+export const registrationAgreementsSchema = z.object({
   acceptTermsAndPrivacy: z.boolean(),
   confirmAgeAndCapacity: z.boolean(),
   confirmUploadRights: z.boolean(),

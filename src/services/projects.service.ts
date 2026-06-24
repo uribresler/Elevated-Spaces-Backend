@@ -112,7 +112,7 @@ async function sendPersonalProjectInvitationEmail({
         setImmediate(() => {
             sendEmail({
                 from: process.env.SENDGRID_VERIFIED_SENDER || "noreply@elevatespacesai.com",
-                senderName: "Elevated Spaces",
+                senderName: "Elevate Spaces AI",
                 to: email,
                 subject,
                 text,
@@ -160,7 +160,7 @@ async function sendProjectCollaborationEmail({
         setImmediate(() => {
             sendEmail({
                 from: process.env.SENDGRID_VERIFIED_SENDER || "noreply@elevatespacesai.com",
-                senderName: "Elevated Spaces",
+                senderName: "Elevate Spaces AI",
                 to: photographer.email!,
                 subject,
                 text,
@@ -304,7 +304,7 @@ export async function createProjectService({
         roleName = teamData.roleName;
 
         if (!["TEAM_OWNER", "TEAM_ADMIN", "TEAM_MEMBER"].includes(roleName)) {
-            throw new Error("You are not allowed to create projects for this team");
+            throw new Error("You are not allowed to create projects for this team, Please contact Member / Admin, so they can create and add you");
         }
 
         // Check if TEAM has an active subscription OR user has an active personal subscription
@@ -342,10 +342,21 @@ export async function createProjectService({
             throw error;
         }
     } else {
-        // For personal projects, user must have an active subscription
+        // For personal projects, user must have their OWN active personal plan.
+        // Being inside a team that has a plan does NOT entitle them to private
+        // personal projects — those need a personal subscription.
         const hasActivePurchase = await hasActiveOrNotExpiredPersonalPurchase(userId);
         if (!hasActivePurchase) {
-            throw new Error("Creating projects requires an active paid subscription. Please subscribe to a plan.");
+            const teamMembershipCount = await prisma.team_membership.count({
+                where: { user_id: userId, deleted_at: null },
+            });
+            const error: any = new Error(
+                teamMembershipCount > 0
+                    ? "Personal projects require your own plan. You're currently part of a team subscription, which only covers team projects (visible to the team owner and admins). To create private projects that only you can access, please purchase a personal plan."
+                    : "Personal projects require an active personal plan. Please subscribe to a plan to create private projects."
+            );
+            error.code = "PERSONAL_PLAN_REQUIRED";
+            throw error;
         }
         // Ensure personal project name uniqueness per user
         const existingPersonalProject = await prisma.team_project.findFirst({
@@ -362,10 +373,6 @@ export async function createProjectService({
             error.code = "PROJECT_NAME_TAKEN";
             throw error;
         }
-    }
-
-    if (photographerEmail && !sanitizedTeamId) {
-        throw new Error("Photographers can only be invited for team projects");
     }
 
     // Validate photographer BEFORE creating the project (team projects only)
@@ -433,11 +440,60 @@ export async function createProjectService({
         });
     }
 
+    // Personal project: invite anyone by email (no team membership required)
+    let personalPhotographerInvited = false;
+    if (!sanitizedTeamId && photographerEmail) {
+        const normalizedEmail = photographerEmail.trim().toLowerCase();
+        if (normalizedEmail) {
+            const existingPhotographer = await prisma.user.findUnique({
+                where: { email: normalizedEmail },
+                select: { id: true },
+            });
+
+            if (existingPhotographer) {
+                await prisma.team_project_member.upsert({
+                    where: { project_id_user_id: { project_id: project.id, user_id: existingPhotographer.id } },
+                    create: {
+                        project_id: project.id,
+                        user_id: existingPhotographer.id,
+                        role: "PHOTOGRAPHER",
+                    },
+                    update: { role: "PHOTOGRAPHER" },
+                });
+                sendProjectCollaborationEmail({
+                    photographerId: existingPhotographer.id,
+                    projectName: project.name,
+                    invitedByUserId: userId,
+                });
+            } else {
+                await prisma.project_invites.upsert({
+                    where: { project_id_email: { project_id: project.id, email: normalizedEmail } },
+                    create: {
+                        project_id: project.id,
+                        team_id: null,
+                        email: normalizedEmail,
+                        invited_by_user_id: userId,
+                        token: crypto.randomUUID(),
+                        status: "PENDING",
+                    },
+                    update: {
+                        invited_by_user_id: userId,
+                        status: "PENDING",
+                        accepted_at: null,
+                        accepted_by_user_id: null,
+                        token: crypto.randomUUID(),
+                    },
+                });
+            }
+            personalPhotographerInvited = true;
+        }
+    }
+
     return {
         success: true,
-        message: sanitizedTeamId 
-            ? (invitedPhotographerEmail ? "Team project created successfully. Photographer invitation sent." : "Team project created successfully") 
-            : "Personal project created successfully",
+        message: sanitizedTeamId
+            ? (invitedPhotographerEmail ? "Team project created successfully. Photographer invitation sent." : "Team project created successfully")
+            : (personalPhotographerInvited ? "Personal project created successfully. Photographer invitation sent." : "Personal project created successfully"),
         project,
         data: { project },
     };
@@ -518,7 +574,7 @@ export async function getMyProjectsService({ userId }: { userId: string }) {
     });
 
     const memberships = await prisma.team_membership.findMany({
-        where: { user_id: userId },
+        where: { user_id: userId, deleted_at: null },
         include: { role: true },
     });
 
@@ -538,6 +594,9 @@ export async function getMyProjectsService({ userId }: { userId: string }) {
 
     // Include personal projects (no team) created by the user
     orFilters.push({ team_id: null, created_by_user_id: userId });
+
+    // Include personal projects where the user was added as a member (e.g. photographer)
+    orFilters.push({ team_id: null, members: { some: { user_id: userId } } });
 
     // Owners and admins can see all projects in their teams
     if (ownerOrAdminTeamIds.length > 0) {

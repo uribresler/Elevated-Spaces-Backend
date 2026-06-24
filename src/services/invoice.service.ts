@@ -256,7 +256,7 @@ export class InvoiceService {
         try {
             await sendEmail({
                 from: "noreply@elevatedspaces.com",
-                senderName: "Elevated Spaces",
+                senderName: "Elevate Spaces AI",
                 to,
                 subject: `Invoice Confirmation - ${packageName} Subscription Renewal`,
                 text: `Your ${packageName} subscription renewal invoice for $${amount.toFixed(2)} is attached. Thank you for your business!`,

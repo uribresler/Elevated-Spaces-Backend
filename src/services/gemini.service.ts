@@ -401,7 +401,8 @@ class GeminiService {
     stagingStyle: string,
     prompt?: string,
     variationCount: number = 1,
-    areaType: "interior" | "exterior" = "interior"
+    areaType: "interior" | "exterior" = "interior",
+    removeFurniture?: boolean
   ): string {
     const groundingRules =
       areaType === "exterior"
@@ -422,7 +423,7 @@ class GeminiService {
           "ABSOLUTELY DO NOT REMOVE, HIDE, OR ALTER ANY EXISTING PAINTINGS, WALL ART, OR DECORATIVE ITEMS. THIS IS CRITICAL. ONLY ADD OR IMPROVE, NEVER REMOVE. DO NOT REMOVE ANYTHING FROM THE ORIGINAL IMAGE UNLESS I EXPLICITLY SAY SO.";
         const lowerPrompt = promptStr.toLocaleLowerCase();
         const userRequestsRemoval = /remove|delete|empty|clear|no decor|no painting|no wall art/.test(lowerPrompt);
-        if (userRequestsRemoval) {
+        if (removeFurniture || userRequestsRemoval) {
           stagingPrompt = `${priorityPrompt}\n${promptStr}`;
         } else {
           stagingPrompt = `${priorityPrompt}\n${doNotRemove}\n${promptStr}\n${doNotRemove}`;
@@ -436,15 +437,24 @@ class GeminiService {
       stagingPrompt = DEFAULT_STAGING_PROMPT(roomType, stagingStyle);
     }
 
+    const removeFurnitureHeader = removeFurniture
+      ? "TOP PRIORITY — EMPTY ROOM REQUEST: The output image MUST show a completely EMPTY room. Remove ALL furniture, rugs, decor, plants, artwork, curtains, and personal items from the source image. Do NOT add any new furniture or decor of any kind. The result must be a bare empty room — only walls, floor, ceiling, windows, and doors visible.\n\n"
+      : "";
+
+    const removeFurnitureInstruction = removeFurniture
+      ? "\n\nFINAL REMINDER: Output an EMPTY room. No furniture. No decor. No rugs. No plants. No artwork. Just the empty room shell."
+      : "";
+
     if (variationCount > 1) {
-      const variationInstruction =
-        areaType === "exterior"
+      const variationInstruction = removeFurniture
+        ? `Generate ${variationCount} distinct EMPTY-room variations in one response. Each variation must keep the same architecture and camera perspective, with the room completely empty of furniture and decor — vary only wall color, floor tone, or lighting accents.`
+        : areaType === "exterior"
           ? `Generate ${variationCount} distinct staged variations in one response. Each variation must keep the same exterior architecture and camera perspective, while varying outdoor furniture, landscaping details, lighting accents, and curb-appeal styling.`
           : `Generate ${variationCount} distinct staged variations in one response. Each variation must keep the same architecture and camera perspective, while varying furniture layout, decor accents, and styling details.`;
-      return `${groundingRules}\n\n${stagingPrompt}\n\n${variationInstruction}`;
+      return `${removeFurnitureHeader}${groundingRules}\n\n${stagingPrompt}\n\n${variationInstruction}${removeFurnitureInstruction}`;
     }
 
-    return `${groundingRules}\n\n${stagingPrompt}`;
+    return `${removeFurnitureHeader}${groundingRules}\n\n${stagingPrompt}${removeFurnitureInstruction}`;
   }
 
   private async generateStagedImages(
@@ -460,7 +470,7 @@ class GeminiService {
     const { buffer: imageBuffer, mimeType } = await this.prepareImageForGemini(inputImagePath);
     const base64Image = imageBuffer.toString("base64");
 
-    const stagingPrompt = this.buildStagingPrompt(roomType, stagingStyle, prompt, safeVariationCount, areaType);
+    const stagingPrompt = this.buildStagingPrompt(roomType, stagingStyle, prompt, safeVariationCount, areaType, removeFurniture);
     const singleCallPrompt = `${stagingPrompt}\n\nReturn exactly ${safeVariationCount} final staged IMAGE outputs in this single response. Each output must be one full-frame image only (no collage or split). Keep the original architecture unchanged.`;
 
     return this.executeWithRetry(async () => {
@@ -548,11 +558,15 @@ class GeminiService {
           await geminiRateLimiter.acquire(`stageImage-${safeVariationCount}-v${index + 1}`);
           geminiCallCount += 1;
 
-          const variationPrompt = prompt
+          const baseVariationText = prompt
             ? `${prompt}\n\nCreate variation ${index + 1} of ${safeVariationCount}. Keep architecture unchanged and make this variation visually distinct from previous ones.`
             : `Create variation ${index + 1} of ${safeVariationCount} for this ${roomType} in ${stagingStyle} style. Keep architecture unchanged and make this variation visually distinct from previous ones.`;
 
-          const perVariationPrompt = this.buildStagingPrompt(roomType, stagingStyle, variationPrompt, 1);
+          const variationPrompt = removeFurniture
+            ? `CRITICAL OVERRIDE: The room MUST be returned COMPLETELY EMPTY of all furniture, rugs, decor, plants, artwork, and personal items. Do NOT add any new furniture or decor. Only the empty room with its walls, floor, ceiling, windows, and doors should remain.\n\n${baseVariationText}\n\nReminder: keep the room empty — no furniture, no decor, no rugs, no artwork.`
+            : baseVariationText;
+
+          const perVariationPrompt = this.buildStagingPrompt(roomType, stagingStyle, variationPrompt, 1, areaType, removeFurniture);
 
           const variationResponse = await this.executeWithImageModelFailover(
             `stage-variation-${index + 1}`,
