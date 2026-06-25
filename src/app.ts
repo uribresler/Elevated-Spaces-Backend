@@ -22,7 +22,6 @@ import messagesRoutes from './api/messages.route'
 import accountDeletionRoutes from './api/accountDeletion.route'
 import analyticsRoutes from './api/analytics.route'
 import consentsRoute from './api/consents.route'
-import analyticsRoutes from './api/analytics.route'
 import { stripeWebhookHandler } from "./controllers/payment.controller";
 import { errorHandler } from "./middlewares/errorHandler";
 import { zodErrorHandler } from "./middlewares/zodErrorHandler";
