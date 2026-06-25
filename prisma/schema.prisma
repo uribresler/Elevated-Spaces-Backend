@@ -7,114 +7,110 @@ datasource db {
 }
 
 model user {
-  id                    String                 @id @default(uuid()) @map("id")
-  email                 String                 @unique @map("email")
-  password_hash         String?                @map("password_hash")
-  name                  String?                @map("name")
-  created_at            DateTime               @default(now()) @map("created_at")
-  updated_at            DateTime               @updatedAt @map("updated_at")
-  ai_generation_consent_first_at DateTime?      @map("ai_generation_consent_first_at")
-  ai_generation_consent_last_at  DateTime?      @map("ai_generation_consent_last_at")
-  stripe_customer_id    String?                @map("stripe_customer_id")
-  deleted_at            DateTime?              @map("deleted_at")
-  deletion_requested_at DateTime?              @map("deletion_requested_at")
-  deletion_purge_at     DateTime?              @map("deletion_purge_at")
-  deletion_code_hash    String?                @map("deletion_code_hash")
-  deletion_code_expires_at DateTime?           @map("deletion_code_expires_at")
-  auth_provider         auth_provider          @default(LOCAL) @map("auth_provider")
-  avatar_url            String?                @map("avatar_url")
-  manual_avatar_url     String?                @map("manual_avatar_url")
-  demo_bonus_claimed_at DateTime?              @map("demo_bonus_claimed_at")
-  secondary_email       String?                @unique @map("secondary_email")
-  secondary_email_pending                 String?   @unique @map("secondary_email_pending")
-  secondary_email_verification_token      String?   @unique @map("secondary_email_verification_token")
-  secondary_email_verification_expires_at DateTime? @map("secondary_email_verification_expires_at")
-  email_verified_at     DateTime?              @map("email_verified_at")
-  email_verification_token String?             @unique @map("email_verification_token")
-  email_verification_expires_at DateTime?      @map("email_verification_expires_at")
-  deletion_requested_at DateTime?              @map("deletion_requested_at")
-  deletion_purge_at     DateTime?              @map("deletion_purge_at")
-  deletion_code_hash    String?                @map("deletion_code_hash")
-  deletion_code_expires_at DateTime?           @map("deletion_code_expires_at")
-  google_id             String?                @unique @map("google_id")
-  apple_id              String?                @unique @map("apple_id")
-  facebook_id           String?                @unique @map("facebook_id")
-  analytics_events      analytics_event[]
-  bookings              booking[]              @relation("UserBookings")
-  credits               credit[]
-  guest_tracking        guest_tracking[]
-  images                image[]
-  payments              payment[]
-  photographer_profile  photographer_profile?
+  id                                      String                 @id @default(uuid()) @map("id")
+  email                                   String                 @unique @map("email")
+  password_hash                           String?                @map("password_hash")
+  name                                    String?                @map("name")
+  created_at                              DateTime               @default(now()) @map("created_at")
+  updated_at                              DateTime               @updatedAt @map("updated_at")
+  ai_generation_consent_first_at          DateTime?              @map("ai_generation_consent_first_at")
+  ai_generation_consent_last_at           DateTime?              @map("ai_generation_consent_last_at")
+  stripe_customer_id                      String?                @map("stripe_customer_id")
+  deleted_at                              DateTime?              @map("deleted_at")
+  deletion_requested_at                   DateTime?              @map("deletion_requested_at")
+  deletion_purge_at                       DateTime?              @map("deletion_purge_at")
+  deletion_code_hash                      String?                @map("deletion_code_hash")
+  deletion_code_expires_at                DateTime?              @map("deletion_code_expires_at")
+  auth_provider                           auth_provider          @default(LOCAL) @map("auth_provider")
+  avatar_url                              String?                @map("avatar_url")
+  manual_avatar_url                       String?                @map("manual_avatar_url")
+  demo_bonus_claimed_at                   DateTime?              @map("demo_bonus_claimed_at")
+  secondary_email                         String?                @unique @map("secondary_email")
+  secondary_email_pending                 String?                @unique @map("secondary_email_pending")
+  secondary_email_verification_token      String?                @unique @map("secondary_email_verification_token")
+  secondary_email_verification_expires_at DateTime?              @map("secondary_email_verification_expires_at")
+  email_verified_at                       DateTime?              @map("email_verified_at")
+  email_verification_token                String?                @unique @map("email_verification_token")
+  email_verification_expires_at           DateTime?              @map("email_verification_expires_at")
+  google_id                               String?                @unique @map("google_id")
+  apple_id                                String?                @unique @map("apple_id")
+  facebook_id                             String?                @unique @map("facebook_id")
+  analytics_events                        analytics_event[]
+  bookings                                booking[]              @relation("UserBookings")
+  credits                                 credit[]
+  guest_tracking                          guest_tracking[]
+  images                                  image[]
+  payments                                payment[]
+  photographer_profile                    photographer_profile?
   // System RBAC roles (ADMIN, PHOTOGRAPHER, USER)
-  system_roles          user_roles[]           @relation("system_roles")
-  owned_teams           teams[]                @relation("TeamOwner")
+  system_roles                            user_roles[]           @relation("system_roles")
+  owned_teams                             teams[]                @relation("TeamOwner")
   // Team-specific memberships and invitations
-  team_memberships      team_membership[]      @relation("TeamMember")
-  team_invites_sent     team_invites[]         @relation("InvitesSent")
-  team_invites_accepted team_invites[]         @relation("InvitesAccepted")
+  team_memberships                        team_membership[]      @relation("TeamMember")
+  team_invites_sent                       team_invites[]         @relation("InvitesSent")
+  team_invites_accepted                   team_invites[]         @relation("InvitesAccepted")
   // Team projects
-  created_projects      team_project[]         @relation("ProjectCreator")
-  project_memberships   team_project_member[]
+  created_projects                        team_project[]         @relation("ProjectCreator")
+  project_memberships                     team_project_member[]
   // Personal credit tracking
-  credit_balance        user_credit_balance?
-  credit_purchases      user_credit_purchase[] @relation("CreditPurchases")
-  credit_usage          user_credit_usage[]
-  demo_tracking         user_demo_tracking?
-  invoices              invoice[]
-  direct_conversations_as_a direct_conversation[] @relation("ConversationUserA")
-  direct_conversations_as_b direct_conversation[] @relation("ConversationUserB")
-  sent_direct_messages      direct_message[]      @relation("DirectMessageSender")
-  received_direct_messages  direct_message[]      @relation("DirectMessageReceiver")
-  project_invites_sent      project_invites[]     @relation("ProjectInvitesSent")
-  project_invites_accepted   project_invites[]     @relation("ProjectInvitesAccepted")
+  credit_balance                          user_credit_balance?
+  credit_purchases                        user_credit_purchase[] @relation("CreditPurchases")
+  credit_usage                            user_credit_usage[]
+  demo_tracking                           user_demo_tracking?
+  invoices                                invoice[]
+  direct_conversations_as_a               direct_conversation[]  @relation("ConversationUserA")
+  direct_conversations_as_b               direct_conversation[]  @relation("ConversationUserB")
+  sent_direct_messages                    direct_message[]       @relation("DirectMessageSender")
+  received_direct_messages                direct_message[]       @relation("DirectMessageReceiver")
+  project_invites_sent                    project_invites[]      @relation("ProjectInvitesSent")
+  project_invites_accepted                project_invites[]      @relation("ProjectInvitesAccepted")
 
   @@index([ai_generation_consent_last_at])
   @@map("user")
 }
 
 model teams {
-  id          String            @id @default(uuid()) @map("id")
-  name        String            @map("name")
-  owner_id    String            @map("owner_id")
-  description String?           @map("description")
+  id             String            @id @default(uuid()) @map("id")
+  name           String            @map("name")
+  owner_id       String            @map("owner_id")
+  description    String?           @map("description")
   // Team credit pool: owner buys credits here, allocates to members
-  wallet      Int               @default(0) @map("wallet")
-  created_at  DateTime          @default(now()) @map("created_at")
-  updated_at  DateTime          @updatedAt @map("updated_at")
-  deleted_at  DateTime?         @map("deleted_at")
-  owner       user              @relation("TeamOwner", fields: [owner_id], references: [id])
-  members     team_membership[]
-  purchases   team_purchase[]
-  usage_log   team_usage[]
-  teamInvites team_invites[]
+  wallet         Int               @default(0) @map("wallet")
+  created_at     DateTime          @default(now()) @map("created_at")
+  updated_at     DateTime          @updatedAt @map("updated_at")
+  deleted_at     DateTime?         @map("deleted_at")
+  owner          user              @relation("TeamOwner", fields: [owner_id], references: [id])
+  members        team_membership[]
+  purchases      team_purchase[]
+  usage_log      team_usage[]
+  teamInvites    team_invites[]
   projectInvites project_invites[]
-  projects    team_project[]
+  projects       team_project[]
 
   @@map("teams")
 }
 
 model team_membership {
-  id           String       @id @default(uuid()) @map("id")
-  team_id      String       @map("team_id")
-  user_id      String       @map("user_id")
-  team_role_id String       @map("team_role_id")
+  id                       String       @id @default(uuid()) @map("id")
+  team_id                  String       @map("team_id")
+  user_id                  String       @map("user_id")
+  team_role_id             String       @map("team_role_id")
   // Credits allocated to this member from team pool
-  allocated    Int          @default(0) @map("allocated")
+  allocated                Int          @default(0) @map("allocated")
   // Credits used by this member (sum of team_usage for this member)
-  used         Int          @default(0) @map("used")
-  is_paid_extra_seat Boolean @default(false) @map("is_paid_extra_seat")
-  seat_auto_renew Boolean @default(false) @map("seat_auto_renew")
-  seat_last_paid_at DateTime? @map("seat_last_paid_at")
-  seat_expires_at DateTime? @map("seat_expires_at")
-  seat_payment_product_key String? @map("seat_payment_product_key")
-  joined_at    DateTime     @default(now()) @map("joined_at")
-  updated_at   DateTime     @updatedAt @map("updated_at")
-  deleted_at   DateTime?    @map("deleted_at")
-  user         user         @relation("TeamMember", fields: [user_id], references: [id], onDelete: Cascade)
-  team         teams        @relation(fields: [team_id], references: [id], onDelete: Cascade)
-  role         team_roles   @relation(fields: [team_role_id], references: [id])
-  usage_log    team_usage[]
+  used                     Int          @default(0) @map("used")
+  is_paid_extra_seat       Boolean      @default(false) @map("is_paid_extra_seat")
+  seat_auto_renew          Boolean      @default(false) @map("seat_auto_renew")
+  seat_last_paid_at        DateTime?    @map("seat_last_paid_at")
+  seat_expires_at          DateTime?    @map("seat_expires_at")
+  seat_payment_product_key String?      @map("seat_payment_product_key")
+  joined_at                DateTime     @default(now()) @map("joined_at")
+  updated_at               DateTime     @updatedAt @map("updated_at")
+  deleted_at               DateTime?    @map("deleted_at")
+  user                     user         @relation("TeamMember", fields: [user_id], references: [id], onDelete: Cascade)
+  team                     teams        @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  role                     team_roles   @relation(fields: [team_role_id], references: [id])
+  usage_log                team_usage[]
 
   @@unique([team_id, user_id])
   @@map("team_membership")
@@ -137,17 +133,17 @@ model team_usage {
 
 // When owner purchases credits for team
 model team_purchase {
-  id                    String    @id @default(uuid()) @map("id")
-  team_id               String    @map("team_id")
-  amount                Int       @map("amount")
-  price_usd             Float     @map("price_usd")
-  status                String    @default("pending") @map("status")
-  stripe_session_id     String?   @map("stripe_session_id")
-  stripe_subscription_id String?  @map("stripe_subscription_id")
-  stripe_invoice_id     String?   @map("stripe_invoice_id")
-  created_at            DateTime  @default(now()) @map("created_at")
-  completed_at          DateTime? @map("completed_at")
-  team                  teams     @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  id                     String    @id @default(uuid()) @map("id")
+  team_id                String    @map("team_id")
+  amount                 Int       @map("amount")
+  price_usd              Float     @map("price_usd")
+  status                 String    @default("pending") @map("status")
+  stripe_session_id      String?   @map("stripe_session_id")
+  stripe_subscription_id String?   @map("stripe_subscription_id")
+  stripe_invoice_id      String?   @map("stripe_invoice_id")
+  created_at             DateTime  @default(now()) @map("created_at")
+  completed_at           DateTime? @map("completed_at")
+  team                   teams     @relation(fields: [team_id], references: [id], onDelete: Cascade)
 
   @@index([team_id, status])
   @@index([stripe_subscription_id])
@@ -167,29 +163,29 @@ model user_credit_balance {
 
 // User purchases personal credits
 model user_credit_purchase {
-  id                   String         @id @default(uuid()) @map("id")
-  user_id              String         @map("user_id")
-  package_id           String         @map("package_id")
-  amount               Int            @map("amount")
-  price_usd            Float          @map("price_usd")
-  status               String         @default("pending") @map("status")
-  stripe_session_id    String?        @map("stripe_session_id")
-  stripe_invoice_id    String?        @map("stripe_invoice_id")
-  created_at           DateTime       @default(now()) @map("created_at")
-  completed_at         DateTime?      @map("completed_at")
+  id                    String         @id @default(uuid()) @map("id")
+  user_id               String         @map("user_id")
+  package_id            String         @map("package_id")
+  amount                Int            @map("amount")
+  price_usd             Float          @map("price_usd")
+  status                String         @default("pending") @map("status")
+  stripe_session_id     String?        @map("stripe_session_id")
+  stripe_invoice_id     String?        @map("stripe_invoice_id")
+  created_at            DateTime       @default(now()) @map("created_at")
+  completed_at          DateTime?      @map("completed_at")
   // Auto-renewal fields
-  autoRenewEnabled     Boolean        @default(true) @map("auto_renew_enabled")
-  nextRenewalDate      DateTime?      @map("next_renewal_date")
-  renewalCount         Int            @default(0) @map("renewal_count")
+  autoRenewEnabled      Boolean        @default(true) @map("auto_renew_enabled")
+  nextRenewalDate       DateTime?      @map("next_renewal_date")
+  renewalCount          Int            @default(0) @map("renewal_count")
   // Cancellation fields
-  cancelledAt          DateTime?      @map("cancelled_at")
-  cancellationReason   String?        @map("cancellation_reason")
+  cancelledAt           DateTime?      @map("cancelled_at")
+  cancellationReason    String?        @map("cancellation_reason")
   // Reminder and credit expiry fields
-  paymentReminderSentAt DateTime?     @map("payment_reminder_sent_at")
-  creditExpiresAt      DateTime?      @map("credit_expires_at")
-  user                 user           @relation("CreditPurchases", fields: [user_id], references: [id])
-  package              credit_package @relation("UserCreditPurchases", fields: [package_id], references: [id])
-  invoices             invoice[]
+  paymentReminderSentAt DateTime?      @map("payment_reminder_sent_at")
+  creditExpiresAt       DateTime?      @map("credit_expires_at")
+  user                  user           @relation("CreditPurchases", fields: [user_id], references: [id])
+  package               credit_package @relation("UserCreditPurchases", fields: [package_id], references: [id])
+  invoices              invoice[]
 
   @@index([user_id, status])
   @@index([autoRenewEnabled, nextRenewalDate])
@@ -235,32 +231,32 @@ model team_invites {
 }
 
 model team_project {
-  id                 String                 @id @default(uuid()) @map("id")
-  team_id            String?                @map("team_id")
-  name               String                 @map("name")
-  address            String?                @map("address")
-  description        String?                @map("description")
-  created_by_user_id String                 @map("created_by_user_id")
-  created_at         DateTime               @default(now()) @map("created_at")
-  updated_at         DateTime               @updatedAt @map("updated_at")
-  team               teams?                 @relation(fields: [team_id], references: [id], onDelete: Cascade)
-  created_by         user                   @relation("ProjectCreator", fields: [created_by_user_id], references: [id])
+  id                 String                @id @default(uuid()) @map("id")
+  team_id            String?               @map("team_id")
+  name               String                @map("name")
+  address            String?               @map("address")
+  description        String?               @map("description")
+  created_by_user_id String                @map("created_by_user_id")
+  created_at         DateTime              @default(now()) @map("created_at")
+  updated_at         DateTime              @updatedAt @map("updated_at")
+  team               teams?                @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  created_by         user                  @relation("ProjectCreator", fields: [created_by_user_id], references: [id])
   members            team_project_member[]
   projectInvites     project_invites[]
-  images             image[]                @relation("ProjectImages")
+  images             image[]               @relation("ProjectImages")
 
   @@index([team_id, created_by_user_id])
   @@map("team_project")
 }
 
 model team_project_member {
-  id          String               @id @default(uuid()) @map("id")
-  project_id  String               @map("project_id")
-  user_id     String               @map("user_id")
-  role        project_member_role  @default(PHOTOGRAPHER) @map("role")
-  assigned_at DateTime             @default(now()) @map("assigned_at")
-  project     team_project         @relation(fields: [project_id], references: [id], onDelete: Cascade)
-  user        user                 @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  id          String              @id @default(uuid()) @map("id")
+  project_id  String              @map("project_id")
+  user_id     String              @map("user_id")
+  role        project_member_role @default(PHOTOGRAPHER) @map("role")
+  assigned_at DateTime            @default(now()) @map("assigned_at")
+  project     team_project        @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  user        user                @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@unique([project_id, user_id])
   @@map("team_project_member")
@@ -289,59 +285,59 @@ model project_invites {
 }
 
 model photographer_profile {
-  id                          String    @id @default(uuid()) @map("id")
-  user_id                     String    @unique @map("user_id")
-  bio                         String?   @map("bio")
-  documents_url               String?   @map("documents_url")
-  driving_license_url         String?   @map("driving_license_url")
-  utility_bill_url            String?   @map("utility_bill_url")
-  approved                    Boolean   @default(false) @map("approved")
-  application_status          photographer_application_status @default(SUBMITTED) @map("application_status")
-  availability                String?   @map("availability")
-  weekly_availability         Json?     @map("weekly_availability")
-  photographer_type           String?   @map("photographer_type")
-  years_experience            String?   @map("years_experience")
-  service_area                String?   @map("service_area")
-  service_areas               Json?     @map("service_areas")
-  portfolio_url               String?   @map("portfolio_url")
-  instagram_url               String?   @map("instagram_url")
-  facebook_url                String?   @map("facebook_url")
-  linkedin_url                String?   @map("linkedin_url")
-  x_url                       String?   @map("x_url")
-  website_url                 String?   @map("website_url")
-  phone_number                String?   @map("phone_number")
-  portfolio_items             Json?     @map("portfolio_items")
-  service_keywords            String?   @map("service_keywords")
-  price_min                   Int?      @map("price_min")
-  price_max                   Int?      @map("price_max")
-  hourly_rate                 Int?      @map("hourly_rate")
-  refund_policy               Json?     @map("refund_policy")
-  gear_description            String?   @map("gear_description")
-  business_name               String?   @map("business_name")
-  short_pitch                 String?   @map("short_pitch")
-  stripe_connected_account_id String?   @map("stripe_connected_account_id")
-  admin_feedback              String?   @map("admin_feedback")
-  feedback_provided_at        DateTime? @map("feedback_provided_at")
-  photographer_responses      Json?     @map("photographer_responses")
-  has_new_photographer_response Boolean  @default(false) @map("has_new_photographer_response")
-  submission_count            Int       @default(1) @map("submission_count")
-  created_at                  DateTime  @default(now()) @map("created_at")
-  updated_at                  DateTime  @updatedAt @map("updated_at")
-  bookings                    booking[] @relation("PhotographerBookings")
-  user                        user      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  id                            String                          @id @default(uuid()) @map("id")
+  user_id                       String                          @unique @map("user_id")
+  bio                           String?                         @map("bio")
+  documents_url                 String?                         @map("documents_url")
+  driving_license_url           String?                         @map("driving_license_url")
+  utility_bill_url              String?                         @map("utility_bill_url")
+  approved                      Boolean                         @default(false) @map("approved")
+  application_status            photographer_application_status @default(SUBMITTED) @map("application_status")
+  availability                  String?                         @map("availability")
+  weekly_availability           Json?                           @map("weekly_availability")
+  photographer_type             String?                         @map("photographer_type")
+  years_experience              String?                         @map("years_experience")
+  service_area                  String?                         @map("service_area")
+  service_areas                 Json?                           @map("service_areas")
+  portfolio_url                 String?                         @map("portfolio_url")
+  instagram_url                 String?                         @map("instagram_url")
+  facebook_url                  String?                         @map("facebook_url")
+  linkedin_url                  String?                         @map("linkedin_url")
+  x_url                         String?                         @map("x_url")
+  website_url                   String?                         @map("website_url")
+  phone_number                  String?                         @map("phone_number")
+  portfolio_items               Json?                           @map("portfolio_items")
+  service_keywords              String?                         @map("service_keywords")
+  price_min                     Int?                            @map("price_min")
+  price_max                     Int?                            @map("price_max")
+  hourly_rate                   Int?                            @map("hourly_rate")
+  refund_policy                 Json?                           @map("refund_policy")
+  gear_description              String?                         @map("gear_description")
+  business_name                 String?                         @map("business_name")
+  short_pitch                   String?                         @map("short_pitch")
+  stripe_connected_account_id   String?                         @map("stripe_connected_account_id")
+  admin_feedback                String?                         @map("admin_feedback")
+  feedback_provided_at          DateTime?                       @map("feedback_provided_at")
+  photographer_responses        Json?                           @map("photographer_responses")
+  has_new_photographer_response Boolean                         @default(false) @map("has_new_photographer_response")
+  submission_count              Int                             @default(1) @map("submission_count")
+  created_at                    DateTime                        @default(now()) @map("created_at")
+  updated_at                    DateTime                        @updatedAt @map("updated_at")
+  bookings                      booking[]                       @relation("PhotographerBookings")
+  user                          user                            @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@map("photographer_profile")
 }
 
 model direct_conversation {
-  id          String          @id @default(uuid()) @map("id")
-  user_a_id   String          @map("user_a_id")
-  user_b_id   String          @map("user_b_id")
-  created_at  DateTime        @default(now()) @map("created_at")
-  updated_at  DateTime        @updatedAt @map("updated_at")
-  user_a      user            @relation("ConversationUserA", fields: [user_a_id], references: [id], onDelete: Cascade)
-  user_b      user            @relation("ConversationUserB", fields: [user_b_id], references: [id], onDelete: Cascade)
-  messages    direct_message[]
+  id         String           @id @default(uuid()) @map("id")
+  user_a_id  String           @map("user_a_id")
+  user_b_id  String           @map("user_b_id")
+  created_at DateTime         @default(now()) @map("created_at")
+  updated_at DateTime         @updatedAt @map("updated_at")
+  user_a     user             @relation("ConversationUserA", fields: [user_a_id], references: [id], onDelete: Cascade)
+  user_b     user             @relation("ConversationUserB", fields: [user_b_id], references: [id], onDelete: Cascade)
+  messages   direct_message[]
 
   @@unique([user_a_id, user_b_id])
   @@index([user_a_id])
@@ -350,18 +346,18 @@ model direct_conversation {
 }
 
 model direct_message {
-  id               String              @id @default(uuid()) @map("id")
-  conversation_id  String              @map("conversation_id")
-  sender_id        String              @map("sender_id")
-  receiver_id      String              @map("receiver_id")
-  body             String?             @map("body")
-  attachments      Json?               @map("attachments")
-  read_at          DateTime?           @map("read_at")
-  created_at       DateTime            @default(now()) @map("created_at")
-  updated_at       DateTime            @updatedAt @map("updated_at")
-  conversation     direct_conversation @relation(fields: [conversation_id], references: [id], onDelete: Cascade)
-  sender           user                @relation("DirectMessageSender", fields: [sender_id], references: [id], onDelete: Cascade)
-  receiver         user                @relation("DirectMessageReceiver", fields: [receiver_id], references: [id], onDelete: Cascade)
+  id              String              @id @default(uuid()) @map("id")
+  conversation_id String              @map("conversation_id")
+  sender_id       String              @map("sender_id")
+  receiver_id     String              @map("receiver_id")
+  body            String?             @map("body")
+  attachments     Json?               @map("attachments")
+  read_at         DateTime?           @map("read_at")
+  created_at      DateTime            @default(now()) @map("created_at")
+  updated_at      DateTime            @updatedAt @map("updated_at")
+  conversation    direct_conversation @relation(fields: [conversation_id], references: [id], onDelete: Cascade)
+  sender          user                @relation("DirectMessageSender", fields: [sender_id], references: [id], onDelete: Cascade)
+  receiver        user                @relation("DirectMessageReceiver", fields: [receiver_id], references: [id], onDelete: Cascade)
 
   @@index([conversation_id, created_at])
   @@index([receiver_id, read_at])
@@ -495,27 +491,27 @@ model gemini_api_key_state {
 }
 
 model booking {
-  id               String               @id @default(uuid()) @map("id")
-  user_id          String               @map("user_id")
-  photographer_id  String               @map("photographer_id")
-  date             DateTime             @map("date")
-  end_date         DateTime?            @map("end_date")
-  status           booking_status       @default(PENDING) @map("status")
-  client_note_html String?              @map("client_note_html")
-  client_note_attachments Json?         @map("client_note_attachments")
-  photographer_note_html String?        @map("photographer_note_html")
-  photographer_note_attachments Json?   @map("photographer_note_attachments")
-  cancelled_by     booking_actor?       @map("cancelled_by")
-  status_updated_at DateTime?           @map("status_updated_at")
-  payment_id       String?              @unique @map("payment_id")
-  payment_status   payment_status       @default(PENDING) @map("payment_status")
-  transaction_id   String?              @map("transaction_id")
-  created_at       DateTime             @default(now()) @map("created_at")
-  updated_at       DateTime             @updatedAt @map("updated_at")
-  analytics_events analytics_event[]
-  payment          payment?             @relation(fields: [payment_id], references: [id])
-  photographer     photographer_profile @relation("PhotographerBookings", fields: [photographer_id], references: [id])
-  user             user                 @relation("UserBookings", fields: [user_id], references: [id])
+  id                            String               @id @default(uuid()) @map("id")
+  user_id                       String               @map("user_id")
+  photographer_id               String               @map("photographer_id")
+  date                          DateTime             @map("date")
+  end_date                      DateTime?            @map("end_date")
+  status                        booking_status       @default(PENDING) @map("status")
+  client_note_html              String?              @map("client_note_html")
+  client_note_attachments       Json?                @map("client_note_attachments")
+  photographer_note_html        String?              @map("photographer_note_html")
+  photographer_note_attachments Json?                @map("photographer_note_attachments")
+  cancelled_by                  booking_actor?       @map("cancelled_by")
+  status_updated_at             DateTime?            @map("status_updated_at")
+  payment_id                    String?              @unique @map("payment_id")
+  payment_status                payment_status       @default(PENDING) @map("payment_status")
+  transaction_id                String?              @map("transaction_id")
+  created_at                    DateTime             @default(now()) @map("created_at")
+  updated_at                    DateTime             @updatedAt @map("updated_at")
+  analytics_events              analytics_event[]
+  payment                       payment?             @relation(fields: [payment_id], references: [id])
+  photographer                  photographer_profile @relation("PhotographerBookings", fields: [photographer_id], references: [id])
+  user                          user                 @relation("UserBookings", fields: [user_id], references: [id])
 
   @@map("booking")
 }
@@ -550,23 +546,23 @@ model admin_content {
 }
 
 model resource {
-  id             String   @id @default(uuid()) @map("id")
-  slug           String   @unique @map("slug")
-  title          String   @map("title")
-  content_html   String?  @map("content_html")
+  id           String  @id @default(uuid()) @map("id")
+  slug         String  @unique @map("slug")
+  title        String  @map("title")
+  content_html String? @map("content_html")
 
-  pdf            Bytes?   @map("pdf")
-  pdf_filename   String?  @map("pdf_filename")
-  pdf_mime       String?  @map("pdf_mime")
+  pdf          Bytes?  @map("pdf")
+  pdf_filename String? @map("pdf_filename")
+  pdf_mime     String? @map("pdf_mime")
 
-  video          Bytes?   @map("video")
-  video_filename String?  @map("video_filename")
-  video_mime     String?  @map("video_mime")
-  youtube_url    String?  @map("youtube_url")
+  video          Bytes?  @map("video")
+  video_filename String? @map("video_filename")
+  video_mime     String? @map("video_mime")
+  youtube_url    String? @map("youtube_url")
 
-  updated_by     String?  @map("updated_by")
-  created_at     DateTime @default(now()) @map("created_at")
-  updated_at     DateTime @updatedAt @map("updated_at")
+  updated_by String?  @map("updated_by")
+  created_at DateTime @default(now()) @map("created_at")
+  updated_at DateTime @updatedAt @map("updated_at")
 
   @@map("resource")
 }
@@ -589,7 +585,7 @@ model team_roles {
   name        String            @unique @map("name")
   description String?           @map("description")
   // JSON for future permission matrix (view_reports, manage_team, assign_credits, etc.)
-  permissions Json?           @map("permissions")
+  permissions Json?             @map("permissions")
   created_at  DateTime          @default(now()) @map("created_at")
   updated_at  DateTime          @updatedAt @map("updated_at")
   members     team_membership[]
@@ -640,18 +636,18 @@ enum auth_provider {
 }
 
 model invoice {
-  id                String                 @id @default(uuid()) @map("id")
-  subscription_id   String                 @map("subscription_id")
-  user_id           String                 @map("user_id")
-  amount            Float                  @map("amount")
-  status            String                 @default("generated") @map("status")
-  html_content      String?                @map("html_content")
-  stripe_invoice_pdf_url String?           @map("stripe_invoice_pdf_url")
-  metadata          Json?                  @map("metadata")
-  created_at        DateTime               @default(now()) @map("created_at")
-  updated_at        DateTime               @updatedAt @map("updated_at")
-  subscription      user_credit_purchase   @relation(fields: [subscription_id], references: [id], onDelete: Cascade)
-  user              user                   @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  id                     String               @id @default(uuid()) @map("id")
+  subscription_id        String               @map("subscription_id")
+  user_id                String               @map("user_id")
+  amount                 Float                @map("amount")
+  status                 String               @default("generated") @map("status")
+  html_content           String?              @map("html_content")
+  stripe_invoice_pdf_url String?              @map("stripe_invoice_pdf_url")
+  metadata               Json?                @map("metadata")
+  created_at             DateTime             @default(now()) @map("created_at")
+  updated_at             DateTime             @updatedAt @map("updated_at")
+  subscription           user_credit_purchase @relation(fields: [subscription_id], references: [id], onDelete: Cascade)
+  user                   user                 @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@index([user_id])
   @@index([subscription_id])
@@ -726,4 +722,3 @@ enum photographer_application_status {
 
   @@map("photographer_application_status")
 }
-
