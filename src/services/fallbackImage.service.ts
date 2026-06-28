@@ -9,8 +9,6 @@ import {
   FALLBACK_VARIANT_COUNT,
 } from "../config/fallback.config";
 
-// Per-variant timeout. gemini-2.5-flash-image regularly takes 15-40s for a single image
-// generation (see PHASE1 logs); 15s guaranteed variant timeouts. Default raised to 60s.
 const FALLBACK_OPERATION_TIMEOUT_MS = Number(process.env.FALLBACK_OPERATION_TIMEOUT_MS || "60000");
 
 type VariantReadyPayload = {
@@ -83,9 +81,12 @@ class FallbackImageService {
     baseStyle: string,
     variantNumber: number,
     totalVariants: number,
-    userPrompt?: string,
+    userPrompt?: string | string[],
     removeFurniture?: boolean
   ): string {
+    // Fix: if userPrompt is an array, take the first element
+    const resolvedPrompt = Array.isArray(userPrompt) ? userPrompt[0] : userPrompt;
+
     const grounding =
       "Use the PROVIDED IMAGE as the only source scene. Preserve architecture, camera angle, walls, windows, doors, floor and lighting direction. Return one full-frame staged image only.";
 
@@ -97,8 +98,8 @@ class FallbackImageService {
       ? "\n\nCRITICAL: First, completely REMOVE ALL existing furniture, rugs, decor, plants, and personal items so the room is fully empty. Do not add any furniture back."
       : "";
 
-    if (userPrompt && userPrompt.trim()) {
-      return `${grounding}\n\n${userPrompt.trim()}\n\n${variationInstruction}${removeFurnitureClause}`;
+    if (resolvedPrompt && resolvedPrompt.trim()) {
+      return `${grounding}\n\n${resolvedPrompt.trim()}\n\n${variationInstruction}${removeFurnitureClause}`;
     }
 
     return `${grounding}\n\nStage this ${roomType} in ${baseStyle} style. ${variationInstruction}${removeFurnitureClause}`;
@@ -159,7 +160,7 @@ class FallbackImageService {
     baseImageBuffer: Buffer,
     roomType: string,
     baseStyle: string,
-    userPrompt?: string,
+    userPrompt?: string | string[],
     traceHook?: TraceHook,
     onVariantReady?: VariantReadyHook,
     options?: {
