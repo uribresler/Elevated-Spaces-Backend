@@ -918,12 +918,12 @@ export async function generateImage(req: Request, res: Response): Promise<void> 
     //   keepLocalFiles = false,
     //   removeFurniture = false,
     // } = req.body;
-    const {
-      prompt,
+   const {
       roomType = "living-room",
       stagingStyle = "modern",
       keepLocalFiles = false
     } = req.body;
+    const prompt = Array.isArray(req.body.prompt) ? req.body.prompt[0] : req.body.prompt;
     const areaType = typeof req.body.areaType === "string" ? req.body.areaType.toLowerCase() : "interior";
     const removeFurniture = req.body.removeFurniture === true || req.body.removeFurniture === "true";
 
@@ -1335,7 +1335,8 @@ export async function stageSingleImageWithFallback(req: Request, res: Response):
       return;
     }
 
-    const { prompt, roomType = "living-room", stagingStyle = "modern" } = req.body;
+    const { roomType = "living-room", stagingStyle = "modern" } = req.body;
+    const prompt = Array.isArray(req.body.prompt) ? req.body.prompt[0] : req.body.prompt;
     const areaType = typeof req.body.areaType === "string" ? req.body.areaType.toLowerCase() : "interior";
     const removeFurniture = req.body.removeFurniture === true || req.body.removeFurniture === "true";
     await stagingTrace.append("request.parsed", {

