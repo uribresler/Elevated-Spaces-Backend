@@ -3,6 +3,7 @@ import { requireAuth } from "../middlewares/auth";
 import { uploadPhotographerDocument, uploadPhotographerOnboardingFiles } from "../middlewares/uploadPhotographerDocuments";
 import {
   createBookingRequestPlaceholder,
+  endBookingContract,
   getPhotographerApplicationById,
   getMyPhotographerProfile,
   listApprovedPhotographers,
@@ -18,6 +19,11 @@ import {
   uploadPhotographerVerificationDocument,
   submitPhotographerResponse,
 } from "../controllers/photographer.controller";
+import {
+  createPhotographerReview,
+  getMyReviewEligibility,
+  listPhotographerReviews,
+} from "../controllers/reviews.controller";
 
 const router = Router();
 
@@ -37,11 +43,17 @@ router.get("/admin/applications", requireAuth, listPendingPhotographerApplicatio
 router.get("/admin/applications/:profileId", requireAuth, getPhotographerApplicationById);
 router.patch("/admin/applications/:profileId/review", requireAuth, reviewPhotographerApplication);
 
+// Reviews — public list, auth-gated eligibility + submission
+router.get("/:profileId/reviews", listPhotographerReviews);
+router.get("/:profileId/reviews/eligibility", requireAuth, getMyReviewEligibility);
+router.post("/:profileId/reviews", requireAuth, createPhotographerReview);
+
 // Booking placeholders
 router.post("/bookings/request", requireAuth, createBookingRequestPlaceholder);
 router.get("/bookings/mine", requireAuth, listMyBookingRequests);
 router.get("/bookings/received", requireAuth, listBookingsForPhotographer);
 router.patch("/bookings/:bookingId/withdraw", requireAuth, withdrawBookingRequestByClient);
 router.patch("/bookings/:bookingId/status", requireAuth, updateBookingStatusPlaceholder);
+router.post("/bookings/:bookingId/end", requireAuth, endBookingContract);
 
 export default router;

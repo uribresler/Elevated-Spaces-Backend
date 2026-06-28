@@ -2,6 +2,8 @@ import { Request, Response } from "express";
 import { booking_actor, booking_status } from "@prisma/client";
 import prisma from "../dbConnection";
 import { logger } from "../utils/logger";
+import { pushSseEvent } from "../utils/messagesSse";
+import { getOrCreateConversation } from "../utils/directConversation";
 
 type PhotographerApplicationStatus =
   | "SUBMITTED"
@@ -486,6 +488,8 @@ export async function getMyPhotographerProfile(req: Request, res: Response): Pro
         hourly_rate: true,
         price_min: true,
         price_max: true,
+        rating_average: true,
+        rating_count: true,
         admin_feedback: true,
         feedback_provided_at: true,
         photographer_responses: true,
@@ -829,6 +833,8 @@ export async function listApprovedPhotographers(req: Request, res: Response): Pr
         hourly_rate: true,
         price_min: true,
         price_max: true,
+        rating_average: true,
+        rating_count: true,
         admin_feedback: true,
         feedback_provided_at: true,
         photographer_responses: true,
@@ -965,6 +971,18 @@ export async function createBookingRequestPlaceholder(req: Request, res: Respons
       },
     });
 
+    // Ensure a direct conversation exists between client and photographer
+    // so the booking card surfaces in /messages immediately, even before
+    // either party has typed.
+    try {
+      await getOrCreateConversation(userId, photographer.user_id);
+    } catch (err) {
+      logger(`[PHOTOGRAPHER] conversation create failed (non-fatal): ${String(err)}`);
+    }
+
+    pushSseEvent(userId, "booking", booking);
+    pushSseEvent(photographer.user_id, "booking", booking);
+
     res.status(201).json({
       success: true,
       message: "Booking request created (placeholder flow)",
@@ -973,6 +991,75 @@ export async function createBookingRequestPlaceholder(req: Request, res: Respons
   } catch (error) {
     logger(`[PHOTOGRAPHER] create booking placeholder failed: ${String(error)}`);
     res.status(500).json({ success: false, message: "Failed to create booking request" });
+  }
+}
+
+// End a confirmed contract. Either party can end it. We don't refund or
+// cancel — the booking already happened or is in progress; this just marks
+// it terminal so neither side can keep acting on it, and captures a reason
+// for analytics. Reviews remain allowed once a booking is CONFIRMED or
+// COMPLETED.
+export async function endBookingContract(req: Request, res: Response): Promise<void> {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
+    const bookingId = req.params.bookingId;
+    const reasonRaw = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+    if (!reasonRaw) {
+      res.status(400).json({ success: false, message: "A reason is required" });
+      return;
+    }
+    if (reasonRaw.length > 500) {
+      res.status(400).json({ success: false, message: "Reason is too long (max 500 chars)" });
+      return;
+    }
+
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { photographer: { select: { user_id: true } } },
+    });
+    if (!booking) {
+      res.status(404).json({ success: false, message: "Booking not found" });
+      return;
+    }
+
+    const isClient = booking.user_id === userId;
+    const isPhotographer = booking.photographer?.user_id === userId;
+    if (!isClient && !isPhotographer) {
+      res.status(403).json({ success: false, message: "Not a party to this booking" });
+      return;
+    }
+
+    if (booking.status !== booking_status.CONFIRMED) {
+      res.status(400).json({ success: false, message: "Only confirmed contracts can be ended" });
+      return;
+    }
+
+    const updated = await prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        status: booking_status.COMPLETED,
+        ended_at: new Date(),
+        ended_by: isClient ? booking_actor.CLIENT : booking_actor.PHOTOGRAPHER,
+        end_reason: reasonRaw,
+        status_updated_at: new Date(),
+      },
+      include: { photographer: { select: { user_id: true } } },
+    });
+
+    pushSseEvent(updated.user_id, "booking", updated);
+    if (updated.photographer?.user_id) {
+      pushSseEvent(updated.photographer.user_id, "booking", updated);
+    }
+
+    res.status(200).json({ success: true, data: updated });
+  } catch (error) {
+    logger(`[PHOTOGRAPHER] end booking contract failed: ${String(error)}`);
+    res.status(500).json({ success: false, message: "Failed to end contract" });
   }
 }
 
@@ -1004,7 +1091,13 @@ export async function withdrawBookingRequestByClient(req: Request, res: Response
         cancelled_by: booking_actor.CLIENT,
         status_updated_at: new Date(),
       },
+      include: { photographer: { select: { user_id: true } } },
     });
+
+    pushSseEvent(updated.user_id, "booking", updated);
+    if (updated.photographer?.user_id) {
+      pushSseEvent(updated.photographer.user_id, "booking", updated);
+    }
 
     res.status(200).json({
       success: true,
@@ -1158,6 +1251,10 @@ export async function updateBookingStatusPlaceholder(req: Request, res: Response
         status_updated_at: new Date(),
       },
     });
+
+    // Notify both parties so any open chat / requests view re-renders live.
+    pushSseEvent(updated.user_id, "booking", updated);
+    pushSseEvent(userId, "booking", updated);
 
     res.status(200).json({
       success: true,

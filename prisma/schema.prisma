@@ -321,6 +321,10 @@ model photographer_profile {
   photographer_responses        Json?                           @map("photographer_responses")
   has_new_photographer_response Boolean                         @default(false) @map("has_new_photographer_response")
   submission_count              Int                             @default(1) @map("submission_count")
+  ratings                       Json?                           @map("ratings")
+  reviews                       Json?                           @map("reviews")
+  rating_average                Float?                          @map("rating_average")
+  rating_count                  Int                             @default(0) @map("rating_count")
   created_at                    DateTime                        @default(now()) @map("created_at")
   updated_at                    DateTime                        @updatedAt @map("updated_at")
   bookings                      booking[]                       @relation("PhotographerBookings")
@@ -503,6 +507,9 @@ model booking {
   photographer_note_attachments Json?                @map("photographer_note_attachments")
   cancelled_by                  booking_actor?       @map("cancelled_by")
   status_updated_at             DateTime?            @map("status_updated_at")
+  ended_at                      DateTime?            @map("ended_at")
+  ended_by                      booking_actor?       @map("ended_by")
+  end_reason                    String?              @map("end_reason")
   payment_id                    String?              @unique @map("payment_id")
   payment_status                payment_status       @default(PENDING) @map("payment_status")
   transaction_id                String?              @map("transaction_id")
@@ -675,6 +682,7 @@ enum booking_status {
   PENDING
   CONFIRMED
   CANCELLED
+  COMPLETED
 
   @@map("booking_status")
 }

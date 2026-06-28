@@ -22,6 +22,7 @@ import messagesRoutes from './api/messages.route'
 import accountDeletionRoutes from './api/accountDeletion.route'
 import analyticsRoutes from './api/analytics.route'
 import consentsRoute from './api/consents.route'
+import matchmakerRoutes from './api/matchmaker.route'
 import { stripeWebhookHandler } from "./controllers/payment.controller";
 import { errorHandler } from "./middlewares/errorHandler";
 import { zodErrorHandler } from "./middlewares/zodErrorHandler";
@@ -161,6 +162,7 @@ app.use('/api/photographers', photographerRoutes)
 app.use('/api/messages', messagesRoutes)
 app.use('/api/account', accountDeletionRoutes)
 app.use('/api/analytics', analyticsRoutes)
+app.use('/api/matchmaker', matchmakerRoutes)
 
 /* =======================
    ERROR HANDLERS

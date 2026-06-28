@@ -3,10 +3,7 @@ import jwt from "jsonwebtoken";
 import prisma from "../dbConnection";
 import { logger } from "../utils/logger";
 import { pushSseEvent, registerSseClient } from "../utils/messagesSse";
-
-function sortUsers(a: string, b: string): [string, string] {
-  return a < b ? [a, b] : [b, a];
-}
+import { getOrCreateConversation, sortUsers } from "../utils/directConversation";
 
 function attachmentPayload(req: Request) {
   const host = req.get("host") || "localhost:3003";
@@ -19,28 +16,6 @@ function attachmentPayload(req: Request) {
     size: file.size,
     url: `${base}/uploads/messages/${file.filename}`,
   }));
-}
-
-async function getOrCreateConversation(currentUserId: string, peerUserId: string) {
-  const [userA, userB] = sortUsers(currentUserId, peerUserId);
-
-  const existing = await prisma.direct_conversation.findUnique({
-    where: {
-      user_a_id_user_b_id: {
-        user_a_id: userA,
-        user_b_id: userB,
-      },
-    },
-  });
-
-  if (existing) return existing;
-
-  return prisma.direct_conversation.create({
-    data: {
-      user_a_id: userA,
-      user_b_id: userB,
-    },
-  });
 }
 
 export async function listConversations(req: Request, res: Response): Promise<void> {
@@ -260,4 +235,77 @@ export async function streamMessages(req: Request, res: Response): Promise<void>
 
   req.on("close", cleanup);
   req.on("aborted", cleanup);
+}
+
+// Returns every booking between the current user and the peer, in either
+// direction (current user as client OR current user as photographer).
+// Used by the chat thread to render booking-request cards inline alongside
+// the message timeline.
+export async function listBookingsForConversation(req: Request, res: Response): Promise<void> {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
+    const peerUserId = typeof req.params.peerUserId === "string" ? req.params.peerUserId.trim() : "";
+    if (!peerUserId) {
+      res.status(400).json({ success: false, message: "peerUserId is required" });
+      return;
+    }
+
+    // Resolve each user's photographer profile id (if any) so we can match
+    // bookings where either side is the photographer.
+    const [myProfile, peerProfile] = await Promise.all([
+      prisma.photographer_profile.findUnique({ where: { user_id: userId }, select: { id: true } }),
+      prisma.photographer_profile.findUnique({ where: { user_id: peerUserId }, select: { id: true } }),
+    ]);
+
+    const whereOrs: any[] = [];
+    if (peerProfile?.id) {
+      whereOrs.push({ user_id: userId, photographer_id: peerProfile.id });
+    }
+    if (myProfile?.id) {
+      whereOrs.push({ user_id: peerUserId, photographer_id: myProfile.id });
+    }
+
+    if (whereOrs.length === 0) {
+      res.status(200).json({ success: true, data: [] });
+      return;
+    }
+
+    const bookings = await prisma.booking.findMany({
+      where: { OR: whereOrs },
+      select: {
+        id: true,
+        user_id: true,
+        photographer_id: true,
+        date: true,
+        end_date: true,
+        status: true,
+        client_note_html: true,
+        client_note_attachments: true,
+        photographer_note_html: true,
+        photographer_note_attachments: true,
+        cancelled_by: true,
+        status_updated_at: true,
+        created_at: true,
+        updated_at: true,
+        user: { select: { id: true, name: true, email: true } },
+        photographer: {
+          select: {
+            id: true,
+            user: { select: { id: true, name: true, email: true } },
+          },
+        },
+      },
+      orderBy: { created_at: "asc" },
+    });
+
+    res.status(200).json({ success: true, data: bookings });
+  } catch (error) {
+    logger(`[MESSAGES] list bookings for conversation failed: ${String(error)}`);
+    res.status(500).json({ success: false, message: "Failed to fetch bookings" });
+  }
 }
