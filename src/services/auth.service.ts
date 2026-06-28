@@ -89,6 +89,11 @@ export async function signupService({
     },
   });
   if (existing) {
+    if ((existing as any).deletion_requested_at) {
+      const err: any = new Error("This email is tied to an account scheduled for deletion. Wait until the grace period ends or contact support.");
+      err.code = "EMAIL_PENDING_DELETION";
+      throw err;
+    }
     const err: any = new Error("User already exists");
     err.code = "USER_EXISTS";
     throw err;
@@ -455,6 +460,12 @@ export async function loginService({ email, password }: { email: string; passwor
   if (!user) {
     const err: any = new Error("Invalid credentials");
     err.code = "INVALID_CREDENTIALS";
+    throw err;
+  }
+
+  if ((user as any).deletion_requested_at) {
+    const err: any = new Error("This account is scheduled for deletion. Contact support to revert before the grace period ends.");
+    err.code = "ACCOUNT_PENDING_DELETION";
     throw err;
   }
 
