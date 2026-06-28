@@ -2,32 +2,21 @@ import { z } from 'zod';
 
 export const registrationAgreementsSchema = z.object({
   acceptTermsAndPrivacy: z.boolean(),
-  confirmAgeAndCapacity: z.boolean(),
-  confirmUploadRights: z.boolean(),
-  acknowledgeAiLimitations: z.boolean(),
-  acknowledgeCreditsPolicy: z.boolean(),
-  acceptArbitrationWaiver: z.boolean(),
-  acknowledgePhotographerDisclaimer: z.boolean(),
   promotionalCommunicationsOptIn: z.boolean().optional(),
+  // Legacy fields — accepted but no longer required (kept for backwards compatibility)
+  confirmAgeAndCapacity: z.boolean().optional(),
+  confirmUploadRights: z.boolean().optional(),
+  acknowledgeAiLimitations: z.boolean().optional(),
+  acknowledgeCreditsPolicy: z.boolean().optional(),
+  acceptArbitrationWaiver: z.boolean().optional(),
+  acknowledgePhotographerDisclaimer: z.boolean().optional(),
 }).superRefine((value, context) => {
-  const requiredFields: Array<keyof Omit<typeof value, 'promotionalCommunicationsOptIn'>> = [
-    'acceptTermsAndPrivacy',
-    'confirmAgeAndCapacity',
-    'confirmUploadRights',
-    'acknowledgeAiLimitations',
-    'acknowledgeCreditsPolicy',
-    'acceptArbitrationWaiver',
-    'acknowledgePhotographerDisclaimer',
-  ];
-
-  for (const field of requiredFields) {
-    if (!value[field]) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: [field],
-        message: `${field} must be accepted`,
-      });
-    }
+  if (!value.acceptTermsAndPrivacy) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['acceptTermsAndPrivacy'],
+      message: 'acceptTermsAndPrivacy must be accepted',
+    });
   }
 });
 
