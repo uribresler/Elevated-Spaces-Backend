@@ -169,9 +169,10 @@ model user_credit_purchase {
   amount                Int            @map("amount")
   price_usd             Float          @map("price_usd")
   status                String         @default("pending") @map("status")
-  stripe_session_id     String?        @map("stripe_session_id")
-  stripe_invoice_id     String?        @map("stripe_invoice_id")
-  created_at            DateTime       @default(now()) @map("created_at")
+  stripe_session_id      String?        @map("stripe_session_id")
+  stripe_subscription_id String?        @map("stripe_subscription_id")
+  stripe_invoice_id      String?        @map("stripe_invoice_id")
+  created_at             DateTime       @default(now()) @map("created_at")
   completed_at          DateTime?      @map("completed_at")
   // Auto-renewal fields
   autoRenewEnabled      Boolean        @default(true) @map("auto_renew_enabled")
