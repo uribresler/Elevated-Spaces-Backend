@@ -244,7 +244,34 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
                 });
                 try {
                     await handleCheckoutCompleted(session);
-                    console.log(`[WEBHOOK] Successfully processed checkout.session.completed`);
+console.log(`[WEBHOOK] Successfully processed checkout.session.completed`);
+
+// Meta Conversions API - Purchase event
+try {
+    const amountPaid = session.amount_total ? session.amount_total / 100 : 29.00;
+    const currency = session.currency?.toUpperCase() || 'USD';
+    
+    await fetch('https://graph.facebook.com/v18.0/1528760592378698/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            data: [{
+                event_name: 'Purchase',
+                event_time: Math.floor(Date.now() / 1000),
+                event_id: session.id,
+                action_source: 'website',
+                custom_data: {
+                    value: amountPaid,
+                    currency: currency,
+                }
+            }],
+            access_token: process.env.META_ACCESS_TOKEN
+        })
+    });
+    console.log(`[WEBHOOK] Meta Purchase event sent for session: ${session.id}`);
+} catch (metaError: any) {
+    console.error('[WEBHOOK] Meta Conversions API error:', metaError.message);
+}
                     
                     // Mark webhook as processed
                     await prisma.webhook_event.update({
